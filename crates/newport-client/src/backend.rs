@@ -5,9 +5,8 @@ mod git;
 use newport_protocol::{
     common::Present,
     desktop,
-    git::{Action, Request as GitRequest},
+    git::{Action, Operation, Request as GitRequest},
 };
-use serde_json::Value;
 use std::{path::PathBuf, time::Duration};
 
 /// The backend is simply not running for these; any other error says what is
@@ -73,6 +72,55 @@ pub struct StashTarget<'a> {
     pub token: &'a str,
     pub reinstate_index: bool,
 }
+/// The snapshot a configuration read replied with.
+pub fn snapshot_reply(
+    reply: desktop::Reply,
+) -> Result<desktop::configuration::Snapshot, crate::request_error::RequestError> {
+    match reply {
+        desktop::Reply::Configuration(reply) => match *reply {
+            desktop::configuration::Reply::Snapshot(snapshot) => Ok(*snapshot),
+            _ => Err("The backend answered a configuration read with another reply.".into()),
+        },
+        _ => Err("The backend answered a configuration read with another reply.".into()),
+    }
+}
+/// The batch an event poll replied with.
+pub fn events_reply(
+    reply: desktop::Reply,
+) -> Result<desktop::events::Batch, crate::request_error::RequestError> {
+    match reply {
+        desktop::Reply::Events(reply) => match *reply {
+            desktop::events::Reply::Poll(batch) => Ok(*batch),
+        },
+        _ => Err("The backend answered an event poll with another reply.".into()),
+    }
+}
+/// The availability a Remote apps status read replied with.
+pub fn availability_reply(
+    reply: desktop::Reply,
+) -> Result<desktop::applications::Availability, crate::request_error::RequestError> {
+    match reply {
+        desktop::Reply::Applications(reply) => match *reply {
+            desktop::applications::Reply::Status(status) => Ok(*status),
+            _ => Err("The backend answered a Remote apps status read with another reply.".into()),
+        },
+        _ => Err("The backend answered a Remote apps status read with another reply.".into()),
+    }
+}
+/// The catalogue a Remote apps catalogue read replied with.
+pub fn catalogue_reply(
+    reply: desktop::Reply,
+) -> Result<newport_protocol::remote_apps::apps::Catalogue, crate::request_error::RequestError> {
+    match reply {
+        desktop::Reply::Applications(reply) => match *reply {
+            desktop::applications::Reply::Catalogue(catalogue) => Ok(*catalogue),
+            _ => {
+                Err("The backend answered a Remote apps catalogue read with another reply.".into())
+            }
+        },
+        _ => Err("The backend answered a Remote apps catalogue read with another reply.".into()),
+    }
+}
 impl Backend {
     /// One bounded request; uncertain responses are never replayed.
     pub fn activate_window(&self) -> Result<(), String> {
@@ -116,6 +164,14 @@ impl Backend {
         .map(drop)
         .map_err(|error| error.to_string())
     }
+    /// The backend's configuration and runtime state, read typed.
+    pub fn configuration_snapshot(
+        &self,
+    ) -> Result<desktop::configuration::Snapshot, crate::request_error::RequestError> {
+        snapshot_reply(self.execute(desktop::Operation::Configuration(Box::new(
+            desktop::configuration::Operation::Snapshot(Box::new(Present {})),
+        )))?)
+    }
     /// Connect to an explicitly selected local backend, without process-global
     /// environment changes. The same bounded IPC contract applies.
     pub fn at_path(path: PathBuf) -> Self {
@@ -133,7 +189,7 @@ impl Backend {
         snapshot: &str,
         action: Action,
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         self.start_git_action(server, repo, snapshot, action, operation)
     }
     pub fn remove_worktree(
@@ -143,7 +199,7 @@ impl Backend {
         snapshot: &str,
         target: (&str, bool),
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         let (name, missing) = target;
         self.start_git_action(
             server,
@@ -160,7 +216,7 @@ impl Backend {
         snapshot: &str,
         target: (&str, &str),
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         let (name, path) = target;
         self.start_git_action(
             server,
@@ -177,7 +233,7 @@ impl Backend {
         snapshot: &str,
         target: crate::git_worktree::CreateTarget<'_>,
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         self.start_git_action(server, repo, snapshot, target.action()?, operation)
     }
     pub fn lock_worktree(
@@ -187,7 +243,7 @@ impl Backend {
         snapshot: &str,
         target: (&str, &str, bool),
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         let (name, reason, unlock) = target;
         self.start_git_action(
             server,
@@ -204,7 +260,7 @@ impl Backend {
         snapshot: &str,
         target: (&str, &str),
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         let (name, oid) = target;
         self.start_git_action(
             server,
@@ -224,7 +280,7 @@ impl Backend {
         snapshot: &str,
         target: (&str, &str, &str),
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         let (name, oid, message) = target;
         let annotation = (!message.is_empty()).then(|| newport_protocol::git::TagAnnotation {
             message: message.into(),
@@ -249,7 +305,7 @@ impl Backend {
         snapshot: &str,
         options: (String, bool, bool),
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         let (message, include_untracked, keep_index) = options;
         self.start_git_action(
             server,
@@ -271,7 +327,7 @@ impl Backend {
         snapshot: &str,
         target: StashTarget<'_>,
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         let index = Some(usize::try_from(target.index).map_err(|_| "Invalid stash index")?);
         let oid = target.oid.into();
         let expected_token = target.token.into();
@@ -303,7 +359,7 @@ impl Backend {
         snapshot: &str,
         target: PushTarget<'_>,
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         self.start_git_action(
             server,
             repo,
@@ -325,7 +381,7 @@ impl Backend {
         snapshot: &str,
         target: (&str, &str, &str),
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         let (remote, token, branch) = target;
         self.start_git_action(
             server,
@@ -346,7 +402,7 @@ impl Backend {
         snapshot: &str,
         target: (&str, &str, &str),
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         let (name, new_name, expected_oid) = target;
         self.start_git_action(
             server,
@@ -367,7 +423,7 @@ impl Backend {
         snapshot: &str,
         target: (&str, &str),
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         let (name, start_oid) = target;
         self.start_git_action(
             server,
@@ -387,7 +443,7 @@ impl Backend {
         snapshot: &str,
         target: (&str, &str),
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         let (branch, expected_oid) = target;
         self.start_git_action(
             server,
@@ -409,7 +465,7 @@ impl Backend {
         snapshot: &str,
         message: &str,
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         self.start_git_action(
             server,
             repo,
@@ -431,7 +487,7 @@ impl Backend {
         entry: &str,
         stage: bool,
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         self.change_index_entries(
             server,
             repo,
@@ -449,7 +505,7 @@ impl Backend {
         hunks: &[String],
         lines: Option<&[String]>,
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         let action = review.action(hunks, lines)?;
         self.dispatch_index_action(server, repo, review.snapshot(), action, operation)
     }
@@ -460,7 +516,7 @@ impl Backend {
         review: &crate::git_discard::Review,
         source: crate::git_discard::Source,
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         self.dispatch_index_action(
             server,
             repo,
@@ -478,7 +534,7 @@ impl Backend {
         entries: &[String],
         stage: bool,
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         if repo.is_empty()
             || snapshot.is_empty()
             || entries.is_empty()
@@ -522,7 +578,7 @@ impl Backend {
         snapshot: &str,
         action: Action,
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         self.start_git_action(server, repo, snapshot, action, operation)
     }
     /// Dispatch exactly once. The caller retains `operation` for explicit recovery
@@ -533,10 +589,10 @@ impl Backend {
         repo: &str,
         remote: &str,
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         let server_id = uuid::Uuid::parse_str(server).map_err(|error| error.to_string())?;
         let detail = self
-            .request_git(
+            .git(
                 server_id,
                 GitRequest::Remote {
                     repo_id: repo.into(),
@@ -545,15 +601,17 @@ impl Backend {
                 false,
             )
             .map_err(|error| error.message)?;
-        if detail["name"].as_str() != Some(remote) {
+        let newport_protocol::git::Reply::Remote(detail) = detail else {
+            return Err("Remote identity changed; refresh before fetching".into());
+        };
+        if detail.name != remote {
             return Err("Remote identity changed; refresh before fetching".into());
         }
-        let token = detail["token"]
-            .as_str()
+        let token = Some(detail.token.as_str())
             .filter(|value| !value.is_empty())
             .ok_or("Remote configuration token is missing")?;
         let status = self
-            .request_git(
+            .git(
                 server_id,
                 GitRequest::Status {
                     repo_id: repo.into(),
@@ -564,8 +622,10 @@ impl Backend {
                 false,
             )
             .map_err(|error| error.message)?;
-        let snapshot = status["snapshot"]
-            .as_str()
+        let newport_protocol::git::Reply::Status(status) = status else {
+            return Err("Repository snapshot is missing".into());
+        };
+        let snapshot = Some(status.snapshot.as_str())
             .filter(|value| !value.is_empty())
             .ok_or("Repository snapshot is missing")?;
         self.start_git_action(
@@ -580,14 +640,10 @@ impl Backend {
             operation,
         )
     }
-    pub fn git_operation(
-        &self,
-        server: &str,
-        operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, String> {
+    pub fn git_operation(&self, server: &str, operation: uuid::Uuid) -> Result<Operation, String> {
         let server = uuid::Uuid::parse_str(server).map_err(|error| error.to_string())?;
-        let value = self
-            .request_git(
+        let reply = self
+            .git(
                 server,
                 GitRequest::Get {
                     operation_id: operation.to_string(),
@@ -595,14 +651,14 @@ impl Backend {
                 false,
             )
             .map_err(|error| error.message)?;
-        crate::git_operation::Operation::decode(value, &operation.to_string())
+        crate::git_operation::confirmed(reply, &operation.to_string())
     }
     pub fn bootstrap(
         &self,
         server: &str,
         creation: RepositoryCreation,
         operation: uuid::Uuid,
-    ) -> Result<crate::git_operation::Operation, crate::git_operation::WriteError> {
+    ) -> Result<Operation, crate::git_operation::WriteError> {
         let request = match creation {
             RepositoryCreation::Init {
                 path,
@@ -632,7 +688,7 @@ impl Backend {
         server: uuid::Uuid,
         name: &str,
         path: newport_protocol::git::Path,
-    ) -> Result<Value, String> {
+    ) -> Result<desktop::preferences::Project, String> {
         use desktop::{git, preferences};
         let name = name.trim();
         if name.is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
@@ -680,24 +736,29 @@ impl Backend {
                 .into_iter()
                 .find(|project| project.path.bytes_b64 == repo.root.bytes_b64)
             {
-                return crate::desktop_result::project(desktop::Reply::Preferences(Box::new(
-                    preferences::Reply::ProjectsSave(Box::new(project)),
-                )))
-                .map_err(|error| error.message);
+                return Ok(project);
             }
-            self.execute_rendered(desktop::Operation::Preferences(Box::new(
-                preferences::Operation::ProjectsSave(Box::new(preferences::ProjectsSaveArgs {
-                    project: preferences::Project {
-                        id: uuid::Uuid::new_v4(),
-                        server,
-                        name: name.into(),
-                        path: repo.root.clone(),
-                    },
-                })),
-            )))
-            .map_err(|error| error.message)
+            let reply = self
+                .execute(desktop::Operation::Preferences(Box::new(
+                    preferences::Operation::ProjectsSave(Box::new(preferences::ProjectsSaveArgs {
+                        project: preferences::Project {
+                            id: uuid::Uuid::new_v4(),
+                            server,
+                            name: name.into(),
+                            path: repo.root.clone(),
+                        },
+                    })),
+                )))
+                .map_err(|error| error.to_string())?;
+            match reply {
+                desktop::Reply::Preferences(reply) => match *reply {
+                    preferences::Reply::ProjectsSave(project) => Ok(*project),
+                    _ => Err("Invalid project save reply".into()),
+                },
+                _ => Err("Invalid project save reply".into()),
+            }
         })();
-        let _ = self.request_git(
+        let _ = self.git(
             server,
             GitRequest::Close {
                 repo_id: repo.repo_id.clone(),
@@ -706,11 +767,9 @@ impl Backend {
         );
         save
     }
-    pub fn release_repository(&self, server: &str, repo: &Value) {
-        if let (Ok(server), Some(repo_id)) =
-            (uuid::Uuid::parse_str(server), repo["repoId"].as_str())
-        {
-            let _ = self.request_git(
+    pub fn release_repository(&self, server: &str, repo_id: &str) {
+        if let Ok(server) = uuid::Uuid::parse_str(server) {
+            let _ = self.git(
                 server,
                 GitRequest::Close {
                     repo_id: repo_id.into(),
@@ -737,7 +796,7 @@ impl Backend {
     pub fn open_lsp(&self, open: crate::lsp::Open) -> Result<exchange::Opened, String> {
         let server = crate::desktop_inputs::identity(open.server_id, "server identity")
             .map_err(|error| error.to_string())?;
-        let expected = crate::desktop_inputs::connection_scope(open.expected_connection)
+        let expected = crate::desktop_inputs::captured(open.expected_connection)
             .map_err(|error| error.to_string())?;
         self.open(
             desktop::stream::Operation::LspOpen(Box::new(desktop::stream::LspOpenArgs {

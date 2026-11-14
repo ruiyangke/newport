@@ -1,36 +1,35 @@
-use super::{ComposeJob, ContainersPanel};
-use crate::containers::tests::{FakeBackend, click, draw, element, fixture, select, settle};
+use super::ContainersPanel;
+use crate::containers::tests::{
+    FakeBackend, cancelled, click, draw, element, fixture, select, settle, started,
+};
 use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px};
 use gpui_kit as gpui;
-use newport_domain::compose::JobState;
-use serde_json::{Value, json};
+use newport_protocol::monitor::compose::{Job, State};
 use std::{thread, time::Duration};
 
-fn job(id: &str, project: &str, state: JobState, output: &str) -> Value {
+fn job(id: &str, project: &str, state: State, output: &str) -> Job {
     let mut start = output
         .len()
         .saturating_sub(newport_protocol::monitor::compose::MAX_OUTPUT);
     while !output.is_char_boundary(start) {
         start += 1;
     }
-    json!(ComposeJob {
+    Job {
         job: id.into(),
         project: project.into(),
         command: format!("docker compose {id}"),
         state,
         started_at: 1_000,
         finished_at: (!state.is_running()).then_some(3_000),
-        exit_code: (!state.is_running()).then_some(if state == JobState::Failed { 17 } else { 0 }),
+        exit_code: (!state.is_running()).then_some(if state == State::Failed { 17 } else { 0 }),
         output: output[start..].into(),
         offset: output.len() as u64,
-    })
+    }
 }
-fn jobs(backend: &FakeBackend, items: &[Value]) {
-    backend.set_compose_jobs(Ok(json!({"jobs": items.iter().cloned().map(|mut value| {
-        value["output"] = json!(""); value["offset"] = json!(0); value
-    }).collect::<Vec<_>>()})));
-    for value in items {
-        backend.set_compose_output(value["job"].as_str().unwrap(), Ok(value.clone()));
+fn jobs(backend: &FakeBackend, items: &[Job]) {
+    backend.set_compose_jobs(Ok(items.to_vec()));
+    for job in items {
+        backend.set_compose_output(&job.job, Ok(job.clone()));
     }
 }
 fn refresh_jobs(panel: &Entity<ContainersPanel>, cx: &mut VisualTestContext) {
@@ -87,10 +86,7 @@ fn button(
 fn hidden_compose_output_defers_projection_until_return(cx: &mut TestAppContext) {
     use std::rc::Rc;
     let (panel, cx, backend) = fixture(cx);
-    jobs(
-        &backend,
-        &[job("live", "stack", JobState::Running, "first\n")],
-    );
+    jobs(&backend, &[job("live", "stack", State::Running, "first\n")]);
     select(&panel, cx, "p:stack");
     refresh_jobs(&panel, cx);
     click(cx, "Activity");
@@ -99,7 +95,7 @@ fn hidden_compose_output_defers_projection_until_return(cx: &mut TestAppContext)
     let previous = panel.read_with(cx, |p, _| p.activity.rows.clone());
     backend.set_compose_output(
         "live",
-        Ok(job("live", "stack", JobState::Running, "first\nsecond\n")),
+        Ok(job("live", "stack", State::Running, "first\nsecond\n")),
     );
     panel.update(cx, |p, _| p.client.retry_job_output());
     for _ in 0..300 {
@@ -112,7 +108,7 @@ fn hidden_compose_output_defers_projection_until_return(cx: &mut TestAppContext)
     }
     panel.read_with(cx, |p, _| {
         assert!(!p.has_pending());
-        assert_eq!(p.client.job_output().unwrap()["output"], "first\nsecond\n");
+        assert_eq!(p.client.job_output().unwrap().output, "first\nsecond\n");
         assert!(
             Rc::ptr_eq(&previous, &p.activity.rows),
             "hidden activity retains its old projection"
@@ -134,7 +130,7 @@ fn short_activity_output_starts_at_top_while_following(cx: &mut TestAppContext) 
     let (panel, cx, backend) = fixture(cx);
     jobs(
         &backend,
-        &[job("live", "stack", JobState::Running, "first\nsecond\n")],
+        &[job("live", "stack", State::Running, "first\nsecond\n")],
     );
     select(&panel, cx, "p:stack");
     refresh_jobs(&panel, cx);
@@ -156,17 +152,12 @@ fn history_stays_project_scoped_preserves_choice_and_falls_back_after_expiry(
     cx: &mut TestAppContext,
 ) {
     let (panel, cx, backend) = fixture(cx);
-    let newest = job("latest", "stack", JobState::Succeeded, "latest output\n");
-    let older = job("older", "stack", JobState::Failed, "older error\n");
+    let newest = job("latest", "stack", State::Succeeded, "latest output\n");
+    let older = job("older", "stack", State::Failed, "older error\n");
     jobs(
         &backend,
         &[
-            job(
-                "foreign",
-                "other",
-                JobState::Running,
-                "secret other project",
-            ),
+            job("foreign", "other", State::Running, "secret other project"),
             newest.clone(),
             older.clone(),
         ],
@@ -183,15 +174,14 @@ fn history_stays_project_scoped_preserves_choice_and_falls_back_after_expiry(
     assert_eq!(output(&panel, cx), "older error");
     let current_label = format!(
         "Current command: docker compose older · {}",
-        newport_domain::compose::job_status(&serde_json::from_value(older.clone()).unwrap(), 3_000)
-            .label
+        newport_domain::compose::job_status(&older, 3_000).label
     );
     assert!(button(cx, &current_label).visible());
     assert!(element(cx, "Copy command output").bounds().size.width > px(0.));
     jobs(
         &backend,
         &[
-            job("newer", "stack", JobState::Succeeded, "newer output"),
+            job("newer", "stack", State::Succeeded, "newer output"),
             newest.clone(),
             older,
         ],
@@ -221,10 +211,10 @@ fn history_and_current_command_share_status_icon_geometry(cx: &mut TestAppContex
     jobs(
         &backend,
         &[
-            job("running", "stack", JobState::Running, "working\n"),
-            job("succeeded", "stack", JobState::Succeeded, "done\n"),
-            job("failed", "stack", JobState::Failed, "failed\n"),
-            job("cancelled", "stack", JobState::Cancelled, "cancelled\n"),
+            job("running", "stack", State::Running, "working\n"),
+            job("succeeded", "stack", State::Succeeded, "done\n"),
+            job("failed", "stack", State::Failed, "failed\n"),
+            job("cancelled", "stack", State::Cancelled, "cancelled\n"),
         ],
     );
     select(&panel, cx, "p:stack");
@@ -278,10 +268,7 @@ fn history_and_current_command_share_status_icon_geometry(cx: &mut TestAppContex
 fn new_output_pill_stays_centered_and_returns_to_tail(cx: &mut TestAppContext) {
     let (panel, cx, backend) = fixture(cx);
     let original = "existing output\n".repeat(120);
-    jobs(
-        &backend,
-        &[job("live", "stack", JobState::Running, &original)],
-    );
+    jobs(&backend, &[job("live", "stack", State::Running, &original)]);
     select(&panel, cx, "p:stack");
     refresh_jobs(&panel, cx);
     click(cx, "Activity");
@@ -296,7 +283,7 @@ fn new_output_pill_stays_centered_and_returns_to_tail(cx: &mut TestAppContext) {
         Ok(job(
             "live",
             "stack",
-            JobState::Running,
+            State::Running,
             &format!("{original}first new line\n"),
         )),
     );
@@ -316,7 +303,7 @@ fn new_output_pill_stays_centered_and_returns_to_tail(cx: &mut TestAppContext) {
         Ok(job(
             "live",
             "stack",
-            JobState::Running,
+            State::Running,
             &format!("{original}first new line\nsecond new line\n"),
         )),
     );
@@ -338,7 +325,7 @@ fn empty_activity_becomes_output_when_the_first_command_arrives(cx: &mut TestApp
     assert!(cx.debug_bounds("compose-output-viewport").is_none());
     jobs(
         &backend,
-        &[job("first", "stack", JobState::Running, "Starting\n")],
+        &[job("first", "stack", State::Running, "Starting\n")],
     );
     refresh_jobs(&panel, cx);
     assert!(cx.debug_bounds("compose-activity-empty").is_none());
@@ -353,8 +340,8 @@ fn loading_retry_and_late_reply_never_replace_another_selection(cx: &mut TestApp
     jobs(
         &backend,
         &[
-            job("latest", "stack", JobState::Succeeded, "latest\n"),
-            job("older", "stack", JobState::Succeeded, "older\n"),
+            job("latest", "stack", State::Succeeded, "latest\n"),
+            job("older", "stack", State::Succeeded, "older\n"),
         ],
     );
     select(&panel, cx, "p:stack");
@@ -384,7 +371,7 @@ fn loading_retry_and_late_reply_never_replace_another_selection(cx: &mut TestApp
     assert!(cx.debug_bounds("compose-activity-output-error").is_some());
     backend.set_compose_output(
         "older",
-        Ok(job("older", "stack", JobState::Succeeded, "older\n")),
+        Ok(job("older", "stack", State::Succeeded, "older\n")),
     );
     click(cx, "Try reading output again");
     settle(&panel, cx);
@@ -395,7 +382,7 @@ fn loading_retry_and_late_reply_never_replace_another_selection(cx: &mut TestApp
     assert!(cx.debug_bounds("compose-activity-jobs-error").is_some());
     jobs(
         &backend,
-        &[job("older", "stack", JobState::Succeeded, "older\n")],
+        &[job("older", "stack", State::Succeeded, "older\n")],
     );
     click(cx, "Try reading history again");
     settle(&panel, cx);
@@ -418,9 +405,9 @@ fn start_opens_its_activity_once_but_never_steals_navigation(cx: &mut TestAppCon
     // correctly invalidate Activity selection, racing the output assertion.
     jobs(
         &backend,
-        &[job("started", "stack", JobState::Running, "Starting web\n")],
+        &[job("started", "stack", State::Running, "Starting web\n")],
     );
-    backend.release_action(json!({"job":"started"}));
+    backend.release_action(started("started"));
     settle(&panel, cx);
     assert_eq!(panel.read_with(cx, |p, _| p.tab), 1);
     assert_eq!(
@@ -437,12 +424,7 @@ fn start_opens_its_activity_once_but_never_steals_navigation(cx: &mut TestAppCon
     assert!(!panel.read_with(cx, |p, _| p.client.can_compose_run("stack")));
     jobs(
         &backend,
-        &[job(
-            "started",
-            "stack",
-            JobState::Succeeded,
-            "Starting web\n",
-        )],
+        &[job("started", "stack", State::Succeeded, "Starting web\n")],
     );
     refresh_jobs(&panel, cx);
     click(cx, "Logs");
@@ -450,7 +432,7 @@ fn start_opens_its_activity_once_but_never_steals_navigation(cx: &mut TestAppCon
     click(cx, "Pull images only");
     wait_for(&panel, cx, || backend.held_actions() == 1);
     panel.update_in(cx, |p, window, cx| p.select("c:cache".into(), window, cx));
-    backend.release_action(json!({"job":"second"}));
+    backend.release_action(started("second"));
     settle(&panel, cx);
     assert_eq!(
         panel.read_with(cx, |p, _| p.selected.clone()),
@@ -477,7 +459,7 @@ fn late_start_respects_manual_tab(cx: &mut TestAppContext, keyboard: bool) {
     }
     assert_eq!(panel.read_with(cx, |p, _| p.tab), 2);
     assert!(panel.read_with(cx, |p, _| p.compose_state.show_activity_for.is_none()));
-    backend.release_action(json!({"job":"late-start"}));
+    backend.release_action(started("late-start"));
     settle(&panel, cx);
     assert_eq!(panel.read_with(cx, |p, _| p.tab), 2);
     assert_eq!(
@@ -508,7 +490,7 @@ fn late_start_does_not_reopen_activity_after_the_page_was_hidden(cx: &mut TestAp
     assert!(panel.read_with(cx, |p, _| p.compose_state.show_activity_for.is_some()));
     panel.update(cx, |p, cx| p.poll(false, cx));
     assert!(panel.read_with(cx, |p, _| p.compose_state.show_activity_for.is_none()));
-    backend.release_action(json!({"job":"hidden-start"}));
+    backend.release_action(started("hidden-start"));
     for _ in 0..300 {
         panel.update(cx, |p, cx| p.poll(false, cx));
         if !panel.read_with(cx, |p, _| p.client.compose_run_pending()) {
@@ -535,7 +517,7 @@ fn cancel_keeps_exact_job_and_stays_pending_until_terminal_output(cx: &mut TestA
     let (panel, cx, backend) = fixture(cx);
     jobs(
         &backend,
-        &[job("running", "stack", JobState::Running, "Building\n")],
+        &[job("running", "stack", State::Running, "Building\n")],
     );
     select(&panel, cx, "p:stack");
     refresh_jobs(&panel, cx);
@@ -547,7 +529,7 @@ fn cancel_keeps_exact_job_and_stays_pending_until_terminal_output(cx: &mut TestA
     assert_eq!(backend.requests("compose_cancel")[0]["job"], "running");
     click(cx, "Cancelling…");
     assert_eq!(backend.count("compose_cancel"), 1);
-    backend.release_action(json!({"ok":true}));
+    backend.release_action(cancelled());
     settle(&panel, cx);
     click(cx, "Cancelling…");
     assert_eq!(backend.count("compose_cancel"), 1);
@@ -556,7 +538,7 @@ fn cancel_keeps_exact_job_and_stays_pending_until_terminal_output(cx: &mut TestA
         Ok(job(
             "running",
             "stack",
-            JobState::Cancelled,
+            State::Cancelled,
             "Building\nStopped\n",
         )),
     );
@@ -565,7 +547,7 @@ fn cancel_keeps_exact_job_and_stays_pending_until_terminal_output(cx: &mut TestA
     assert_eq!(output(&panel, cx), "Building\nStopped");
     assert_eq!(
         panel.read_with(cx, |p, _| p.activity.data.current().unwrap().state),
-        JobState::Cancelled
+        State::Cancelled
     );
     assert!(!panel.read_with(cx, |p, _| p.client.compose_cancelling("running")));
     assert_eq!(panel.read_with(cx, |p, _| p.activity.rows.len()), 2);
@@ -578,8 +560,8 @@ fn view_output_selects_running_command_instead_of_old_history(cx: &mut TestAppCo
     jobs(
         &backend,
         &[
-            job("running", "stack", JobState::Running, "building"),
-            job("older", "stack", JobState::Succeeded, "old"),
+            job("running", "stack", State::Running, "building"),
+            job("older", "stack", State::Succeeded, "old"),
         ],
     );
     select(&panel, cx, "p:stack");
@@ -611,7 +593,7 @@ fn another_pending_cancel_blocks_activation_and_failure_allows_exact_retry(
         .iter_mut()
         .find(|c| c.name == "cache")
         .unwrap()
-        .compose = Some(newport_domain::containers::ComposeLabels {
+        .compose = Some(newport_protocol::monitor::containers::ComposeLabels {
         project: "other".into(),
         service: "cache".into(),
         ..Default::default()
@@ -620,8 +602,8 @@ fn another_pending_cancel_blocks_activation_and_failure_allows_exact_retry(
     jobs(
         &backend,
         &[
-            job("a", "stack", JobState::Running, "A"),
-            job("b", "other", JobState::Running, "B"),
+            job("a", "stack", State::Running, "A"),
+            job("b", "other", State::Running, "B"),
         ],
     );
     panel.update(cx, |p, cx| p.refresh(cx));
@@ -647,7 +629,7 @@ fn another_pending_cancel_blocks_activation_and_failure_allows_exact_retry(
     assert_eq!(output(&panel, cx), "B");
     click(cx, "Cancel");
     assert_eq!(backend.requests("compose_cancel").len(), 1);
-    backend.release_action(json!({"ok":true}));
+    backend.release_action(cancelled());
     settle(&panel, cx);
     click(cx, "Cancel");
     wait_for(&panel, cx, || backend.held_actions() == 1);
@@ -659,7 +641,7 @@ fn another_pending_cancel_blocks_activation_and_failure_allows_exact_retry(
     click(cx, "Cancel");
     wait_for(&panel, cx, || backend.held_actions() == 1);
     assert_eq!(backend.requests("compose_cancel")[2]["job"], "b");
-    backend.release_action(json!({"ok":true}));
+    backend.release_action(cancelled());
     settle(&panel, cx);
     assert_eq!(output(&panel, cx), "B");
     assert_eq!(backend.count("compose_run"), 0);
@@ -673,7 +655,7 @@ fn activity_preserves_literal_unicode_wrap_selection_and_copy(cx: &mut TestAppCo
     let text = format!("{first}\n{second}\n");
     jobs(
         &backend,
-        &[job("unicode", "stack", JobState::Succeeded, &text)],
+        &[job("unicode", "stack", State::Succeeded, &text)],
     );
     select(&panel, cx, "p:stack");
     refresh_jobs(&panel, cx);
@@ -726,7 +708,7 @@ fn bounded_output_keeps_byte_anchor_new_line_count_and_keyboard_scrolling(cx: &m
     let original = line.repeat(6_000);
     jobs(
         &backend,
-        &[job("large", "stack", JobState::Running, &original)],
+        &[job("large", "stack", State::Running, &original)],
     );
     select(&panel, cx, "p:stack");
     refresh_jobs(&panel, cx);
@@ -753,7 +735,7 @@ fn bounded_output_keeps_byte_anchor_new_line_count_and_keyboard_scrolling(cx: &m
         Ok(job(
             "large",
             "stack",
-            JobState::Running,
+            State::Running,
             &format!("{original}{}", line.repeat(1_000)),
         )),
     );
@@ -816,8 +798,8 @@ fn list_completion_finishes_status_when_output_fails_and_notification_opens_exac
     jobs(
         &backend,
         &[
-            job("running", "stack", JobState::Running, "building\n"),
-            job("history", "stack", JobState::Succeeded, "old\n"),
+            job("running", "stack", State::Running, "building\n"),
+            job("history", "stack", State::Succeeded, "old\n"),
         ],
     );
     select(&panel, cx, "p:stack");
@@ -828,7 +810,7 @@ fn list_completion_finishes_status_when_output_fails_and_notification_opens_exac
         receipts.borrow().is_empty(),
         "historical completed jobs must not toast"
     );
-    let finished = job("running", "stack", JobState::Failed, "building\n");
+    let finished = job("running", "stack", State::Failed, "building\n");
     jobs(&backend, &[finished]);
     backend.set_compose_output("running", Err("fixture disconnected".into()));
     refresh_jobs(&panel, cx);
@@ -836,7 +818,7 @@ fn list_completion_finishes_status_when_output_fails_and_notification_opens_exac
     settle(&panel, cx);
     assert_eq!(
         panel.read_with(cx, |p, _| p.activity.data.current().unwrap().state),
-        JobState::Failed
+        State::Failed
     );
     assert_eq!(output(&panel, cx), "building");
     assert_eq!(receipts.borrow().len(), 1);

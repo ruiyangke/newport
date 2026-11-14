@@ -2,7 +2,11 @@
 //! feature replies and terminal events never write connectivity into it.
 use gpui_kit::{App, BorrowAppContext, Context, Global, Subscription};
 pub use newport_domain::connectivity::{Phase, ServerState, Snapshot};
-use std::collections::HashSet;
+use newport_protocol::desktop::configuration;
+use std::{
+    collections::{BTreeMap, HashSet},
+    time::Duration,
+};
 use uuid::Uuid;
 
 #[derive(Default)]
@@ -41,6 +45,94 @@ pub fn publish(snapshot: Snapshot, cx: &mut App) {
     });
 }
 
+/// Each connected server's latest SSH round trip. Kept apart from
+/// [`Connectivity`], so a new reading is never a connection change.
+#[derive(Default)]
+pub struct Latencies(BTreeMap<Uuid, Latency>);
+impl Global for Latencies {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Latency {
+    pub round_trip: Duration,
+    pub speed: Speed,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Speed {
+    #[default]
+    Normal,
+    Slow,
+    VerySlow,
+}
+impl Speed {
+    /// The speed a reading shows after `self`. A slower speed lasts until a
+    /// reading is well under its threshold, so a connection near one doesn't
+    /// flicker between colors.
+    pub fn next(self, round_trip: Duration) -> Self {
+        let ms = round_trip.as_millis();
+        let past =
+            |speed: Self, enter: u128, leave: u128| ms >= if self >= speed { leave } else { enter };
+        if past(Self::VerySlow, 400, 320) {
+            Self::VerySlow
+        } else if past(Self::Slow, 150, 120) {
+            Self::Slow
+        } else {
+            Self::Normal
+        }
+    }
+}
+
+/// Called only by the application host's backend subscription.
+pub fn publish_latencies(round_trips: BTreeMap<Uuid, Duration>, cx: &mut App) {
+    let previous = cx
+        .try_global::<Latencies>()
+        .map(|latencies| latencies.0.clone())
+        .unwrap_or_default();
+    let latencies = round_trips
+        .into_iter()
+        .map(|(id, round_trip)| {
+            let shown = previous.get(&id).map(|l| l.speed).unwrap_or_default();
+            let speed = shown.next(round_trip);
+            (id, Latency { round_trip, speed })
+        })
+        .collect();
+    cx.set_global(Latencies(latencies));
+}
+
+pub fn latency(id: &str, cx: &App) -> Option<Latency> {
+    cx.try_global::<Latencies>()?
+        .0
+        .get(&Uuid::parse_str(id).ok()?)
+        .copied()
+}
+
+/// How the title bar shows a round trip.
+pub fn latency_label(latency: Duration) -> String {
+    match latency.as_millis() {
+        0 => "<1 ms".into(),
+        ms @ 1..1000 => format!("{ms} ms"),
+        _ => format!("{:.1} s", latency.as_secs_f64()),
+    }
+}
+
+/// Notifies an entity when the latency of the server it displays changes.
+pub fn observe_latency<T: 'static>(
+    cx: &mut Context<T>,
+    server_id: impl Fn(&T) -> &str + 'static,
+) -> Subscription {
+    if !cx.has_global::<Latencies>() {
+        cx.set_global(Latencies::default());
+    }
+    let mut previous = None;
+    cx.observe_global::<Latencies>(move |this, cx| {
+        let next = latency(server_id(this), cx);
+        if next != previous {
+            previous = next;
+            cx.notify();
+        }
+    })
+}
+
 pub fn server<'a>(id: &str, cx: &'a App) -> Option<&'a ServerState> {
     cx.try_global::<Connectivity>()?
         .snapshot
@@ -48,27 +140,42 @@ pub fn server<'a>(id: &str, cx: &'a App) -> Option<&'a ServerState> {
         .get(&Uuid::parse_str(id).ok()?)
 }
 
-pub fn scoped<'a>(id: &str, snapshot: &serde_json::Value, cx: &'a App) -> Option<&'a ServerState> {
+/// A server's connectivity, only while the store describes the same backend
+/// instance and connection revision as `snapshot`.
+pub fn scoped<'a>(
+    id: &str,
+    snapshot: Option<&configuration::Snapshot>,
+    cx: &'a App,
+) -> Option<&'a ServerState> {
     let store = cx.try_global::<Connectivity>()?;
-    if snapshot["instanceId"].as_str()? != store.snapshot.instance_id.to_string() {
+    let snapshot = snapshot?;
+    if snapshot.instance_id != store.snapshot.instance_id {
         return None;
     }
-    server(id, cx).filter(|state| {
-        state.connection_revision
-            == snapshot["runtime"]["connectionRevisions"][id]
-                .as_u64()
-                .unwrap_or(0)
-    })
+    let id = Uuid::parse_str(id).ok()?;
+    store
+        .snapshot
+        .servers
+        .get(&id)
+        .filter(|state| state.connection_revision == snapshot.runtime.connection_revision(id))
 }
 
-pub fn for_scope<'a>(scope: &serde_json::Value, cx: &'a App) -> Option<&'a ServerState> {
-    use newport_domain::connection_scope::{instance, revision};
+/// A server's connectivity, only while the store describes the backend
+/// instance and connection revision `scope` was captured at.
+pub fn for_scope<'a>(
+    scope: Option<&configuration::ConnectionScope>,
+    cx: &'a App,
+) -> Option<&'a ServerState> {
+    let scope = scope?;
     let store = cx.try_global::<Connectivity>()?;
-    if instance(scope)? != store.snapshot.instance_id.to_string() {
+    if scope.backend_instance != store.snapshot.instance_id {
         return None;
     }
-    server(scope[0].as_str()?, cx)
-        .filter(|state| state.connection_revision == revision(scope).unwrap_or(0))
+    store
+        .snapshot
+        .servers
+        .get(&scope.settings.server_id)
+        .filter(|state| state.connection_revision == scope.connection_revision)
 }
 
 /// Subscribe once for an entity, scoped to the server it currently displays.
@@ -95,6 +202,32 @@ pub fn observe<T: 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn latency_reads_in_whole_milliseconds() {
+        assert_eq!(latency_label(Duration::from_micros(400)), "<1 ms");
+        assert_eq!(latency_label(Duration::from_micros(23_600)), "23 ms");
+        assert_eq!(latency_label(Duration::from_millis(999)), "999 ms");
+        assert_eq!(latency_label(Duration::from_millis(1_250)), "1.2 s");
+    }
+
+    #[test]
+    fn a_slow_color_lasts_until_readings_are_well_under_its_threshold() {
+        let ms = Duration::from_millis;
+        let mut speed = Speed::Normal;
+        let mut shown = Vec::new();
+        for reading in [149, 150, 130, 119, 400, 330, 319, 100] {
+            speed = speed.next(ms(reading));
+            shown.push(speed);
+        }
+        use Speed::*;
+        assert_eq!(
+            shown,
+            [Normal, Slow, Slow, Normal, VerySlow, VerySlow, Slow, Normal]
+        );
+        assert_eq!(Normal.next(ms(500)), VerySlow);
+        assert_eq!(Normal.next(ms(350)), Slow);
+    }
     use gpui_kit as gpui;
     use gpui_kit::AppContext;
 
@@ -203,15 +336,31 @@ mod tests {
                 cx,
             )
         });
+        use crate::snapshot_fixture as fixture;
         // Reached through a jump host, as every connection field counts.
-        let server = serde_json::json!({"id":id,"sshHost":"h","sshUser":"u","sshPort":22,"proxy":{"jump":"j"}});
-        let snapshot = |revision: u64| serde_json::json!({"instanceId":instance,"runtime":{"connectionRevisions":{id.to_string():revision}}});
-        let scope = newport_domain::connection_scope::connection(&server, &snapshot(3));
+        let server = configuration::Server {
+            proxy: Some(configuration::Proxy::Jump(Box::new(Uuid::new_v4()))),
+            ..fixture::server(id, "Server")
+        };
+        let snapshot = |revision: u64| {
+            let mut snapshot = fixture::snapshot(vec![server.clone()]);
+            snapshot.instance_id = instance;
+            fixture::set(&mut snapshot.runtime.connection_revisions, id, revision);
+            snapshot
+        };
+        let current = snapshot(3);
+        let scope = Some(current.connection_scope(&server));
         assert_eq!(
-            cx.read(|cx| for_scope(&scope, cx).map(|state| state.phase)),
+            cx.read(|cx| for_scope(scope.as_ref(), cx).map(|state| state.phase)),
             Some(Phase::Connected)
         );
-        let stale = newport_domain::connection_scope::connection(&server, &snapshot(2));
-        assert!(cx.read(|cx| for_scope(&stale, cx).is_none()));
+        assert_eq!(
+            cx.read(|cx| scoped(&id.to_string(), Some(&current), cx).map(|state| state.phase)),
+            Some(Phase::Connected)
+        );
+        let stale = snapshot(2);
+        let stale_scope = Some(stale.connection_scope(&server));
+        assert!(cx.read(|cx| for_scope(stale_scope.as_ref(), cx).is_none()));
+        assert!(cx.read(|cx| scoped(&id.to_string(), Some(&stale), cx).is_none()));
     }
 }

@@ -55,7 +55,9 @@ pub enum ClientMessage {
 #[derive(Clone, PartialEq, Eq)]
 pub enum ServerMessage {
     Hello(Hello),
-    Attached { prompted: bool },
+    Attached {
+        prompted: bool,
+    },
     Screen(Bytes),
     Full(Bytes),
     Output(Bytes),
@@ -63,6 +65,12 @@ pub enum ServerMessage {
     Active(bool),
     Failed(common::Error),
     Renamed(String),
+    /// The shell's size: what every attached tab draws it at, whichever
+    /// computer set it.
+    Size {
+        columns: u16,
+        rows: u16,
+    },
 }
 impl fmt::Debug for ClientMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -104,6 +112,11 @@ impl fmt::Debug for ServerMessage {
             Self::Active(value) => f.debug_tuple("Active").field(value).finish(),
             Self::Failed(value) => f.debug_tuple("Failed").field(value).finish(),
             Self::Renamed(_) => f.write_str("Renamed"),
+            Self::Size { columns, rows } => f
+                .debug_struct("Size")
+                .field("columns", columns)
+                .field("rows", rows)
+                .finish(),
         }
     }
 }
@@ -186,6 +199,7 @@ impl ServerMessage {
             Self::Renamed(value) if !name(value, MAX_RENAME) || value.trim() != value => {
                 Err(Invalid("persisted name"))
             }
+            Self::Size { columns, rows } if *columns == 0 || *rows == 0 => Err(Invalid("size")),
             Self::Exit(Exit::Signal(signal)) if !(1..=64).contains(signal) => {
                 Err(Invalid("exit signal"))
             }

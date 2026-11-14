@@ -15,6 +15,7 @@ impl Convert for crate::desktop::terminal::HeldShell {
                     .as_ref()
                     .map(|v| -> Result<_, Error> { Ok(v.clone()) })
                     .transpose()?,
+                agent: self.agent.clone(),
                 creator: Some(self.creator.to_proto()?),
                 attached: self
                     .attached
@@ -37,6 +38,7 @@ impl Convert for crate::desktop::terminal::HeldShell {
                 .title
                 .map(|v| -> Result<_, Error> { Ok(v) })
                 .transpose()?,
+            agent: value.agent,
             creator: <crate::terminal::Computer as Convert>::from_proto(required(value.creator)?)?,
             attached: value
                 .attached

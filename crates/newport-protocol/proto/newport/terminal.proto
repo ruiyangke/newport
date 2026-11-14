@@ -21,6 +21,7 @@ message Holder {
   Computer creator = 9;
   repeated Attached attached = 10;
   Exit exited = 11;
+  optional string agent = 12;
 }
 message Start {
   string id = 1;

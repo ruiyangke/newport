@@ -1,10 +1,11 @@
 use crate::page_perf_tests::{PageHost, frame};
 use crate::project_library_state::typed_fixture::*;
 use crate::project_library_state::typed_test_owner as owner;
+use crate::snapshot_fixture::{self as fixture, SERVER};
 use crate::{Newport, Page, theme};
 use gpui::{AppContext, Entity, TestAppContext, VisualTestContext, px, size};
 use gpui_kit as gpui;
-use serde_json::json;
+use newport_protocol::desktop::configuration::{BuildRelation, InstallationStatus, RuntimeStatus};
 
 fn fixture(cx: &mut TestAppContext) -> (Entity<Newport>, &mut VisualTestContext) {
     cx.update(|cx| {
@@ -17,8 +18,14 @@ fn fixture(cx: &mut TestAppContext) -> (Entity<Newport>, &mut VisualTestContext)
         let entity = cx.new(|cx| {
             let mut v = owner(window, cx);
             v.page = Page::Integration;
-            v.snapshot["runtime"]["agentStatus"][TYPED_SERVER] =
-                json!({"installed":true,"installedHash":"a".repeat(64)});
+            fixture::set(
+                &mut v.snapshot_mut().runtime.agent_status,
+                SERVER,
+                InstallationStatus {
+                    installed_hash: Some("a".repeat(64)),
+                    ..fixture::installed(true)
+                },
+            );
             v
         });
         view = Some(entity.clone());
@@ -56,14 +63,24 @@ fn click(visual: &mut VisualTestContext, label: &str) {
 fn the_active_bundled_runtime_outweighs_a_failed_default_agent_check(cx: &mut TestAppContext) {
     let (view, visual) = fixture(cx);
     view.update(visual, |v, cx| {
-        v.snapshot["runtime"]["agentStatus"][TYPED_SERVER] = json!({
-            "installed":true,"installedHash":"a".repeat(64),
-            "bundledHash":"b".repeat(64),"buildRelation":"older",
-            "updateAvailable":true,"error":"The default product cannot be verified."
-        });
-        v.snapshot["runtime"]["agentRuntime"][TYPED_SERVER] = json!({
-            "status":"ready","hello":{"buildSha256":"b".repeat(64)}
-        });
+        let runtime = &mut v.snapshot_mut().runtime;
+        fixture::set(
+            &mut runtime.agent_status,
+            SERVER,
+            InstallationStatus {
+                installed_hash: Some("a".repeat(64)),
+                bundled_hash: Some("b".repeat(64)),
+                build_relation: BuildRelation::Older,
+                update_available: Some(true),
+                error: Some("The default product cannot be verified.".into()),
+                ..fixture::installed(true)
+            },
+        );
+        fixture::set(
+            &mut runtime.agent_runtime,
+            SERVER,
+            fixture::agent_runtime(RuntimeStatus::Ready, Some(fixture::hello(&"b".repeat(64)))),
+        );
         cx.notify();
     });
     frame(visual);
@@ -83,15 +100,19 @@ fn maintenance_is_disclosed_and_the_primary_action_follows_the_observed_state(
     assert!(!has(visual, "Reinstall"));
     assert!(!has(visual, "Uninstall…"));
     view.update(visual, |v, cx| {
-        let status = &mut v.snapshot["runtime"]["agentStatus"][TYPED_SERVER];
-        status["updateAvailable"] = json!(true);
-        status["buildRelation"] = json!("older");
+        let status = fixture::row_mut(&mut v.snapshot_mut().runtime.agent_status, SERVER);
+        status.update_available = Some(true);
+        status.build_relation = BuildRelation::Older;
         cx.notify();
     });
     frame(visual);
     assert!(has(visual, "Update now"));
     view.update(visual, |v, cx| {
-        v.snapshot["runtime"]["agentStatus"][TYPED_SERVER] = json!({"installed":false});
+        fixture::set(
+            &mut v.snapshot_mut().runtime.agent_status,
+            SERVER,
+            fixture::installed(false),
+        );
         cx.notify();
     });
     frame(visual);
@@ -105,11 +126,13 @@ fn maintenance_is_disclosed_and_the_primary_action_follows_the_observed_state(
 fn a_server_that_skipped_setup_says_so_whatever_is_on_it(cx: &mut TestAppContext) {
     let (view, visual) = fixture(cx);
     view.update(visual, |v, cx| {
-        let server = &mut v.snapshot["config"]["servers"][0];
-        server["setupComplete"] = json!(false);
-        server["clipboardEnabled"] = json!(true);
+        let snapshot = v.snapshot_mut();
+        let server = &mut snapshot.config.servers[0];
+        server.setup_complete = false;
+        server.clipboard_enabled = true;
         // Another build left on the server is not this desktop's Needle.
-        v.snapshot["runtime"]["agentStatus"][TYPED_SERVER]["buildRelation"] = json!("different");
+        fixture::row_mut(&mut snapshot.runtime.agent_status, SERVER).build_relation =
+            BuildRelation::Different;
         cx.notify();
     });
     frame(visual);
@@ -132,12 +155,16 @@ fn details_distinguish_the_running_and_default_build_and_reset_for_a_changed_con
 ) {
     let (view, visual) = fixture(cx);
     view.update(visual, |v, cx| {
-        let status = &mut v.snapshot["runtime"]["agentStatus"][TYPED_SERVER];
-        status["bundledHash"] = json!("b".repeat(64));
-        status["installedVersion"] = json!("0.7.0");
-        status["bundledVersion"] = json!("0.6.4");
-        v.snapshot["runtime"]["agentRuntime"][TYPED_SERVER] =
-            json!({"status":"ready","hello":{"buildSha256":"b".repeat(64)}});
+        let runtime = &mut v.snapshot_mut().runtime;
+        let status = fixture::row_mut(&mut runtime.agent_status, SERVER);
+        status.bundled_hash = Some("b".repeat(64));
+        status.installed_version = Some("0.7.0".into());
+        status.bundled_version = Some("0.6.4".into());
+        fixture::set(
+            &mut runtime.agent_runtime,
+            SERVER,
+            fixture::agent_runtime(RuntimeStatus::Ready, Some(fixture::hello(&"b".repeat(64)))),
+        );
         cx.notify();
     });
     frame(visual);
@@ -151,7 +178,7 @@ fn details_distinguish_the_running_and_default_build_and_reset_for_a_changed_con
         &format!("Newport: {}", crate::about::version())
     ));
     view.update(visual, |v, cx| {
-        v.snapshot["config"]["servers"][0]["sshPort"] = json!(2222);
+        v.snapshot_mut().config.servers[0].ssh_port = 2222;
         cx.notify();
     });
     frame(visual);
@@ -178,7 +205,7 @@ fn an_open_maintenance_menu_cannot_act_on_a_replaced_connection(cx: &mut TestApp
     view.update(visual, |v, _| v.work = work.into());
     click(visual, "More Needle actions");
     view.update(visual, |v, cx| {
-        v.snapshot["config"]["servers"][0]["sshPort"] = json!(2222);
+        v.snapshot_mut().config.servers[0].ssh_port = 2222;
         cx.notify();
     });
     frame(visual);
@@ -224,7 +251,7 @@ fn a_changed_connection_cancels_the_confirmation(cx: &mut TestAppContext) {
     view.update(visual, |v, _| v.work = work.into());
     click(visual, "Uninstall…");
     view.update(visual, |v, cx| {
-        v.snapshot["config"]["servers"][0]["sshPort"] = json!(2222);
+        v.snapshot_mut().config.servers[0].ssh_port = 2222;
         cx.notify();
     });
     frame(visual);
@@ -242,17 +269,17 @@ fn uninstalling_brings_back_a_setup_finished_in_this_window(cx: &mut TestAppCont
     view.update(visual, |v, _| {
         v.work = work.into();
         v.page = Page::Overview;
-        v.snapshot["config"]["servers"][0]["setupComplete"] = json!(false);
+        v.snapshot_mut().config.servers[0].setup_complete = false;
         v.poll_setup();
         v.setup_flow.as_mut().unwrap().dismissed = true;
-        v.snapshot["config"]["servers"][0]["setupComplete"] = json!(true);
+        v.snapshot_mut().config.servers[0].setup_complete = true;
         v.page = Page::Integration;
     });
     frame(visual);
     click(visual, "Uninstall…");
     click(visual, "Uninstall");
     view.update(visual, |v, cx| {
-        v.snapshot["config"]["servers"][0]["setupComplete"] = json!(false);
+        v.snapshot_mut().config.servers[0].setup_complete = false;
         cx.notify();
     });
     frame(visual);

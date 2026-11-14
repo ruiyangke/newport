@@ -1,0 +1,18 @@
+gpui-component 0.8.1
+Upstream: https://github.com/longbridge/gpui-kit
+License: Apache-2.0; the upstream LICENSE-APACHE is distributed with gpui-component.
+
+Newport modifies gpui-component for key event constructors for GPUI's added key
+fields, dialog identity and focus restoration, menu focus, choices tracked by
+value, explicit control sizes, exact text selection copies and the search
+panel's first keystroke. The changed files are src/attachment.rs,
+src/button/button.rs, src/button/button_group.rs,
+src/button/dropdown_button.rs, src/button/toggle.rs, src/carousel/carousel.rs,
+src/checkbox.rs, src/combobox.rs, src/input/editor.rs, src/input/input.rs,
+src/input/overlay.rs, src/input/textarea.rs, src/lib.rs, src/list/list.rs,
+src/menu/dropdown_menu.rs, src/menu/popup_menu.rs, src/pagination.rs,
+src/questionnaire/components.rs, src/root.rs, src/searchable_list/adapter.rs,
+src/searchable_list/state.rs, src/select.rs, src/switch.rs, src/tab/tab.rs,
+src/tab/tab_bar.rs, src/window_ext.rs and
+tests/integration/controlled_change_callbacks.rs. All other published package
+files remain unchanged.

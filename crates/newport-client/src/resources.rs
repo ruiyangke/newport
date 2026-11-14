@@ -2,8 +2,8 @@
 //!
 //! Generations prevent late results from replacing a newer selection. Refreshes
 //! retain the last successful value while tracking manual activity separately
-//! from background reads.
-use serde_json::Value;
+//! from background reads. Each key's owner keeps its typed data; a row tracks
+//! only whether that data is shown and when it changed.
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -23,7 +23,6 @@ pub struct QueryStatus {
 
 #[derive(Default)]
 pub struct Resource {
-    pub value: Value,
     pub error: Option<String>,
     /// Exact protocol code, never inferred from a message or transport error.
     pub error_code: Option<String>,
@@ -50,7 +49,9 @@ pub struct Resource {
     poll_checked_at: Option<Instant>,
     generation: u64,
     presentation: Option<Presentation>,
-    external_value: bool,
+    /// The owner shows data for this key; an acknowledgement settles without.
+    holds_data: bool,
+    git: Option<newport_protocol::git::Reply>,
 }
 
 #[derive(PartialEq)]
@@ -68,7 +69,11 @@ struct Presentation {
 
 impl Resource {
     pub fn has_value(&self) -> bool {
-        self.external_value || !self.value.is_null()
+        self.holds_data
+    }
+    /// The decoded Git reply this read last accepted.
+    pub fn git(&self) -> Option<&newport_protocol::git::Reply> {
+        self.git.as_ref()
     }
     /// Cached background reads do not replace content with a loading state.
     /// Explicit refreshes and initial reads still expose their activity.
@@ -88,12 +93,71 @@ impl Resource {
                 .is_some_and(|started| now.saturating_duration_since(started) >= PLACEHOLDER_DELAY)
     }
 
-    /// Settle a read whose generation has already been validated by its owner.
-    /// Completion identity always advances, even when presentation does not.
-    pub(crate) fn finish_read(
+    /// Settle an acknowledgement, which carries no data, under a generation
+    /// its owner has already validated. Completion identity always advances,
+    /// even when presentation does not.
+    fn finish_acknowledged(
         &mut self,
         generation: u64,
-        result: Result<Value, String>,
+        result: Result<(), String>,
+        now: Instant,
+        error_code: Option<String>,
+    ) {
+        self.settle(
+            generation,
+            result.map(|()| {
+                move |row: &mut Self| {
+                    if row.holds_data || row.updated_at.is_none() {
+                        row.data_revision = generation;
+                    }
+                    row.holds_data = false;
+                    row.git = None;
+                    row.revision = generation;
+                }
+            }),
+            now,
+            error_code,
+        );
+    }
+
+    /// Settle a read whose data its owner keeps. `Ok` says whether that data
+    /// changed.
+    pub(crate) fn finish_owned(
+        &mut self,
+        generation: u64,
+        result: Result<bool, String>,
+        now: Instant,
+    ) {
+        self.finish_owned_with_code(generation, result, now, None);
+    }
+
+    fn finish_owned_with_code(
+        &mut self,
+        generation: u64,
+        result: Result<bool, String>,
+        now: Instant,
+        error_code: Option<String>,
+    ) {
+        self.settle(
+            generation,
+            result.map(|changed| {
+                move |row: &mut Self| {
+                    if changed || !row.holds_data || row.updated_at.is_none() {
+                        row.data_revision = generation;
+                    }
+                    row.holds_data = true;
+                    row.revision = generation;
+                }
+            }),
+            now,
+            error_code,
+        );
+    }
+
+    fn settle(
+        &mut self,
+        generation: u64,
+        result: Result<impl FnOnce(&mut Self), String>,
         now: Instant,
         error_code: Option<String>,
     ) {
@@ -105,8 +169,8 @@ impl Resource {
         self.poll_checked_at = None;
         self.error_code = error_code;
         match result {
-            Ok(value) => {
-                self.set_value(value, generation);
+            Ok(accept) => {
+                accept(self);
                 self.updated_at = Some(now);
                 self.error = None;
             }
@@ -135,15 +199,6 @@ impl Resource {
             self.presentation = Some(next);
         }
     }
-    pub fn set_value(&mut self, value: Value, revision: u64) {
-        if self.external_value || self.updated_at.is_none() || self.value != value {
-            self.value = value;
-            self.data_revision = revision;
-        }
-        self.external_value = false;
-        self.revision = revision;
-    }
-
     /// Whether a settled resource can be refreshed by a visible page's timer.
     /// Initial reads are started explicitly, not by the polling timer.
     pub fn poll_due(&self, now: Instant, interval: Duration, visible: bool) -> bool {
@@ -339,14 +394,17 @@ impl Resources {
             .values()
             .any(|row| row.placeholder_due_at(now) && !row.placeholder_due_at(since))
     }
-    pub fn complete(&mut self, key: &str, generation: u64, result: Result<Value, String>) -> bool {
+    /// Settles an acknowledgement, or a read that failed. An acknowledgement
+    /// shows no data.
+    pub fn complete(&mut self, key: &str, generation: u64, result: Result<(), String>) -> bool {
         self.complete_at(key, generation, result, Instant::now())
     }
+    /// [`Self::complete`], keeping a failure's protocol code.
     pub fn complete_detailed(
         &mut self,
         key: &str,
         generation: u64,
-        result: Result<Value, crate::request_error::RequestError>,
+        result: Result<(), crate::request_error::RequestError>,
     ) -> bool {
         let code = result.as_ref().err().and_then(|error| error.code.clone());
         self.complete_at_with_code(
@@ -356,6 +414,65 @@ impl Resources {
             Instant::now(),
             code,
         )
+    }
+
+    /// Settles a read whose typed data its owner keeps. `Ok` says whether
+    /// that data changed; a failed read keeps the data shown. The owner
+    /// replaces its data only when this accepts the generation.
+    pub fn complete_owned(
+        &mut self,
+        key: &str,
+        generation: u64,
+        result: Result<bool, crate::request_error::RequestError>,
+    ) -> bool {
+        self.complete_owned_at(key, generation, result, Instant::now())
+    }
+    fn complete_owned_at(
+        &mut self,
+        key: &str,
+        generation: u64,
+        result: Result<bool, crate::request_error::RequestError>,
+        now: Instant,
+    ) -> bool {
+        let Some(row) = self.rows.get_mut(key) else {
+            return false;
+        };
+        if !row.pending || row.generation != generation {
+            return false;
+        }
+        let code = result.as_ref().err().and_then(|error| error.code.clone());
+        row.finish_owned_with_code(generation, result.map_err(|error| error.message), now, code);
+        true
+    }
+
+    /// Settles a Git read, keeping its decoded reply with this key's request
+    /// state so suspended views carry it with them. A failed read keeps the
+    /// reply shown.
+    pub fn complete_git(
+        &mut self,
+        key: &str,
+        generation: u64,
+        result: Result<newport_protocol::git::Reply, crate::request_error::RequestError>,
+    ) -> bool {
+        let Some(row) = self.rows.get_mut(key) else {
+            return false;
+        };
+        if !row.pending || row.generation != generation {
+            return false;
+        }
+        let code = result.as_ref().err().and_then(|error| error.code.clone());
+        let (reply, result) = match result {
+            Ok(reply) => {
+                let changed = row.git.as_ref() != Some(&reply);
+                (Some(reply), Ok(changed))
+            }
+            Err(error) => (None, Err(error.message)),
+        };
+        row.finish_owned_with_code(generation, result, Instant::now(), code);
+        if let Some(reply) = reply {
+            row.git = Some(reply);
+        }
+        true
     }
 
     /// Admit status for feature-owned typed data. The owner replaces its data
@@ -390,16 +507,11 @@ impl Resources {
             .error
             .as_ref()
             .and_then(|error| error.code.clone());
-        if data_changed
-            || row.external_value != has_data
-            || !row.value.is_null()
-            || row.presentation.is_none()
-        {
+        if data_changed || row.holds_data != has_data || row.presentation.is_none() {
             row.data_revision = generation;
             row.revision = generation;
         }
-        row.value = Value::Null;
-        row.external_value = has_data;
+        row.holds_data = has_data;
         row.updated_at = has_data
             .then_some(observation.updated_at)
             .flatten()
@@ -421,7 +533,7 @@ impl Resources {
         &mut self,
         key: &str,
         generation: u64,
-        result: Result<Value, String>,
+        result: Result<(), String>,
         now: Instant,
     ) -> bool {
         self.complete_at_with_code(key, generation, result, now, None)
@@ -430,7 +542,7 @@ impl Resources {
         &mut self,
         key: &str,
         generation: u64,
-        result: Result<Value, String>,
+        result: Result<(), String>,
         now: Instant,
         error_code: Option<String>,
     ) -> bool {
@@ -440,7 +552,7 @@ impl Resources {
         if !row.pending || row.generation != generation {
             return false;
         }
-        row.finish_read(generation, result, now, error_code);
+        row.finish_acknowledged(generation, result, now, error_code);
         true
     }
     pub fn clear(&mut self) {
@@ -468,7 +580,45 @@ impl Resources {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+
+    #[test]
+    fn an_owned_read_settles_only_its_current_generation_and_keeps_error_codes() {
+        let mut resources = Resources::default();
+        let stale = resources.begin("owned").unwrap();
+        resources.invalidate("owned");
+        let current = resources.begin("owned").unwrap();
+        assert!(!resources.complete_owned("owned", stale, Ok(true)));
+        assert!(resources.complete_owned("owned", current, Ok(true)));
+        assert!(resources.get("owned").unwrap().has_value());
+        let failed = resources.begin("owned").unwrap();
+        let error = crate::request_error::RequestError {
+            message: "Offline".into(),
+            code: Some("transport".into()),
+        };
+        assert!(resources.complete_owned("owned", failed, Err(error)));
+        let row = resources.get("owned").unwrap();
+        assert!(row.has_value(), "a failed read keeps the data shown");
+        assert_eq!(row.error_code.as_deref(), Some("transport"));
+        assert_eq!(row.data_revision, current);
+    }
+
+    #[test]
+    fn owned_data_moves_its_revision_only_when_it_changes() {
+        let now = Instant::now();
+        let mut row = Resource::default();
+        row.finish_owned(1, Ok(false), now);
+        assert!(row.has_value());
+        assert_eq!(row.data_revision, 1, "the first settled read is new data");
+        row.finish_owned(2, Ok(false), now);
+        assert_eq!(row.data_revision, 1, "unchanged data keeps its revision");
+        assert_eq!(row.revision, 2);
+        row.finish_owned(3, Ok(true), now);
+        assert_eq!(row.data_revision, 3);
+        row.finish_owned(4, Err("Offline".into()), now);
+        assert!(row.has_value(), "a failed read keeps the data shown");
+        assert_eq!(row.error.as_deref(), Some("Offline"));
+        assert_eq!(row.data_revision, 3);
+    }
 
     #[test]
     fn a_placeholder_falls_due_once_after_the_delay_and_never_for_a_settled_read() {
@@ -481,7 +631,7 @@ mod tests {
         assert!(!resources.placeholder_became_due(started, early));
         assert!(resources.placeholder_became_due(early, due));
         assert!(!resources.placeholder_became_due(due, due + PLACEHOLDER_DELAY));
-        resources.complete("list", generation, Ok(json!([])));
+        resources.complete_owned("list", generation, Ok(true));
         assert!(!resources.get("list").unwrap().placeholder_due_at(due));
         assert!(!resources.placeholder_became_due(early, due));
         resources.begin_refresh("list", false).unwrap();
@@ -494,7 +644,7 @@ mod tests {
         let mut resources = Resources::default();
         let key = "project-status:one";
         let generation = resources.begin(key).unwrap();
-        resources.complete(key, generation, Ok(json!({"changes":2})));
+        resources.complete_owned(key, generation, Ok(true));
         let generation = resources.begin(key).unwrap();
         resources.complete(key, generation, Err("Offline".into()));
         let pending = resources.begin_refresh(key, false).unwrap();
@@ -505,54 +655,49 @@ mod tests {
         assert!(resources.get("repository").unwrap().pending);
         resources.restore(saved);
         let row = resources.get(key).unwrap();
-        assert_eq!(row.value, json!({"changes":2}));
+        assert!(row.has_value());
         assert_eq!(row.error.as_deref(), Some("Offline"));
         assert!(!row.pending);
-        assert!(!resources.complete(key, pending, Ok(json!({"changes":99}))));
-        assert!(resources.complete("repository", unrelated, Ok(json!({}))));
+        assert!(!resources.complete_owned(key, pending, Ok(true)));
+        assert!(resources.complete_owned("repository", unrelated, Ok(true)));
     }
 
     #[test]
     fn fence_keeps_the_displayed_value_but_rejects_the_retired_read() {
         let mut resources = Resources::default();
         let generation = resources.begin("snapshot").unwrap();
-        resources.complete("snapshot", generation, Ok(json!({"revision":1})));
+        resources.complete_owned("snapshot", generation, Ok(true));
         let stale = resources.begin_refresh("snapshot", false).unwrap();
         resources.fence("snapshot");
         let row = resources.get("snapshot").unwrap();
-        assert_eq!(row.value, json!({"revision":1}));
+        assert!(row.has_value());
+        assert_eq!(row.data_revision, generation);
         assert!(!row.pending);
-        assert!(!resources.complete("snapshot", stale, Ok(json!({"revision":0}))));
+        assert!(!resources.complete_owned("snapshot", stale, Ok(true)));
         let fresh = resources.begin_refresh("snapshot", false).unwrap();
         assert!(fresh > stale);
-        assert_eq!(
-            resources.get("snapshot").unwrap().value,
-            json!({"revision":1})
-        );
-        assert!(resources.complete("snapshot", fresh, Ok(json!({"revision":2}))));
+        assert_eq!(resources.get("snapshot").unwrap().data_revision, generation);
+        assert!(resources.complete_owned("snapshot", fresh, Ok(true)));
 
         resources.fence("missing");
         assert!(resources.get("missing").is_none());
         let status = resources.begin("project-status:a").unwrap();
-        resources.complete("project-status:a", status, Ok(json!({"changes":1})));
+        resources.complete_owned("project-status:a", status, Ok(true));
         resources.fence_prefix("project-status:");
-        assert_eq!(
-            resources.get("project-status:a").unwrap().value,
-            json!({"changes":1})
-        );
+        assert!(resources.get("project-status:a").unwrap().has_value());
     }
 
     #[test]
     fn presentation_tracks_errors_and_manual_completion_without_redrawing_identical_reads() {
         let mut resources = Resources::default();
         let first = resources.begin("snapshot").unwrap();
-        resources.complete("snapshot", first, Ok(json!({"ready":true})));
+        resources.complete_owned("snapshot", first, Ok(true));
         assert_eq!(
             resources.get("snapshot").unwrap().presentation_revision,
             first
         );
         let second = resources.begin("snapshot").unwrap();
-        resources.complete("snapshot", second, Ok(json!({"ready":true})));
+        resources.complete_owned("snapshot", second, Ok(false));
         assert_eq!(
             resources.get("snapshot").unwrap().presentation_revision,
             first
@@ -571,13 +716,13 @@ mod tests {
             failed
         );
         let recovered = resources.begin_refresh("snapshot", false).unwrap();
-        resources.complete("snapshot", recovered, Ok(json!({"ready":true})));
+        resources.complete_owned("snapshot", recovered, Ok(false));
         assert_eq!(
             resources.get("snapshot").unwrap().presentation_revision,
             recovered
         );
         let manual = resources.begin_manual("snapshot").unwrap();
-        resources.complete("snapshot", manual, Ok(json!({"ready":true})));
+        resources.complete_owned("snapshot", manual, Ok(false));
         assert_eq!(
             resources.get("snapshot").unwrap().presentation_revision,
             manual
@@ -627,15 +772,15 @@ mod tests {
     fn identical_results_keep_projection_identity_but_advance_completion() {
         let mut resources = Resources::default();
         let first = resources.begin("snapshot").unwrap();
-        resources.complete("snapshot", first, Ok(json!([1, 2, 3])));
+        resources.complete_owned("snapshot", first, Ok(true));
         let previous = resources.get("snapshot").unwrap().data_revision;
         let second = resources.begin("snapshot").unwrap();
-        resources.complete("snapshot", second, Ok(json!([1, 2, 3])));
+        resources.complete_owned("snapshot", second, Ok(false));
         let row = resources.get("snapshot").unwrap();
         assert_eq!(row.data_revision, previous);
         assert_eq!(row.revision, second);
         let third = resources.begin("snapshot").unwrap();
-        resources.complete("snapshot", third, Ok(json!([1, 2, 4])));
+        resources.complete_owned("snapshot", third, Ok(true));
         assert_eq!(resources.get("snapshot").unwrap().data_revision, third);
     }
 
@@ -649,7 +794,6 @@ mod tests {
         let first = resources.begin("page").unwrap();
         assert!(resources.complete_query("page", first, &reading, true, true));
         assert!(resources.get("page").unwrap().has_value());
-        assert!(resources.get("page").unwrap().value.is_null());
         let refetch = QueryStatus {
             fetching: true,
             ..QueryStatus::default()
@@ -734,9 +878,9 @@ mod tests {
         let receipts = state.begin_manual("git-receipts").unwrap();
         let log = state.begin("git-log").unwrap();
         let list = state.begin("git-list").unwrap();
-        state.complete("git-list", list, Ok(json!(["main"])));
+        state.complete_owned("git-list", list, Ok(true));
         let descendant = state.begin("git-log-events").unwrap();
-        state.complete("git-log-events", descendant, Ok(json!("view-local")));
+        state.complete_owned("git-log-events", descendant, Ok(true));
 
         let group = state.take_prefix_except("git-", &["git-receipts", "git-log"]);
         assert!(!group.had_pending(), "excluded reads were not suspended");
@@ -748,16 +892,16 @@ mod tests {
             state.get("git-log-events").is_none(),
             "exclusions match exact keys only"
         );
-        assert!(state.complete("git-receipts", receipts, Ok(json!(["receipt"]))));
-        assert!(state.complete("git-log", log, Ok(json!("shared log"))));
+        assert!(state.complete_owned("git-receipts", receipts, Ok(true)));
+        assert!(state.complete_owned("git-log", log, Ok(true)));
 
         state.restore(group);
-        assert_eq!(state.get("git-receipts").unwrap().value, json!(["receipt"]));
-        assert_eq!(state.get("git-log").unwrap().value, json!("shared log"));
-        assert_eq!(state.get("git-list").unwrap().value, json!(["main"]));
+        assert_eq!(state.get("git-receipts").unwrap().data_revision, receipts);
+        assert_eq!(state.get("git-log").unwrap().data_revision, log);
+        assert_eq!(state.get("git-list").unwrap().data_revision, list);
         assert_eq!(
-            state.get("git-log-events").unwrap().value,
-            json!("view-local")
+            state.get("git-log-events").unwrap().data_revision,
+            descendant
         );
     }
 
@@ -765,7 +909,7 @@ mod tests {
     fn suspended_prefix_drops_pending_reads_and_preserves_unrelated_resources() {
         let mut state = Resources::default();
         let listed = state.begin("git-list").unwrap();
-        state.complete("git-list", listed, Ok(json!(["main"])));
+        state.complete_owned("git-list", listed, Ok(true));
         let pending = state.begin_manual("git-details").unwrap();
         let refreshing = state.begin_manual("git-list").unwrap();
         let shell = state.begin("snapshot").unwrap();
@@ -777,7 +921,7 @@ mod tests {
         assert!(state.get("git-details").is_none());
         assert!(state.get("snapshot").unwrap().pending);
         assert!(state.get("integration:server").unwrap().pending);
-        assert!(!state.complete("git-details", pending, Ok(json!("late"))));
+        assert!(!state.complete_owned("git-details", pending, Ok(true)));
         state.restore(group);
         assert!(
             state.get("git-list").is_none(),
@@ -787,10 +931,10 @@ mod tests {
 
         let next = state.begin("git-list").unwrap();
         assert!(next > other);
-        assert!(!state.complete("git-list", refreshing, Ok(json!("late refresh"))));
-        assert!(state.complete("snapshot", shell, Ok(json!("current shell"))));
-        assert!(state.complete("integration:server", other, Ok(json!("completed"))));
-        assert!(state.complete("git-list", next, Ok(json!(["main", "topic"]))));
+        assert!(!state.complete_owned("git-list", refreshing, Ok(true)));
+        assert!(state.complete_owned("snapshot", shell, Ok(true)));
+        assert!(state.complete_owned("integration:server", other, Ok(true)));
+        assert!(state.complete_owned("git-list", next, Ok(true)));
     }
 
     #[test]
@@ -798,9 +942,9 @@ mod tests {
         let mut state = Resources::default();
         let initial = Instant::now();
         let successful = state.begin("git-list").unwrap();
-        state.complete_at("git-list", successful, Ok(json!(["main"])), initial);
+        state.complete_owned_at("git-list", successful, Ok(true), initial);
         let cached = state.begin("git-status").unwrap();
-        state.complete_at("git-status", cached, Ok(json!({"clean":true})), initial);
+        state.complete_owned_at("git-status", cached, Ok(true), initial);
         let failed_at = initial + Duration::from_secs(10);
         let failed = state.begin_manual("git-status").unwrap();
         state.complete_at("git-status", failed, Err("offline".into()), failed_at);
@@ -818,7 +962,7 @@ mod tests {
         assert!(!group.had_pending());
         state.restore(group);
         let list = state.get("git-list").unwrap();
-        assert_eq!(list.value, json!(["main"]));
+        assert!(list.has_value());
         assert_eq!(list.error, None);
         assert_eq!(list.revision, successful);
         assert_eq!(list.updated_at, Some(initial));
@@ -826,18 +970,18 @@ mod tests {
         assert_eq!(list.poll_checked_at, Some(poll_checked));
         assert!(!list.pending && !list.manual_pending);
         let status = state.get("git-status").unwrap();
-        assert_eq!(status.value, json!({"clean":true}));
+        assert!(status.has_value());
         assert_eq!(status.error.as_deref(), Some("offline"));
         assert_eq!(status.revision, cached);
         assert_eq!(status.updated_at, Some(initial));
         assert_eq!(status.finished_at, Some(failed_at));
         assert!(!status.pending && !status.manual_pending);
         let remotes = state.get("git-remotes").unwrap();
-        assert!(remotes.value.is_null());
+        assert!(!remotes.has_value());
         assert_eq!(remotes.error.as_deref(), Some("unavailable"));
         assert_eq!(remotes.updated_at, None);
         assert_eq!(remotes.finished_at, Some(failed_at));
-        assert!(!state.complete("git-list", successful, Ok(json!("duplicate"))));
+        assert!(!state.complete_owned("git-list", successful, Ok(true)));
     }
 
     #[test]
@@ -845,22 +989,22 @@ mod tests {
         for finish_newer in [false, true] {
             let mut state = Resources::default();
             let old = state.begin("git-list").unwrap();
-            state.complete("git-list", old, Ok(json!("old view")));
+            state.complete_owned("git-list", old, Ok(true));
             let group = state.take_prefix("git-");
             let current = state.begin_manual("git-list").unwrap();
             if finish_newer {
-                state.complete("git-list", current, Ok(json!("new view")));
+                state.complete_owned("git-list", current, Ok(true));
             }
             state.restore(group);
             let row = state.get("git-list").unwrap();
             assert_eq!(row.generation, current);
             assert_eq!(row.pending, !finish_newer);
             assert_eq!(row.manual_pending, !finish_newer);
-            assert!(!state.complete("git-list", old, Ok(json!("delayed old view"))));
+            assert!(!state.complete_owned("git-list", old, Ok(true)));
             if !finish_newer {
-                assert!(state.complete("git-list", current, Ok(json!("new view"))));
+                assert!(state.complete_owned("git-list", current, Ok(true)));
             }
-            assert_eq!(state.get("git-list").unwrap().value, json!("new view"));
+            assert_eq!(state.get("git-list").unwrap().data_revision, current);
         }
     }
 
@@ -868,33 +1012,33 @@ mod tests {
     fn restored_generation_watermark_includes_abandoned_reads() {
         let mut original = Resources::default();
         let saved = original.begin("git-list").unwrap();
-        original.complete("git-list", saved, Ok(json!("saved")));
+        original.complete_owned("git-list", saved, Ok(true));
         let abandoned = original.begin("git-details").unwrap();
         let group = original.take_prefix("git-");
         let mut replacement = Resources::default();
         replacement.restore(group);
         let current = replacement.begin("git-details").unwrap();
         assert!(current > abandoned);
-        assert!(!replacement.complete("git-details", abandoned, Ok(json!("abandoned"))));
-        assert!(replacement.complete("git-details", current, Ok(json!("current"))));
+        assert!(!replacement.complete_owned("git-details", abandoned, Ok(true)));
+        assert!(replacement.complete_owned("git-details", current, Ok(true)));
     }
 
     #[test]
     fn repeated_view_switches_preserve_each_cache_without_reusing_generations() {
         let mut state = Resources::default();
         let first = state.begin("git-list").unwrap();
-        state.complete("git-list", first, Ok(json!("changes")));
+        state.complete_owned("git-list", first, Ok(true));
         let mut changes = state.take_prefix("git-");
         let second = state.begin("git-list").unwrap();
-        state.complete("git-list", second, Ok(json!("history")));
+        state.complete_owned("git-list", second, Ok(true));
         let mut history = state.take_prefix("git-");
         let shell = state.begin("snapshot").unwrap();
         for _ in 0..3 {
             state.restore(changes);
-            assert_eq!(state.get("git-list").unwrap().value, json!("changes"));
+            assert_eq!(state.get("git-list").unwrap().data_revision, first);
             changes = state.take_prefix("git-");
             state.restore(history);
-            assert_eq!(state.get("git-list").unwrap().value, json!("history"));
+            assert_eq!(state.get("git-list").unwrap().data_revision, second);
             history = state.take_prefix("git-");
             assert!(!changes.had_pending() && !history.had_pending());
             assert!(state.get("snapshot").unwrap().pending);
@@ -902,10 +1046,10 @@ mod tests {
         state.restore(changes);
         let current = state.begin("git-list").unwrap();
         assert!(current > shell);
-        assert!(!state.complete("git-list", first, Ok(json!("late changes"))));
-        assert!(!state.complete("git-list", second, Ok(json!("late history"))));
-        assert!(state.complete("git-list", current, Ok(json!("refreshed changes"))));
-        assert!(state.complete("snapshot", shell, Ok(json!("shell"))));
+        assert!(!state.complete_owned("git-list", first, Ok(true)));
+        assert!(!state.complete_owned("git-list", second, Ok(true)));
+        assert!(state.complete_owned("git-list", current, Ok(true)));
+        assert!(state.complete_owned("snapshot", shell, Ok(true)));
     }
 
     #[test]
@@ -914,7 +1058,7 @@ mod tests {
         let now = Instant::now();
         let interval = Duration::from_secs(30);
         let generation = state.begin_refresh("ports", false).unwrap();
-        state.complete_at("ports", generation, Ok(json!([])), now);
+        state.complete_owned_at("ports", generation, Ok(true), now);
         assert!(!state.take_poll("ports", now + interval, interval, false));
         assert!(!state.take_poll(
             "ports",
@@ -943,7 +1087,7 @@ mod tests {
         state.complete("ports", first, Err("offline".into()));
         let second = state.begin_refresh("ports", true).unwrap();
         assert!(state.get("ports").unwrap().error.is_none());
-        state.complete("ports", second, Ok(json!([8080])));
+        state.complete_owned("ports", second, Ok(true));
         let success = state.get("ports").unwrap().updated_at;
         let third = state.begin_refresh("ports", false).unwrap();
         state.complete("ports", third, Err("offline again".into()));
@@ -953,8 +1097,8 @@ mod tests {
         assert_eq!(ports.error.as_deref(), Some("offline again"));
         assert_eq!(ports.updated_at, success);
         assert!(ports.manual_pending);
-        assert_eq!(ports.value, json!([8080]));
-        state.complete("ports", retry, Ok(json!([8080, 9000])));
+        assert!(ports.has_value());
+        state.complete_owned("ports", retry, Ok(true));
         assert!(state.get("ports").unwrap().error.is_none());
         assert!(!state.get("ports").unwrap().manual_pending);
     }
@@ -970,7 +1114,7 @@ mod tests {
         assert_eq!(state.begin("ports"), None);
         assert!(state.get("ports").unwrap().manual_pending);
 
-        assert!(state.complete("ports", generation, Ok(json!([8080]))));
+        assert!(state.complete_owned("ports", generation, Ok(true)));
         let ports = state.get("ports").unwrap();
         assert!(!ports.pending);
         assert!(!ports.manual_pending);
@@ -984,20 +1128,20 @@ mod tests {
         let mut state = Resources::default();
         let updated = Instant::now();
         let generation = state.begin("ports").unwrap();
-        assert!(state.complete_at("ports", generation, Ok(json!([8080])), updated));
+        assert!(state.complete_owned_at("ports", generation, Ok(true), updated));
 
         let generation = state.begin_manual("ports").unwrap();
         let ports = state.get("ports").unwrap();
         assert!(ports.pending);
         assert!(ports.manual_pending);
-        assert_eq!(ports.value, json!([8080]));
+        assert!(ports.has_value());
         let failed = updated + Duration::from_secs(30);
         assert!(state.complete_at("ports", generation, Err("offline".into()), failed));
 
         let ports = state.get("ports").unwrap();
         assert!(!ports.pending);
         assert!(!ports.manual_pending);
-        assert_eq!(ports.value, json!([8080]));
+        assert!(ports.has_value());
         assert_eq!(ports.updated_at, Some(updated));
         assert_eq!(ports.finished_at, Some(failed));
         assert_eq!(ports.error.as_deref(), Some("offline"));
@@ -1030,7 +1174,7 @@ mod tests {
         assert_eq!(ports.finished_at, None);
         assert_eq!(ports.updated_at, None);
         assert_eq!(ports.error, None);
-        assert!(state.complete_at("ports", current, Ok(json!([8080])), now));
+        assert!(state.complete_owned_at("ports", current, Ok(true), now));
     }
 
     #[test]
@@ -1038,7 +1182,7 @@ mod tests {
         let mut state = Resources::default();
         let generation = state.begin_manual("ports").unwrap();
         let now = Instant::now();
-        assert!(state.complete_at("ports", generation, Ok(json!([8080])), now));
+        assert!(state.complete_owned_at("ports", generation, Ok(true), now));
         assert!(!state.complete_at(
             "ports",
             generation,
@@ -1046,7 +1190,7 @@ mod tests {
             now + Duration::from_secs(1),
         ));
         let ports = state.get("ports").unwrap();
-        assert_eq!(ports.value, json!([8080]));
+        assert!(ports.has_value());
         assert_eq!(ports.error, None);
         assert_eq!(ports.finished_at, Some(now));
         assert_eq!(ports.updated_at, Some(now));
@@ -1061,7 +1205,7 @@ mod tests {
 
         let generation = state.begin("ports").unwrap();
         assert!(!state.get("ports").unwrap().poll_due(now, interval, true));
-        assert!(state.complete_at("ports", generation, Ok(json!([])), now));
+        assert!(state.complete_owned_at("ports", generation, Ok(true), now));
         let due = now + interval;
         let ports = state.get("ports").unwrap();
         assert!(!ports.poll_due(now - Duration::from_secs(1), interval, true));
@@ -1078,15 +1222,15 @@ mod tests {
         let mut resources = Resources::default();
         let first = resources.begin("history").unwrap();
         assert_eq!(resources.get("history").unwrap().revision, 0);
-        resources.complete("history", first, Ok(json!([1])));
+        resources.complete_owned("history", first, Ok(true));
         assert_eq!(resources.get("history").unwrap().revision, first);
         let second = resources.begin("history").unwrap();
         assert_eq!(resources.get("history").unwrap().revision, first);
         resources.complete("history", second, Err("offline".into()));
         assert_eq!(resources.get("history").unwrap().revision, first);
         let third = resources.begin("history").unwrap();
-        assert!(!resources.complete("history", second, Ok(json!([2]))));
-        resources.complete("history", third, Ok(json!([3])));
+        assert!(!resources.complete_owned("history", second, Ok(true)));
+        resources.complete_owned("history", third, Ok(true));
         assert_eq!(resources.get("history").unwrap().revision, third);
     }
     #[test]
@@ -1096,13 +1240,10 @@ mod tests {
         let other = state.begin("project-created-save").unwrap();
         state.invalidate_prefix("project-status:");
         let new = state.begin("project-status:one").unwrap();
-        assert!(!state.complete("project-status:one", old, Ok(json!("stale clean"))));
-        assert!(state.complete("project-created-save", other, Ok(json!("saved"))));
-        assert!(state.complete("project-status:one", new, Ok(json!("current changes"))));
-        assert_eq!(
-            state.get("project-status:one").unwrap().value,
-            "current changes"
-        );
+        assert!(!state.complete_owned("project-status:one", old, Ok(true)));
+        assert!(state.complete_owned("project-created-save", other, Ok(true)));
+        assert!(state.complete_owned("project-status:one", new, Ok(true)));
+        assert_eq!(state.get("project-status:one").unwrap().data_revision, new);
     }
     #[test]
     fn changing_selection_supersedes_pending_read_without_clearing_other_resources() {
@@ -1111,10 +1252,10 @@ mod tests {
         let list = state.begin("list").unwrap();
         state.invalidate("detail");
         let new = state.begin("detail").unwrap();
-        assert!(!state.complete("detail", old, Ok(json!("wrong commit"))));
-        assert!(state.complete("list", list, Ok(json!([1, 2]))));
-        assert!(state.complete("detail", new, Ok(json!("selected commit"))));
-        assert_eq!(state.get("detail").unwrap().value, "selected commit");
+        assert!(!state.complete_owned("detail", old, Ok(true)));
+        assert!(state.complete_owned("list", list, Ok(true)));
+        assert!(state.complete_owned("detail", new, Ok(true)));
+        assert_eq!(state.get("detail").unwrap().data_revision, new);
     }
     #[test]
     fn server_operations_survive_navigation_without_blocking_other_servers() {
@@ -1125,22 +1266,22 @@ mod tests {
         let b = state.begin("server-test:b").unwrap();
         assert!(state.begin("server-test:a").is_none());
         assert!(state.begin("server-save").is_none());
-        assert!(state.complete("server-test:b", b, Ok(json!(true))));
+        assert!(state.complete_owned("server-test:b", b, Ok(true)));
         assert!(state.get("server-test:a").unwrap().pending);
         assert!(state.complete("server-test:a", a, Err("unreachable".into())));
-        assert!(state.complete("server-save", save, Ok(Value::Null)));
+        assert!(state.complete("server-save", save, Ok(())));
         assert!(state.get("server-test:b").unwrap().error.is_none());
     }
     #[test]
     fn server_editor_keeps_completed_results_until_explicit_cleanup() {
-        for result in [Ok(Value::Null), Err("Cannot persist the profile".into())] {
+        for result in [Ok(()), Err("Cannot persist the profile".into())] {
             let mut state = Resources::default();
             let save = state.begin("server-save").unwrap();
             let keys = state.begin("server-form-agent-keys").unwrap();
             state.complete("server-save", save, result.clone());
             state.clear();
             assert_eq!(state.get("server-save").unwrap().error, result.err());
-            assert!(state.complete("server-form-agent-keys", keys, Ok(json!({"keys":[]}))));
+            assert!(state.complete_owned("server-form-agent-keys", keys, Ok(true)));
             state.clear();
             assert!(!state.get("server-form-agent-keys").unwrap().pending);
             state.invalidate("server-save");
@@ -1157,11 +1298,11 @@ mod tests {
         state.clear();
         assert!(state.begin("integration:a").is_none());
         assert!(state.begin("integration:b").is_some());
-        assert!(state.complete("integration:a", write, Ok(Value::Null)));
+        assert!(state.complete("integration:a", write, Ok(())));
         state.invalidate("snapshot");
         let fresh_snapshot = state.begin("snapshot").unwrap();
-        assert!(!state.complete("snapshot", stale_snapshot, Ok(json!("stale"))));
-        assert!(state.complete("snapshot", fresh_snapshot, Ok(json!("confirmed"))));
+        assert!(!state.complete_owned("snapshot", stale_snapshot, Ok(true)));
+        assert!(state.complete_owned("snapshot", fresh_snapshot, Ok(true)));
     }
     #[test]
     fn older_selection_cannot_replace_newer_data() {
@@ -1169,19 +1310,19 @@ mod tests {
         let old = state.begin("files").unwrap();
         state.clear();
         let current = state.begin("files").unwrap();
-        assert!(!state.complete("files", old, Ok(json!("old"))));
-        assert!(state.complete("files", current, Ok(json!("current"))));
-        assert_eq!(state.get("files").unwrap().value, "current");
+        assert!(!state.complete_owned("files", old, Ok(true)));
+        assert!(state.complete_owned("files", current, Ok(true)));
+        assert_eq!(state.get("files").unwrap().data_revision, current);
     }
     #[test]
     fn duplicate_reads_are_coalesced_and_failures_retain_last_data() {
         let mut state = Resources::default();
         let first = state.begin("overview").unwrap();
         assert_eq!(state.begin("overview"), None);
-        state.complete("overview", first, Ok(json!(42)));
+        state.complete_owned("overview", first, Ok(true));
         let second = state.begin("overview").unwrap();
         state.complete("overview", second, Err("offline".into()));
-        assert_eq!(state.get("overview").unwrap().value, 42);
+        assert_eq!(state.get("overview").unwrap().data_revision, first);
         assert_eq!(
             state.get("overview").unwrap().error.as_deref(),
             Some("offline")
@@ -1210,6 +1351,6 @@ fn structured_errors_follow_request_generations_and_clear_on_retry() {
     resources.complete("diff", retry, Err("Network failure".into()));
     assert!(resources.get("diff").unwrap().error_code.is_none());
     let retry = resources.begin("diff").unwrap();
-    resources.complete_detailed("diff", retry, Ok(serde_json::json!({})));
+    resources.complete_owned("diff", retry, Ok(true));
     assert!(resources.get("diff").unwrap().error.is_none());
 }

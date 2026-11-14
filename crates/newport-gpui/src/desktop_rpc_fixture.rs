@@ -145,17 +145,17 @@ impl Peer {
                 services::Operation::UnitFile(v) => (
                     "service_unit_file",
                     refresh(
-                        json!({"id":v.server,"unit":v.unit,"scope":scope(v.scope)}),
+                        json!({"id":v.server,"unit":v.unit,"scope":v.scope.as_str()}),
                         v.refresh,
                     ),
                 ),
                 services::Operation::Logs(v) => (
                     "service_logs",
-                    json!({"id":v.server,"unit":v.request.unit,"scope":scope(v.request.scope),"priority":v.request.priority.map(|v|v.as_str()),"cursor":v.request.cursor,"lines":v.request.lines}),
+                    json!({"id":v.server,"unit":v.request.unit,"scope":v.request.scope.as_str(),"priority":v.request.priority.map(|v|v.as_str()),"cursor":v.request.cursor,"lines":v.request.lines}),
                 ),
                 services::Operation::Action(v) => (
                     "service_action",
-                    json!({"id":v.server,"unit":v.unit,"scope":scope(v.scope),"verb":v.verb.as_str()}),
+                    json!({"id":v.server,"unit":v.unit,"scope":v.scope.as_str(),"verb":v.verb.as_str()}),
                 ),
             },
             _ => unreachable!("fixture admits only its typed service families"),
@@ -166,9 +166,13 @@ impl Peer {
         }
     }
 
-    pub(super) fn reply(&mut self, fixture: Result<Value, String>) {
-        let outcome = match fixture.and_then(|value| fixture_reply(&self.request.operation, value))
-        {
+    /// The operation this peer admitted.
+    pub(super) fn operation(&self) -> &desktop::Operation {
+        &self.request.operation
+    }
+
+    pub(super) fn reply_typed(&mut self, reply: Result<desktop::Reply, String>) {
+        let outcome = match reply {
             Ok(reply) => desktop::Outcome::Completed(Box::new(reply)),
             Err(message) => failure(message),
         };
@@ -200,12 +204,6 @@ impl Peer {
             .unwrap();
     }
 }
-fn scope(value: monitor::services::Scope) -> &'static str {
-    match value {
-        monitor::services::Scope::System => "system",
-        monitor::services::Scope::User => "user",
-    }
-}
 fn failure(message: String) -> desktop::Outcome {
     desktop::Outcome::Failed(Box::new(desktop::Failure {
         error: common::Error {
@@ -215,72 +213,4 @@ fn failure(message: String) -> desktop::Outcome {
         },
         detail: None,
     }))
-}
-
-// Fixture data may remain JSON for terse UI test setup. These explicit arms
-// lower only test data to typed replies; JSON never enters the transport.
-fn fixture_reply(operation: &desktop::Operation, value: Value) -> Result<desktop::Reply, String> {
-    let invalid = |error| format!("Invalid fixture result: {error}");
-    Ok(match operation {
-        desktop::Operation::Containers(operation) => {
-            desktop::Reply::Containers(Box::new(match operation.as_ref() {
-                containers::Operation::Snapshot(_) => containers::Reply::Snapshot(Box::new(
-                    serde_json::from_value(value).map_err(invalid)?,
-                )),
-                containers::Operation::Inspect(_) => containers::Reply::Inspect(Box::new(
-                    serde_json::from_value(value).map_err(invalid)?,
-                )),
-                containers::Operation::Logs(_) => containers::Reply::Logs(Box::new(
-                    serde_json::from_value(value).map_err(invalid)?,
-                )),
-                containers::Operation::Action(_) => containers::Reply::Action(Box::new(
-                    serde_json::from_value(value).map_err(invalid)?,
-                )),
-                containers::Operation::ProjectAction(_) => containers::Reply::ProjectAction(
-                    Box::new(serde_json::from_value(value).map_err(invalid)?),
-                ),
-                containers::Operation::Remove(_) => containers::Reply::Remove(Box::new(
-                    serde_json::from_value(value).map_err(invalid)?,
-                )),
-                containers::Operation::Disk(_) => containers::Reply::Disk(Box::new(
-                    serde_json::from_value(value).map_err(invalid)?,
-                )),
-                containers::Operation::Prune(_) => containers::Reply::Prune(Box::new(
-                    serde_json::from_value(value).map_err(invalid)?,
-                )),
-                containers::Operation::ComposeProject(_) => containers::Reply::ComposeProject(
-                    Box::new(serde_json::from_value(value).map_err(invalid)?),
-                ),
-                containers::Operation::ComposeRun(_) => containers::Reply::ComposeRun(Box::new(
-                    serde_json::from_value(value).map_err(invalid)?,
-                )),
-                containers::Operation::ComposeJob(_) => containers::Reply::ComposeJob(Box::new(
-                    serde_json::from_value(value).map_err(invalid)?,
-                )),
-                containers::Operation::ComposeCancel(_) => containers::Reply::ComposeCancel(
-                    Box::new(serde_json::from_value(value).map_err(invalid)?),
-                ),
-                containers::Operation::ComposeJobs(_) => containers::Reply::ComposeJobs(Box::new(
-                    serde_json::from_value(value).map_err(invalid)?,
-                )),
-            }))
-        }
-        desktop::Operation::Services(operation) => {
-            desktop::Reply::Services(Box::new(match operation.as_ref() {
-                services::Operation::Snapshot(_) => services::Reply::Snapshot(Box::new(
-                    serde_json::from_value(value).map_err(invalid)?,
-                )),
-                services::Operation::Logs(_) => {
-                    services::Reply::Logs(Box::new(serde_json::from_value(value).map_err(invalid)?))
-                }
-                services::Operation::UnitFile(_) => services::Reply::UnitFile(Box::new(
-                    serde_json::from_value(value).map_err(invalid)?,
-                )),
-                services::Operation::Action(_) => services::Reply::Action(Box::new(
-                    serde_json::from_value(value).map_err(invalid)?,
-                )),
-            }))
-        }
-        _ => return Err("Unexpected fixture operation".into()),
-    })
 }

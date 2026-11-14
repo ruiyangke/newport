@@ -38,12 +38,11 @@ impl Newport {
     fn can_save_stash(&self) -> bool {
         self.git.tab == 3
             && !self.git_mutation_blocks_write()
-            && self.git.repo["capabilities"]["readOnly"] == false
-            && self.git.repo["capabilities"]["workingTree"] == true
-            && self.value("git-stash-status")["snapshot"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty())
-            && self.value("git-stash-status")["metadata"]["integration"].is_null()
+            && self.git.writable()
+            && self.git.has_working_tree()
+            && self.git_status("git-stash-status").is_some_and(|status| {
+                !status.snapshot.is_empty() && status.metadata.integration.is_none()
+            })
             && self
                 .resources
                 .get("git-stash-status")
@@ -53,6 +52,12 @@ impl Newport {
         if !self.can_save_stash() {
             return;
         }
+        let Some(snapshot) = self
+            .git_status("git-stash-status")
+            .map(|status| status.snapshot.clone())
+        else {
+            return;
+        };
         let message = cx.new(|cx| InputState::new(window, cx).placeholder("Optional description"));
         let subscription =
             Self::project_form_input(&message, project_dialog::Kind::Stash, Self::save_stash, cx);
@@ -61,7 +66,7 @@ impl Newport {
         self.git.stash_save = Some(SaveForm {
             id: uuid::Uuid::new_v4(),
             message,
-            snapshot: text(&self.value("git-stash-status"), "snapshot"),
+            snapshot,
             include_untracked: false,
             keep_index: false,
             _subscription: subscription,
@@ -95,17 +100,18 @@ impl Newport {
         self.git.tab == 3
             && self.git.error.is_none()
             && !self.git_mutation_blocks_write()
-            && self.git.repo["capabilities"]["readOnly"] == false
-            && self.git.repo["capabilities"]["workingTree"] == true
-            && self.git.selected["oid"].is_string()
-            && self.git.selected["index"].is_u64()
-            && self.git.page["metadata"]["listToken"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty())
-            && self.value("git-stash-status")["snapshot"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty())
-            && self.value("git-stash-status")["metadata"]["integration"].is_null()
+            && self.git.writable()
+            && self.git.has_working_tree()
+            && self.git_selected_stash().is_some()
+            && self
+                .git
+                .page
+                .as_ref()
+                .and_then(git_listing::Listing::stashes)
+                .is_some_and(|page| !page.metadata.list_token.is_empty())
+            && self.git_status("git-stash-status").is_some_and(|status| {
+                !status.snapshot.is_empty() && status.metadata.integration.is_none()
+            })
             && ["git-list", "git-stash-status"].iter().all(|key| {
                 self.resources
                     .get(key)
@@ -116,13 +122,23 @@ impl Newport {
         if !self.can_apply_stash() {
             return;
         }
+        let (Some(stash), Some(page), Some(status)) = (
+            self.git_selected_stash(),
+            self.git
+                .page
+                .as_ref()
+                .and_then(git_listing::Listing::stashes),
+            self.git_status("git-stash-status"),
+        ) else {
+            return;
+        };
         self.git.stash_apply = Some(Review {
             mode,
-            message: stash_message(&self.git.selected),
-            oid: text(&self.git.selected, "oid"),
-            index: self.git.selected["index"].as_u64().unwrap(),
-            token: text(&self.git.page["metadata"], "listToken"),
-            snapshot: text(&self.value("git-stash-status"), "snapshot"),
+            message: stash_message(stash),
+            oid: stash.oid.clone(),
+            index: stash.index,
+            token: page.metadata.list_token.clone(),
+            snapshot: status.snapshot.clone(),
             reinstate: false,
         });
         cx.notify();
@@ -192,7 +208,7 @@ impl Newport {
                     || self.git.stash_apply.is_some(),
             )
             .on_click(cx.listener(|this, _, window, cx| this.new_stash(window, cx)));
-        crate::git_listing::toolbar(&self.git.page, "stash", "stashes", action, cx)
+        crate::git_listing::toolbar(self.git.page.as_ref(), "stash", "stashes", action, cx)
     }
     pub(super) fn git_stash_editor(&self, cx: &mut Context<Self>) -> AnyElement {
         let busy = self.git_mutation_blocks_write();
@@ -255,7 +271,7 @@ impl Newport {
                                         return;
                                     }
                                     this.git.stash_save = None;
-                                    this.git.detail_open = !this.git.selected.is_null();
+                                    this.git.detail_open = this.git.selected.is_some();
                                     cx.notify();
                                 })),
                         )
@@ -329,19 +345,26 @@ impl Newport {
     }
 }
 
-fn stash_message(selected: &Value) -> String {
-    let message = selected["message"]
-        .as_str()
+fn stash_message(selected: &newport_protocol::git::Stash) -> String {
+    let message = Some(selected.message.as_str())
         .filter(|message| !message.is_empty())
         .unwrap_or("Unnamed stash");
     format!(
         "{message}{}",
-        if selected["messageTruncated"] == true {
+        if selected.message_truncated {
             "…"
         } else {
             ""
         }
     )
+}
+impl Newport {
+    fn git_selected_stash(&self) -> Option<&newport_protocol::git::Stash> {
+        match &self.git.selected {
+            Some(git_listing::Entry::Stash(stash)) => Some(stash),
+            _ => None,
+        }
+    }
 }
 
 fn review_description(review: &Review) -> Div {
@@ -366,7 +389,41 @@ mod tests {
     use crate::backend;
     use gpui_kit::base::test_support::snapshots;
     use gpui_kit::{self as gpui, Context, IntoElement, Render, Window, div, prelude::*, px};
-    use serde_json::json;
+
+    #[gpui::test]
+    fn a_stash_can_be_saved_once_the_typed_status_is_read(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::component::init(cx);
+            crate::theme::install(false, cx);
+        });
+        let mut owner = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| crate::project_library_state::typed_test_owner(window, cx));
+            owner = Some(view.clone());
+            crate::page_perf_tests::PageHost(view)
+        });
+        owner.unwrap().update(visual, |view, _| {
+            view.git.repo = Some(crate::git_fixture::repository("repo"));
+            view.git.tab = 3;
+            assert!(!view.can_save_stash(), "no status read yet");
+            let status = |snapshot| {
+                Ok(newport_protocol::git::Reply::Status(Box::new(
+                    crate::git_fixture::status_page(snapshot, Vec::new(), None),
+                )))
+            };
+            let read = view.resources.begin("git-stash-status").unwrap();
+            view.resources
+                .complete_git("git-stash-status", read, status("snapshot"));
+            assert!(view.can_save_stash());
+            let read = view.resources.begin("git-stash-status").unwrap();
+            view.resources
+                .complete_git("git-stash-status", read, status(""));
+            assert!(
+                !view.can_save_stash(),
+                "an empty snapshot can't anchor a save"
+            );
+        });
+    }
 
     struct ReviewHost(Review);
     impl Render for ReviewHost {
@@ -448,11 +505,11 @@ mod tests {
 
     #[test]
     fn stash_review_marks_truncated_messages_and_names_empty_ones() {
-        assert_eq!(stash_message(&json!({"message":""})), "Unnamed stash");
-        assert_eq!(
-            stash_message(&json!({"message":"保存", "messageTruncated":true})),
-            "保存…"
-        );
-        assert_eq!(stash_message(&json!({"message":"saved"})), "saved");
+        use crate::git_fixture::stash;
+        assert_eq!(stash_message(&stash(0, "oid", "")), "Unnamed stash");
+        let mut truncated = stash(0, "oid", "保存");
+        truncated.message_truncated = true;
+        assert_eq!(stash_message(&truncated), "保存…");
+        assert_eq!(stash_message(&stash(0, "oid", "saved")), "saved");
     }
 }

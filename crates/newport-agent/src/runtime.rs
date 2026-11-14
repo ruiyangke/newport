@@ -1,7 +1,7 @@
 //! Demand-started control process. No installation or shell changes on startup.
 use newport_protocol::{
     common,
-    runtime::{self as protocol, wire},
+    runtime::{self as protocol, service, wire},
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -35,7 +35,7 @@ pub fn build_identity() -> io::Result<String> {
 /// counts: the person installs it after Projects says it's missing.
 fn require(hello: &protocol::Hello, service: &str, version: u32) -> Result<(), common::Error> {
     hello.require(service, version).or_else(|error| {
-        let installed_since = service == "git"
+        let installed_since = service == service::GIT
             && hello
                 .services
                 .get(service)
@@ -79,9 +79,9 @@ pub fn compiled_product(
             .map(|(name, capability)| (name, capability.versions))
             .collect();
     for (name, version) in [
-        ("git", newport_protocol::git::VERSION),
-        ("monitor", newport_protocol::monitor::VERSION),
-        ("integration", newport_protocol::integration::VERSION),
+        (service::GIT, newport_protocol::git::VERSION),
+        (service::MONITOR, newport_protocol::monitor::VERSION),
+        (service::INTEGRATION, newport_protocol::integration::VERSION),
         (
             newport_protocol::browser::CAPABILITY,
             newport_protocol::browser::VERSION,
@@ -90,16 +90,16 @@ pub fn compiled_product(
             newport_protocol::terminal::holder::CAPABILITY,
             newport_protocol::terminal::holder::VERSION,
         ),
-        ("gui-notices", 1),
+        (service::GUI_NOTICES, 1),
         (
             newport_protocol::worker::admission::CAPABILITY,
             newport_protocol::worker::admission::VERSION,
         ),
-        ("lsp", crate::lsp::VERSION),
+        (service::LSP, crate::lsp::VERSION),
     ] {
         compiled.insert(name.into(), vec![version]);
     }
-    compiled.insert("terminal".into(), crate::terminal::VERSIONS.to_vec());
+    compiled.insert(service::TERMINAL.into(), crate::terminal::VERSIONS.to_vec());
     compiled.insert(
         newport_protocol::clipboard::SERVICE_CAPABILITY.into(),
         newport_protocol::clipboard::SERVICE_VERSIONS.to_vec(),
@@ -125,19 +125,19 @@ fn describe(
     let mut capabilities = crate::composition::capabilities(services)?;
     for (name, version, available, reason) in [
         (
-            "git",
+            service::GIT,
             newport_protocol::git::VERSION,
             git,
             "Git is not available on this server.",
         ),
         (
-            "monitor",
+            service::MONITOR,
             newport_protocol::monitor::VERSION,
             cfg!(target_os = "linux"),
             "Monitoring requires Linux.",
         ),
         (
-            "integration",
+            service::INTEGRATION,
             newport_protocol::integration::VERSION,
             true,
             "",
@@ -148,7 +148,7 @@ fn describe(
             cfg!(target_os = "linux"),
             "Persistent terminals require Linux.",
         ),
-        ("gui-notices", 1, true, ""),
+        (service::GUI_NOTICES, 1, true, ""),
         (
             newport_protocol::browser::CAPABILITY,
             newport_protocol::browser::VERSION,
@@ -161,7 +161,7 @@ fn describe(
             true,
             "",
         ),
-        ("lsp", crate::lsp::VERSION, true, ""),
+        (service::LSP, crate::lsp::VERSION, true, ""),
     ] {
         capabilities.insert(
             name.into(),
@@ -174,7 +174,7 @@ fn describe(
     }
     let terminal = cfg!(target_os = "linux");
     capabilities.insert(
-        "terminal".into(),
+        service::TERMINAL.into(),
         protocol::Capability {
             contract_id: None,
             versions: crate::terminal::VERSIONS.to_vec(),
@@ -205,7 +205,7 @@ fn describe(
         agent_version: Some(crate::VERSION.into()),
         worker_socket: String::new(),
         services: capabilities,
-        dependencies: [("git".into(), git)].into(),
+        dependencies: [(service::GIT.into(), git)].into(),
         limits: protocol::Limits {
             max_control_bytes: protocol::MAX_FRAME,
             max_inflight: 1,
@@ -296,7 +296,7 @@ fn respond(
 
 fn control_error(error: io::Error) -> common::Error {
     let (code, retry) = match error.kind() {
-        io::ErrorKind::WouldBlock => ("busy", common::Retry::Yes),
+        io::ErrorKind::WouldBlock => (common::BUSY, common::Retry::Yes),
         io::ErrorKind::TimedOut => ("timed_out", common::Retry::Unknown),
         io::ErrorKind::PermissionDenied => ("permission_denied", common::Retry::No),
         _ => ("control_failed", common::Retry::Unknown),
@@ -419,11 +419,11 @@ pub fn worker_with(
     )?;
     let cancellation = lease.cancellation();
     match args[3].as_str() {
-        "git" if args.len() == 4 => crate::git::serve_bound(cancellation),
-        "monitor" if args.len() == 4 => crate::monitor::serve_bound(cancellation),
-        "lsp" if args.len() == 7 => crate::lsp::serve_bound(&args[4..], cancellation),
-        "terminal" if args.len() == 4 => crate::terminal::serve_bound(cancellation),
-        "integration" if args.len() == 5 => crate::agent::serve_bound(
+        service::GIT if args.len() == 4 => crate::git::serve_bound(cancellation),
+        service::MONITOR if args.len() == 4 => crate::monitor::serve_bound(cancellation),
+        service::LSP if args.len() == 7 => crate::lsp::serve_bound(&args[4..], cancellation),
+        service::TERMINAL if args.len() == 4 => crate::terminal::serve_bound(cancellation),
+        service::INTEGRATION if args.len() == 5 => crate::agent::serve_bound(
             &args[4],
             cancellation,
             lease.take_permissions(),

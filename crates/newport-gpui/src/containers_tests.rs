@@ -15,12 +15,18 @@ use newport_client::{
     backend::Backend,
     containers::{Action, Containers},
 };
-use newport_domain::containers::{
-    ComposeLabels, Container, ContainerInspect, ContainerLogEntry, ContainerLogPage,
-    ContainerState, ContainerVerb, ContainersSnapshot, DiskTotals, DockerDisk, DockerImage,
-    DockerTotals, DockerVolume, EngineInfo, EnvVar, PruneTarget,
-};
 use newport_platform::ipc::Listener;
+use newport_protocol::{
+    desktop::{self, containers::Reply},
+    monitor::{
+        compose,
+        containers::{
+            ComposeLabels, Container, ContainerInspect, ContainerLogEntry, ContainerLogPage,
+            ContainerState, ContainerVerb, ContainersSnapshot, DiskTotals, DockerDisk, DockerImage,
+            DockerTotals, DockerVolume, Done, EngineInfo, EnvVar, PruneTarget, Pruned, Removed,
+        },
+    },
+};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
@@ -33,28 +39,29 @@ use std::{
     time::Duration,
 };
 
-type FixtureResponse = Result<Value, String>;
-type HeldDiskRead = (Stream, FixtureResponse);
-type HeldOutputRead = (String, Stream, FixtureResponse);
+type Fixture<T> = Arc<Mutex<Result<T, String>>>;
+type OptionalFixture<T> = Arc<Mutex<Option<Result<T, String>>>>;
+type HeldRead = (Stream, Result<Reply, String>);
+type HeldOutputRead = (String, Stream, Result<Reply, String>);
 
 /// Strict local RPC peer: never discovers the installed app or reaches a server.
 pub(crate) struct FakeBackend {
     path: PathBuf,
     calls: Arc<Mutex<Vec<Request>>>,
     snapshot: Arc<Mutex<ContainersSnapshot>>,
-    disk: Arc<Mutex<FixtureResponse>>,
+    disk: Fixture<DockerDisk>,
     /// Answers volume measurements when set; otherwise they read `disk`.
-    disk_volumes: Arc<Mutex<Option<FixtureResponse>>>,
-    logs: Arc<Mutex<Option<FixtureResponse>>>,
-    inspect: Arc<Mutex<Option<FixtureResponse>>>,
+    disk_volumes: OptionalFixture<DockerDisk>,
+    logs: OptionalFixture<ContainerLogPage>,
+    inspect: OptionalFixture<ContainerInspect>,
     hold_inspects: Arc<AtomicBool>,
-    held_inspects: Arc<Mutex<Vec<HeldDiskRead>>>,
-    compose_project: Arc<Mutex<FixtureResponse>>,
-    compose_jobs: Arc<Mutex<FixtureResponse>>,
-    compose_outputs: Arc<Mutex<HashMap<String, FixtureResponse>>>,
+    held_inspects: Arc<Mutex<Vec<HeldRead>>>,
+    compose_project: Fixture<compose::Project>,
+    compose_jobs: Fixture<compose::Jobs>,
+    compose_outputs: Arc<Mutex<HashMap<String, Result<compose::Job, String>>>>,
     hold_outputs: Arc<AtomicBool>,
     held_outputs: Arc<Mutex<Vec<HeldOutputRead>>>,
-    held_disks: Arc<Mutex<Vec<HeldDiskRead>>>,
+    held_disks: Arc<Mutex<Vec<HeldRead>>>,
     hold_disk: Arc<AtomicBool>,
     held: Arc<Mutex<Vec<Stream>>>,
     hold: Arc<AtomicBool>,
@@ -71,18 +78,16 @@ impl FakeBackend {
         let held = Arc::new(Mutex::new(vec![]));
         let hold = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
-        let disk = Arc::new(Mutex::new(Ok(
-            serde_json::to_value(disk_snapshot()).unwrap()
-        )));
+        let disk = Arc::new(Mutex::new(Ok(disk_snapshot())));
         let held_disks = Arc::new(Mutex::new(Vec::new()));
         let hold_disk = Arc::new(AtomicBool::new(false));
         let (disk_data, disk_streams, disk_gate) =
             (disk.clone(), held_disks.clone(), hold_disk.clone());
-        let disk_volumes = Arc::new(Mutex::new(None::<FixtureResponse>));
+        let disk_volumes: OptionalFixture<DockerDisk> = Arc::new(Mutex::new(None));
         let volume_data = disk_volumes.clone();
-        let logs = Arc::new(Mutex::new(None));
+        let logs: OptionalFixture<ContainerLogPage> = Arc::new(Mutex::new(None));
         let log_data = logs.clone();
-        let inspect = Arc::new(Mutex::new(None::<FixtureResponse>));
+        let inspect: OptionalFixture<ContainerInspect> = Arc::new(Mutex::new(None));
         let hold_inspects = Arc::new(AtomicBool::new(false));
         let held_inspects = Arc::new(Mutex::new(Vec::new()));
         let (inspect_data, inspect_gate, inspect_streams) = (
@@ -92,8 +97,10 @@ impl FakeBackend {
         );
         let compose_project = Arc::new(Mutex::new(Ok(compose_project())));
         let project_data = compose_project.clone();
-        let compose_jobs = Arc::new(Mutex::new(Ok(json!({"jobs":[]}))));
-        let compose_outputs = Arc::new(Mutex::new(HashMap::<String, FixtureResponse>::new()));
+        let compose_jobs = Arc::new(Mutex::new(Ok(compose::Jobs::default())));
+        let compose_outputs = Arc::new(Mutex::new(
+            HashMap::<String, Result<compose::Job, String>>::new(),
+        ));
         let hold_outputs = Arc::new(AtomicBool::new(false));
         let held_outputs = Arc::new(Mutex::new(Vec::new()));
         let (jobs_data, output_data, output_gate, output_streams) = (
@@ -131,68 +138,77 @@ impl FakeBackend {
                         | "compose_run"
                         | "compose_cancel"
                 );
-                let result = if request.method == "compose_project" {
-                    project_data.lock().unwrap().clone()
-                } else if request.method == "compose_jobs" {
-                    jobs_data.lock().unwrap().clone()
-                } else if request.method == "compose_job" {
-                    let id = request.args["job"].as_str().unwrap();
-                    output_data
+                let target = request.args["container"].as_str().unwrap_or("project");
+                let result: Result<Reply, String> = match request.method.as_str() {
+                    "compose_project" => project_data
                         .lock()
                         .unwrap()
-                        .get(id)
-                        .cloned()
-                        .unwrap_or_else(|| Err(format!("Unknown Compose job {id}")))
-                        .map(|mut value| {
-                            // Match the agent's incremental suffix, respecting UTF-8 boundaries.
-                            let end = value["offset"].as_u64().unwrap();
-                            let output = value["output"].as_str().unwrap();
-                            let start = end.saturating_sub(output.len() as u64);
-                            let requested = request.args["offset"].as_u64().unwrap_or(0);
-                            let mut from =
-                                requested.saturating_sub(start).min(output.len() as u64) as usize;
-                            while !output.is_char_boundary(from) {
-                                from += 1;
-                            }
-                            value["output"] = json!(&output[from..]);
-                            value
-                        })
-                } else if request.method == "docker_disk" {
-                    volume_data
+                        .clone()
+                        .map(|project| Reply::ComposeProject(Box::new(project))),
+                    "compose_jobs" => jobs_data
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .map(|jobs| Reply::ComposeJobs(Box::new(jobs))),
+                    "compose_job" => {
+                        let id = request.args["job"].as_str().unwrap();
+                        output_data
+                            .lock()
+                            .unwrap()
+                            .get(id)
+                            .cloned()
+                            .unwrap_or_else(|| Err(format!("Unknown Compose job {id}")))
+                            .map(|mut job| {
+                                // Match the agent's incremental suffix, respecting UTF-8 boundaries.
+                                let start = job.offset.saturating_sub(job.output.len() as u64);
+                                let requested = request.args["offset"].as_u64().unwrap_or(0);
+                                let mut from =
+                                    requested.saturating_sub(start).min(job.output.len() as u64)
+                                        as usize;
+                                while !job.output.is_char_boundary(from) {
+                                    from += 1;
+                                }
+                                job.output = job.output[from..].to_owned();
+                                Reply::ComposeJob(Box::new(job))
+                            })
+                    }
+                    "docker_disk" => volume_data
                         .lock()
                         .unwrap()
                         .clone()
                         .filter(|_| request.args["part"] == "volumes")
                         .unwrap_or_else(|| disk_data.lock().unwrap().clone())
-                } else if request.method == "container_logs"
-                    && let Some(result) = log_data.lock().unwrap().clone()
-                {
-                    result
-                } else if request.method == "container_inspect"
-                    && let Some(result) =
-                        inspect_data
-                            .lock()
-                            .unwrap()
-                            .clone()
-                            .filter(|result| match result {
-                                Ok(value) => value["id"] == request.args["container"],
-                                Err(_) => true,
+                        .map(|disk| Reply::Disk(Box::new(disk))),
+                    "container_logs" => log_data
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .unwrap_or_else(|| {
+                            Ok(ContainerLogPage {
+                                entries: vec![ContainerLogEntry {
+                                    message: format!("Logs for {target}"),
+                                    ..Default::default()
+                                }],
+                                cursor: Some(format!("cursor-{target}")),
                             })
-                {
-                    result
-                } else {
-                    Ok(match request.method.as_str() {
-                        "containers_snapshot" => {
-                            serde_json::to_value(&*data.lock().unwrap()).unwrap()
-                        }
-                        "container_inspect" => {
+                        })
+                        .map(|page| Reply::Logs(Box::new(page))),
+                    "container_inspect" => inspect_data
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .filter(|result| match result {
+                            Ok(inspect) => inspect.id == request.args["container"],
+                            Err(_) => true,
+                        })
+                        .unwrap_or_else(|| {
                             let data = data.lock().unwrap();
                             let container = data
                                 .containers
                                 .iter()
                                 .find(|container| container.id == request.args["container"])
                                 .expect("inspection must target a current concrete ID");
-                            serde_json::to_value(ContainerInspect {
+                            Ok(ContainerInspect {
                                 id: container.id.clone(),
                                 name: container.name.clone(),
                                 image: container.image.clone(),
@@ -210,30 +226,18 @@ impl FakeBackend {
                                 ],
                                 ..Default::default()
                             })
-                            .unwrap()
-                        }
-                        "container_logs" => serde_json::to_value(ContainerLogPage {
-                            entries: vec![ContainerLogEntry {
-                                message: format!(
-                                    "Logs for {}",
-                                    request.args["container"].as_str().unwrap_or("project")
-                                ),
-                                ..Default::default()
-                            }],
-                            cursor: Some(format!(
-                                "cursor-{}",
-                                request.args["container"].as_str().unwrap_or("project")
-                            )),
                         })
-                        .unwrap(),
-                        "compose_run" => json!({"job":"fixture-job"}),
-                        "containers_remove" => json!({"removed":1}),
-                        "docker_prune" => json!({"removed":0,"reclaimed":0}),
-                        "container_action" | "project_action" | "compose_cancel" => {
-                            json!({"ok":true})
-                        }
-                        other => panic!("unexpected request {other}"),
-                    })
+                        .map(|inspect| Reply::Inspect(Box::new(inspect))),
+                    "containers_snapshot" => {
+                        Ok(Reply::Snapshot(Box::new(data.lock().unwrap().clone())))
+                    }
+                    "compose_run" => Ok(started("fixture-job")),
+                    "containers_remove" => Ok(removed(1)),
+                    "docker_prune" => Ok(pruned(0, 0)),
+                    "container_action" => Ok(container_done()),
+                    "project_action" => Ok(project_done()),
+                    "compose_cancel" => Ok(cancelled()),
+                    other => panic!("unexpected request {other}"),
                 };
                 let is_disk = request.method == "docker_disk";
                 let is_inspect = request.method == "container_inspect";
@@ -281,11 +285,10 @@ impl FakeBackend {
         Containers::new(Backend::at_path(self.path.clone()), SERVER.into())
     }
     pub(super) fn set_logs(&self, result: Result<ContainerLogPage, String>) {
-        *self.logs.lock().unwrap() = Some(result.map(|page| serde_json::to_value(page).unwrap()));
+        *self.logs.lock().unwrap() = Some(result);
     }
     pub(super) fn set_inspect(&self, result: Result<ContainerInspect, String>) {
-        *self.inspect.lock().unwrap() =
-            Some(result.map(|data| serde_json::to_value(data).unwrap()));
+        *self.inspect.lock().unwrap() = Some(result);
     }
     pub(super) fn clear_inspect(&self) {
         *self.inspect.lock().unwrap() = None;
@@ -302,13 +305,24 @@ impl FakeBackend {
             reply_result(&mut stream, result);
         }
     }
-    pub(super) fn set_compose_project(&self, result: FixtureResponse) {
+    pub(super) fn set_compose_project(&self, result: Result<compose::Project, String>) {
         *self.compose_project.lock().unwrap() = result;
     }
-    pub(super) fn set_compose_jobs(&self, result: FixtureResponse) {
-        *self.compose_jobs.lock().unwrap() = result;
+    /// Answers job listings; listings carry no output.
+    pub(super) fn set_compose_jobs(&self, result: Result<Vec<compose::Job>, String>) {
+        *self.compose_jobs.lock().unwrap() = result.map(|jobs| compose::Jobs {
+            jobs: jobs
+                .into_iter()
+                .map(|job| compose::Job {
+                    output: String::new(),
+                    offset: 0,
+                    ..job
+                })
+                .collect(),
+        });
     }
-    pub(super) fn set_compose_output(&self, job: &str, result: FixtureResponse) {
+    /// Answers a job's output reads with the suffix after each read's offset.
+    pub(super) fn set_compose_output(&self, job: &str, result: Result<compose::Job, String>) {
         self.compose_outputs
             .lock()
             .unwrap()
@@ -348,18 +362,18 @@ impl FakeBackend {
     pub(crate) fn held_actions(&self) -> usize {
         self.held.lock().unwrap().len()
     }
-    pub(crate) fn release_action(&self, result: Value) {
+    pub(crate) fn release_action(&self, result: Reply) {
         for mut stream in self.held.lock().unwrap().drain(..) {
-            reply(&mut stream, result.clone());
+            reply_result(&mut stream, Ok(result.clone()));
         }
     }
     fn set_disk(&self, disk: DockerDisk) {
-        *self.disk.lock().unwrap() = Ok(serde_json::to_value(disk).unwrap());
+        *self.disk.lock().unwrap() = Ok(disk);
     }
     fn fail_disk(&self, error: &str) {
         *self.disk.lock().unwrap() = Err(error.into());
     }
-    fn set_disk_volumes(&self, result: FixtureResponse) {
+    fn set_disk_volumes(&self, result: Result<DockerDisk, String>) {
         *self.disk_volumes.lock().unwrap() = Some(result);
     }
     fn hold_disk(&self) {
@@ -410,11 +424,29 @@ impl FakeBackend {
             .count()
     }
 }
-fn reply(stream: &mut Stream, result: Value) {
-    reply_result(stream, Ok(result));
+fn reply_result(stream: &mut Stream, result: Result<Reply, String>) {
+    stream.reply_typed(result.map(|reply| desktop::Reply::Containers(Box::new(reply))));
 }
-fn reply_result(stream: &mut Stream, result: FixtureResponse) {
-    stream.reply(result);
+/// A container command's receipt.
+pub(crate) fn container_done() -> Reply {
+    Reply::Action(Box::new(Done { ok: true }))
+}
+/// A project command's receipt.
+pub(crate) fn project_done() -> Reply {
+    Reply::ProjectAction(Box::new(Done { ok: true }))
+}
+/// A Compose cancellation's receipt.
+pub(crate) fn cancelled() -> Reply {
+    Reply::ComposeCancel(Box::new(compose::Done { ok: true }))
+}
+pub(crate) fn removed(removed: u64) -> Reply {
+    Reply::Remove(Box::new(Removed { removed }))
+}
+pub(crate) fn pruned(removed: u64, reclaimed: u64) -> Reply {
+    Reply::Prune(Box::new(Pruned { removed, reclaimed }))
+}
+pub(crate) fn started(job: &str) -> Reply {
+    Reply::ComposeRun(Box::new(compose::Started { job: job.into() }))
 }
 
 impl Drop for FakeBackend {
@@ -499,8 +531,42 @@ fn disk_snapshot() -> DockerDisk {
     }
 }
 
-pub(super) fn compose_project() -> Value {
-    json!({"workingDir":"/srv/stack","cli":{"kind":"plugin","version":"2.40.1"},"cliError":null,"configFiles":["/srv/stack/compose.yml"],"configError":null,"services":[{"name":"web","image":"fixture/web:1","build":false,"profiles":[]},{"name":"worker","image":"fixture/worker:1","build":true,"profiles":[]}],"files":[{"path":"/srv/stack/compose.yml","text":"services: {}","error":null}]})
+pub(super) fn compose_project() -> compose::Project {
+    compose::Project {
+        working_dir: Some("/srv/stack".into()),
+        cli: Some(compose::Cli {
+            kind: compose::CliKind::Plugin,
+            version: "2.40.1".into(),
+        }),
+        cli_error: None,
+        config_files: vec!["/srv/stack/compose.yml".into()],
+        config_error: None,
+        services: Some(vec![
+            compose_service("web", false, &[]),
+            compose_service("worker", true, &[]),
+        ]),
+        files: vec![compose_file(
+            "/srv/stack/compose.yml",
+            Some("services: {}"),
+            None,
+        )],
+    }
+}
+/// A Compose service built from an image named after it, or from source.
+pub(super) fn compose_service(name: &str, build: bool, profiles: &[&str]) -> compose::Service {
+    compose::Service {
+        name: name.into(),
+        image: Some(format!("fixture/{name}:1")),
+        build,
+        profiles: profiles.iter().map(|profile| (*profile).into()).collect(),
+    }
+}
+pub(super) fn compose_file(path: &str, text: Option<&str>, error: Option<&str>) -> compose::File {
+    compose::File {
+        path: path.into(),
+        text: text.map(Into::into),
+        error: error.map(Into::into),
+    }
 }
 pub(crate) fn snapshot() -> ContainersSnapshot {
     let service = |id: &str, name: &str, service: &str, state, exit_code| Container {
@@ -508,7 +574,7 @@ pub(crate) fn snapshot() -> ContainersSnapshot {
         name: name.into(),
         image: format!("fixture/{service}:1"),
         state,
-        status: state.to_string(),
+        status: state.as_str().to_owned(),
         exit_code,
         compose: Some(ComposeLabels {
             project: "stack".into(),
@@ -1107,7 +1173,7 @@ fn published_port_links_keep_exact_bindings_range_offsets_and_inactive_states(
     cx: &mut TestAppContext,
 ) {
     use newport_client::tunnel_operations::Operations;
-    use newport_domain::containers::{ContainerPort, PortProtocol};
+    use newport_protocol::monitor::containers::{ContainerPort, PortProtocol};
     use std::{cell::RefCell, rc::Rc};
     let (panel, cx, backend) = fixture(cx);
     let mut data = snapshot();
@@ -1149,7 +1215,17 @@ fn published_port_links_keep_exact_bindings_range_offsets_and_inactive_states(
     tunnel.remote_port_end = Some(3005);
     tunnel.local_port = 9000;
     tunnel.local_port_end = Some(9005);
-    let mut config = json!({"config":{"tunnels":[tunnel]},"runtime":{"tunnels":{tunnel.id.to_string():{"status":"connected"}}}});
+    use crate::snapshot_fixture as fixture;
+    use newport_protocol::desktop::configuration::ConnectionStatus;
+    let mut config = fixture::snapshot(Vec::new());
+    config.config.tunnels = vec![newport_protocol::desktop::configuration::Tunnel::from(
+        &tunnel,
+    )];
+    fixture::set(
+        &mut config.runtime.tunnels,
+        tunnel.id,
+        fixture::connection(ConnectionStatus::Connected),
+    );
     let operations = Operations::new(Backend::at_path(backend.path.clone()));
     panel.update(cx, |p, cx| {
         p.sync_port_links(&server.to_string(), Some(&config), &operations, cx)
@@ -1188,7 +1264,11 @@ fn published_port_links_keep_exact_bindings_range_offsets_and_inactive_states(
             port: port.clone(),
         }]
     );
-    config["runtime"]["tunnels"][tunnel.id.to_string()]["status"] = json!("reconnecting");
+    fixture::set(
+        &mut config.runtime.tunnels,
+        tunnel.id,
+        fixture::connection(ConnectionStatus::Reconnecting),
+    );
     panel.update(cx, |p, cx| {
         p.sync_port_links(&server.to_string(), Some(&config), &operations, cx)
     });
@@ -1199,7 +1279,11 @@ fn published_port_links_keep_exact_bindings_range_offsets_and_inactive_states(
         1,
         "reconnecting target stays inactive"
     );
-    config["runtime"]["tunnels"][tunnel.id.to_string()]["status"] = json!("disconnected");
+    fixture::set(
+        &mut config.runtime.tunnels,
+        tunnel.id,
+        fixture::connection(ConnectionStatus::Disconnected),
+    );
     panel.update(cx, |p, cx| {
         p.sync_port_links(&server.to_string(), Some(&config), &operations, cx)
     });
@@ -1237,7 +1321,7 @@ fn compact_container_ports_wrap_and_failures_stay_inline_without_replaying(
     cx: &mut TestAppContext,
 ) {
     use newport_client::tunnel_operations::Operations;
-    use newport_domain::containers::{ContainerPort, PortProtocol};
+    use newport_protocol::monitor::containers::{ContainerPort, PortProtocol};
     let (panel, cx, backend) = fixture_with_size(cx, 560., 1000.);
     let mut data = snapshot();
     data.containers[0].ports = (8000..8008)
@@ -1253,7 +1337,7 @@ fn compact_container_ports_wrap_and_failures_stay_inline_without_replaying(
     settle(&panel, cx);
     select(&panel, cx, "c:stack-web-1");
     let server = uuid::Uuid::new_v4().to_string();
-    let config = json!({"config":{"tunnels":[]},"runtime":{}});
+    let config = crate::snapshot_fixture::snapshot(Vec::new());
     // This transport cannot discover the real backend or mutate a real server.
     let mut operations = Operations::new(Backend::at_path(
         std::env::temp_dir().join(format!("missing-{}.sock", uuid::Uuid::new_v4())),
@@ -1289,8 +1373,8 @@ fn compact_container_ports_wrap_and_failures_stay_inline_without_replaying(
         port: data.containers[0].ports[0].clone(),
     };
     panel.update(cx, |p, cx| {
-        p.open_port_link(&server, Value::Null, &target, &mut operations, cx);
-        p.open_port_link(&server, Value::Null, &target, &mut operations, cx);
+        p.open_port_link(&server, None, &target, &mut operations, cx);
+        p.open_port_link(&server, None, &target, &mut operations, cx);
     });
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -1368,7 +1452,7 @@ fn shell_handover_uses_the_observed_container_and_pause_lives_in_the_menu(cx: &m
         1,
         "pending action must block shell handover"
     );
-    backend.release_action(json!({"ok":true}));
+    backend.release_action(container_done());
     settle(&panel, cx);
 
     select(&panel, cx, "c:stack-worker-1");
@@ -1429,10 +1513,10 @@ fn removal_review_cancels_retries_and_keeps_its_original_target_while_navigating
     cx.update(|window, cx| panel.update(cx, |p, cx| p.select("c:cache".into(), window, cx)));
     draw(cx);
     assert!(panel.read_with(cx, |p, _| p.review.is_none()));
-    let mut removed = snapshot();
-    removed.containers.retain(|c| c.id != "b".repeat(64));
-    backend.set_snapshot(removed);
-    backend.release_action(json!({"removed":1}));
+    let mut remaining = snapshot();
+    remaining.containers.retain(|c| c.id != "b".repeat(64));
+    backend.set_snapshot(remaining);
+    backend.release_action(removed(1));
     settle(&panel, cx);
     assert_eq!(backend.count("containers_remove"), 2);
     assert!(
@@ -1547,7 +1631,7 @@ fn lifecycle_dialog_blocks_background_pointer_and_keyboard_until_explicit_confir
     click(cx, "Cancel");
     assert!(panel.read_with(cx, |p, _| p.has_review_dialog()));
     assert_eq!(backend.count("containers_remove"), 1);
-    backend.release_action(json!({"removed":1}));
+    backend.release_action(removed(1));
     settle(&panel, cx);
     assert!(!panel.read_with(cx, |p, _| p.has_review_dialog()));
     cx.update(|window, cx| {
@@ -1668,7 +1752,7 @@ fn hidden_container_action_delivers_one_receipt_without_repainting_panel(cx: &mu
             }
         })
     });
-    backend.release_action(json!({"ok":true}));
+    backend.release_action(container_done());
     for _ in 0..300 {
         panel.update(cx, |panel, cx| panel.poll(false, cx));
         cx.run_until_parked();
@@ -1752,15 +1836,19 @@ fn container_and_project_logs_fill_available_height_and_contain_scrolling(cx: &m
     use gpui::{ScrollDelta, ScrollEvent, point};
     let (panel, cx, backend) = fixture_with_size(cx, 980., 900.);
     let output = "Container stack-web-1 started\n";
-    let mut job = json!({
-        "job": "layout", "project": "stack", "command": "docker compose up -d",
-        "state": "succeeded", "exitCode": 0, "startedAt": 1000, "finishedAt": 3000,
-        "output": output, "offset": output.len(),
-    });
+    let job = compose::Job {
+        job: "layout".into(),
+        project: "stack".into(),
+        command: "docker compose up -d".into(),
+        state: compose::State::Succeeded,
+        exit_code: Some(0),
+        started_at: 1000,
+        finished_at: Some(3000),
+        output: output.into(),
+        offset: output.len() as u64,
+    };
     backend.set_compose_output("layout", Ok(job.clone()));
-    job["output"] = json!("");
-    job["offset"] = json!(0);
-    backend.set_compose_jobs(Ok(json!({"jobs": [job]})));
+    backend.set_compose_jobs(Ok(vec![job]));
     panel.update(cx, |p, _| p.client.retry_jobs());
     settle(&panel, cx);
     for (selection, tab, viewport_id, footer_id) in [
@@ -1959,7 +2047,7 @@ fn every_cleanup_captures_its_target_and_requires_confirmation(cx: &mut TestAppC
             target.as_str()
         );
         let disk_reads = backend.count("docker_disk");
-        backend.release_action(json!({"removed":1,"reclaimed":1_000_000}));
+        backend.release_action(pruned(1, 1_000_000));
         settle(&panel, cx);
         assert!(cx.debug_bounds("disk-review").is_none());
         assert!(
@@ -2001,7 +2089,7 @@ fn disk_review_closes_on_selection_change_and_pending_cleanup_stays_serialized(
         );
     }
     assert_eq!(backend.requests("docker_prune")[0]["what"], "build-cache");
-    backend.release_action(json!({"removed":3,"reclaimed":1_500_000}));
+    backend.release_action(pruned(3, 1_500_000));
     settle(&panel, cx);
     assert_ne!(element(cx, "Clear").disabled(), Some(true));
     assert_eq!(backend.writes(), 1);
@@ -2066,7 +2154,7 @@ fn failed_volume_measurement_stops_measuring_and_retries_only_volumes(cx: &mut T
     assert!(!has_element(cx, "Volumes: Measuring…, 2 volumes"));
     assert!(has_element(cx, "Try measuring volumes again"));
     let quick_reads = backend.count("docker_disk");
-    backend.set_disk_volumes(Ok(serde_json::to_value(measured).unwrap()));
+    backend.set_disk_volumes(Ok(measured));
     click(cx, "Try measuring volumes again");
     settle(&panel, cx);
     assert_eq!(backend.count("docker_disk"), quick_reads + 1);
@@ -2111,7 +2199,7 @@ fn failed_cleanup_keeps_its_review_and_retries_the_captured_target(cx: &mut Test
             .collect::<Vec<_>>(),
         vec!["build-cache", "build-cache"]
     );
-    backend.release_action(json!({"removed":3,"reclaimed":1_500_000}));
+    backend.release_action(pruned(3, 1_500_000));
     settle(&panel, cx);
     assert!(cx.debug_bounds("disk-review").is_none());
     assert_eq!(backend.writes(), 2);
@@ -2232,7 +2320,7 @@ fn compact_disk_confirmation_is_visible_focused_and_enter_dispatches_once(cx: &m
     assert!(cx.debug_bounds("disk-review").is_some());
     assert_eq!(backend.requests("docker_prune").len(), 1);
     assert_eq!(backend.requests("docker_prune")[0]["what"], "containers");
-    backend.release_action(json!({"removed":2,"reclaimed":500_000}));
+    backend.release_action(pruned(2, 500_000));
     settle(&panel, cx);
     assert!(cx.debug_bounds("disk-review").is_none());
     assert_eq!(

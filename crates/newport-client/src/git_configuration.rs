@@ -1,8 +1,7 @@
 //! Remote/configuration write planning.
 //! UI drafts stay with their form; these rules never read display URLs back into
 //! configuration or silently replace a captured configuration token.
-use newport_protocol::git::{Action, Request};
-use serde_json::Value;
+use newport_protocol::git::{Action, Remote, Reply, RepositoryConfiguration, Request};
 
 impl crate::backend::Backend {
     /// Validate the settings read before a UI caches it as successfully loaded.
@@ -11,19 +10,19 @@ impl crate::backend::Backend {
         &self,
         server: &str,
         repo: &str,
-    ) -> Result<Value, crate::request_error::RequestError> {
+    ) -> Result<Reply, crate::request_error::RequestError> {
         let server = uuid::Uuid::parse_str(server).map_err(|error| error.to_string())?;
-        let value = self.request_git(
+        let reply = self.git(
             server,
             Request::Remotes {
                 repo_id: repo.into(),
             },
             false,
         )?;
-        if !valid_configuration(&value["configuration"]) {
-            return Err("Repository settings could not be read. Retry settings.".into());
+        match &reply {
+            Reply::Remotes(remotes) if valid_configuration(&remotes.configuration) => Ok(reply),
+            _ => Err("Repository settings could not be read. Retry settings.".into()),
         }
-        Ok(value)
     }
 }
 
@@ -36,18 +35,28 @@ pub enum RemoteEdit {
 }
 
 /// Called only when the user accepts a refreshed review. A different selected
-/// remote must not retarget an existing draft.
-pub fn reviewed_remote(kind: RemoteEdit, captured: &Value, detail: &Value) -> Option<Value> {
+/// remote must not retarget an existing draft. Adding a remote reviews no
+/// existing configuration, so it accepts `Some(None)`.
+pub fn reviewed_remote(
+    kind: RemoteEdit,
+    captured: Option<&Remote>,
+    detail: Option<&Remote>,
+) -> Option<Option<Remote>> {
     if kind == RemoteEdit::Add {
-        return Some(Value::Null);
+        return Some(None);
     }
-    (captured["name"].as_str().is_some_and(|s| !s.is_empty())
-        && detail["name"] == captured["name"]
-        && detail["token"].as_str().is_some_and(|s| !s.is_empty()))
-    .then(|| detail.clone())
+    let captured = captured.filter(|captured| !captured.name.is_empty())?;
+    detail
+        .filter(|detail| detail.name == captured.name && !detail.token.is_empty())
+        .map(|detail| Some(detail.clone()))
 }
 
-pub fn remote_action(kind: RemoteEdit, remote: &Value, name: &str, url: &str) -> Option<Action> {
+pub fn remote_action(
+    kind: RemoteEdit,
+    remote: Option<&Remote>,
+    name: &str,
+    url: &str,
+) -> Option<Action> {
     let name = name.trim();
     let url = url.trim();
     let valid_name = |s: &str| {
@@ -70,40 +79,38 @@ pub fn remote_action(kind: RemoteEdit, remote: &Value, name: &str, url: &str) ->
             url: url.into(),
         });
     }
-    let target = remote["name"].as_str().filter(|s| !s.is_empty())?;
-    let token = remote["token"].as_str().filter(|s| !s.is_empty())?;
+    let remote = remote.filter(|remote| !remote.name.is_empty() && !remote.token.is_empty())?;
+    let target = remote.name.clone();
+    let token = remote.token.clone();
     Some(match kind {
         RemoteEdit::Rename => Action::RemoteRename {
-            name: target.into(),
+            name: target,
             new_name: name.into(),
-            expected_token: token.into(),
+            expected_token: token,
         },
         RemoteEdit::Url => Action::RemoteSetUrl {
-            name: target.into(),
+            name: target,
             url: url.into(),
-            expected_token: token.into(),
+            expected_token: token,
         },
         RemoteEdit::Remove => Action::RemoteRemove {
-            name: target.into(),
-            expected_token: token.into(),
+            name: target,
+            expected_token: token,
         },
         RemoteEdit::Add => return None,
     })
 }
 
-pub fn valid_configuration(config: &Value) -> bool {
-    config["token"].as_str().is_some_and(|s| !s.is_empty())
-        && config["fetchPrune"].is_boolean()
-        && ["userName", "userEmail"]
-            .iter()
-            .all(|key| config[*key].is_null() || config[*key].is_string())
+/// A configuration read can be reviewed only with its write token.
+pub fn valid_configuration(config: &RepositoryConfiguration) -> bool {
+    !config.token.is_empty()
 }
 
 /// Send only fields changed by the user, against the explicitly reviewed token.
 /// Unedited fields must not overwrite concurrent changes discovered on refresh.
 pub fn settings_action(
-    initial: &Value,
-    reviewed: &Value,
+    initial: &RepositoryConfiguration,
+    reviewed: &RepositoryConfiguration,
     name: &str,
     email: &str,
     prune: bool,
@@ -111,9 +118,9 @@ pub fn settings_action(
     if !valid_configuration(initial) || !valid_configuration(reviewed) {
         return None;
     }
-    let changed = |key: &str, value: &str| -> Option<Option<String>> {
+    let changed = |initial: &Option<String>, value: &str| -> Option<Option<String>> {
         let value = value.trim();
-        if value == initial[key].as_str().unwrap_or_default() {
+        if value == initial.as_deref().unwrap_or_default() {
             return Some(None);
         }
         if value.is_empty()
@@ -125,12 +132,12 @@ pub fn settings_action(
         }
         Some(Some(value.into()))
     };
-    let user_name = changed("userName", name)?;
-    let user_email = changed("userEmail", email)?;
-    let fetch_prune = (initial["fetchPrune"] != prune).then_some(prune);
+    let user_name = changed(&initial.user_name, name)?;
+    let user_email = changed(&initial.user_email, email)?;
+    let fetch_prune = (initial.fetch_prune != prune).then_some(prune);
     (user_name.is_some() || user_email.is_some() || fetch_prune.is_some()).then(|| {
         Action::ConfigSet {
-            expected_token: reviewed["token"].as_str().unwrap_or_default().into(),
+            expected_token: reviewed.token.clone(),
             user_name,
             user_email,
             fetch_prune,
@@ -140,95 +147,98 @@ pub fn settings_action(
 
 #[cfg(test)]
 mod tests {
-    use super::{RemoteEdit as Kind, reviewed_remote};
+    use super::{Remote, RemoteEdit as Kind, reviewed_remote};
+    fn remote(name: &str, token: &str) -> Remote {
+        Remote {
+            name: name.into(),
+            url: None,
+            push_url: None,
+            token: token.into(),
+        }
+    }
     fn action(
         kind: Kind,
-        remote: &serde_json::Value,
+        remote: Option<&Remote>,
         name: &str,
         url: &str,
     ) -> Option<serde_json::Value> {
         super::remote_action(kind, remote, name, url)
             .map(|value| serde_json::to_value(value).unwrap())
     }
-    use serde_json::{Value, json};
+    use serde_json::json;
     #[test]
     fn remote_review_rejects_missing_identity_and_never_submits_display_urls() {
-        assert!(reviewed_remote(Kind::Remove, &Value::Null, &json!({"token":"token"})).is_none());
-        let remote =
-            json!({"name":"origin","token":"captured","url":"https://[redacted]@host/repo"});
-        assert!(action(Kind::Url, &remote, "", "").is_none());
+        assert!(reviewed_remote(Kind::Remove, None, Some(&remote("", "token"))).is_none());
+        let mut captured = remote("origin", "captured");
+        captured.url = Some("https://[redacted]@host/repo".into());
+        assert!(action(Kind::Url, Some(&captured), "", "").is_none());
         assert_eq!(
-            action(Kind::Url, &remote, "", " git@host:团队/repo.git ").unwrap()["url"],
+            action(Kind::Url, Some(&captured), "", " git@host:团队/repo.git ").unwrap()["url"],
             "git@host:团队/repo.git"
         );
         for name in ["", "-option", "two names", "bad\nname"] {
-            assert!(action(Kind::Add, &Value::Null, name, "/repo").is_none());
+            assert!(action(Kind::Add, None, name, "/repo").is_none());
         }
-        assert!(action(Kind::Add, &Value::Null, "origin", "/repo\0extra").is_none());
-        assert!(action(Kind::Add, &Value::Null, "origin", "/repo\nextra").is_none());
+        assert!(action(Kind::Add, None, "origin", "/repo\0extra").is_none());
+        assert!(action(Kind::Add, None, "origin", "/repo\nextra").is_none());
         assert_eq!(
-            action(
-                Kind::Add,
-                &Value::Null,
-                " upstream ",
-                "/path with spaces/repo"
-            )
-            .unwrap()["url"],
+            action(Kind::Add, None, " upstream ", "/path with spaces/repo").unwrap()["url"],
             "/path with spaces/repo"
         );
+        assert_eq!(reviewed_remote(Kind::Add, None, None), Some(None));
     }
     #[test]
     fn refreshed_review_keeps_original_remote_identity() {
-        let captured = json!({"name":"upstream","token":"old"});
-        let page = json!({"name":"upstream","token":"new","url":"/new"});
-        let current = reviewed_remote(Kind::Url, &captured, &page).unwrap();
-        assert_eq!(current["token"], "new");
+        let captured = remote("upstream", "old");
+        let mut page = remote("upstream", "new");
+        page.url = Some("/new".into());
+        let current = reviewed_remote(Kind::Url, Some(&captured), Some(&page))
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.token, "new");
         assert_eq!(
-            action(Kind::Url, &current, "", "/draft").unwrap()["expectedToken"],
+            action(Kind::Url, Some(&current), "", "/draft").unwrap()["expectedToken"],
             "new"
         );
         assert!(
             reviewed_remote(
                 Kind::Remove,
-                &captured,
-                &json!({"name":"origin","token":"wrong"})
+                Some(&captured),
+                Some(&remote("origin", "wrong"))
             )
             .is_none()
         );
         assert!(
-            reviewed_remote(
-                Kind::Rename,
-                &captured,
-                &json!({"name":"upstream","token":""})
-            )
-            .is_none()
+            reviewed_remote(Kind::Rename, Some(&captured), Some(&remote("upstream", ""))).is_none()
         );
     }
     #[test]
     fn remote_edits_require_reviewed_identity_and_keep_exact_target() {
-        let remote = json!({"name":"upstream","token":"captured-config"});
+        let captured = remote("upstream", "captured-config");
         assert_eq!(
-            action(Kind::Rename, &remote, "renamed", ""),
+            action(Kind::Rename, Some(&captured), "renamed", ""),
             Some(
                 json!({"kind":"remote.rename","name":"upstream","newName":"renamed","expectedToken":"captured-config"})
             )
         );
         assert_eq!(
-            action(Kind::Url, &remote, "other", "/server/repository").unwrap()["name"],
+            action(Kind::Url, Some(&captured), "other", "/server/repository").unwrap()["name"],
             "upstream"
         );
-        assert!(action(Kind::Remove, &json!({"name":"upstream"}), "", "").is_none());
-        assert!(action(Kind::Add, &Value::Null, "-bad", "url").is_none());
-        assert!(action(Kind::Url, &remote, "", "").is_none());
-        assert!(action(Kind::Add, &Value::Null, "origin", "/server/repository").is_some());
+        assert!(action(Kind::Remove, Some(&remote("upstream", "")), "", "").is_none());
+        assert!(action(Kind::Remove, None, "", "").is_none());
+        assert!(action(Kind::Add, None, "-bad", "url").is_none());
+        assert!(action(Kind::Url, Some(&captured), "", "").is_none());
+        assert!(action(Kind::Add, None, "origin", "/server/repository").is_some());
     }
 }
 
 #[cfg(test)]
 mod settings_tests {
+    use super::RepositoryConfiguration;
     fn action(
-        initial: &serde_json::Value,
-        reviewed: &serde_json::Value,
+        initial: &RepositoryConfiguration,
+        reviewed: &RepositoryConfiguration,
         name: &str,
         email: &str,
         prune: bool,
@@ -242,11 +252,23 @@ mod settings_tests {
             value
         })
     }
+    fn config(
+        token: &str,
+        name: Option<&str>,
+        email: Option<&str>,
+        prune: bool,
+    ) -> RepositoryConfiguration {
+        RepositoryConfiguration {
+            fetch_prune: prune,
+            user_name: name.map(Into::into),
+            user_email: email.map(Into::into),
+            token: token.into(),
+        }
+    }
     use serde_json::json;
     #[test]
-    fn settings_reject_malformed_config_and_allow_prune_without_identity() {
-        let config =
-            json!({"token":"configuration","userName":null,"userEmail":null,"fetchPrune":false});
+    fn settings_reject_unreviewable_config_and_allow_prune_without_identity() {
+        let config = config("configuration", None, None, false);
         assert_eq!(
             action(&config, &config, "", "", true),
             Some(json!({"kind":"config.set","expectedToken":"configuration","fetchPrune":true}))
@@ -255,22 +277,15 @@ mod settings_tests {
         assert!(action(&config, &config, "Name\nextra", "", true).is_none());
         assert!(action(&config, &config, "Valid name", "-invalid", true).is_none());
         assert!(action(&config, &config, &"x".repeat(4097), "", true).is_none());
-        for (key, invalid) in [
-            ("userName", json!([])),
-            ("userEmail", json!(false)),
-            ("fetchPrune", json!("false")),
-            ("token", json!("")),
-        ] {
-            let mut malformed = config.clone();
-            malformed[key] = invalid;
-            assert!(action(&malformed, &config, "", "", true).is_none());
-            assert!(action(&config, &malformed, "", "", true).is_none());
-        }
+        let mut tokenless = config.clone();
+        tokenless.token.clear();
+        assert!(action(&tokenless, &config, "", "", true).is_none());
+        assert!(action(&config, &tokenless, "", "", true).is_none());
     }
     #[test]
     fn settings_write_only_user_changes_after_review() {
-        let original = json!({"token":"old","userName":"Original","userEmail":"old@example.test","fetchPrune":false});
-        let current = json!({"token":"new","userName":"External","userEmail":"new@example.test","fetchPrune":false});
+        let original = config("old", Some("Original"), Some("old@example.test"), false);
+        let current = config("new", Some("External"), Some("new@example.test"), false);
         assert_eq!(
             action(&original, &current, "Original", "old@example.test", true),
             Some(json!({"kind":"config.set","expectedToken":"new","fetchPrune":true}))
@@ -281,6 +296,7 @@ mod settings_tests {
         );
         assert!(action(&original, &current, "Original", "old@example.test", false).is_none());
         assert!(action(&original, &current, "", "old@example.test", true).is_none());
-        assert!(action(&original, &json!({}), "Edited", "old@example.test", true).is_none());
+        let unread = config("", None, None, false);
+        assert!(action(&original, &unread, "Edited", "old@example.test", true).is_none());
     }
 }

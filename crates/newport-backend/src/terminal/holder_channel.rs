@@ -290,7 +290,9 @@ fn waiting(link: &Link) -> Event {
 /// Whether a Needle shows the account's stable display on the computer in
 /// use, so its holders can be told to expect it.
 fn shows_stable_display(hello: &Hello) -> bool {
-    hello.require("remote-apps", 1).is_ok()
+    hello
+        .require(newport_protocol::runtime::service::REMOTE_APPS, 1)
+        .is_ok()
 }
 
 /// The worker's `start` for a terminal.
@@ -748,22 +750,34 @@ async fn attach_once(
         }),
         colors: attachment.colors,
     });
-    let (prompted, state) = tokio::time::timeout_at(deadline, async {
+    let (prompted, shell_size, state) = tokio::time::timeout_at(deadline, async {
         send(&mut writer, &attach).await?;
         let prompted = match message(&mut reader).await? {
             ServerMessage::Attached { prompted } => prompted,
             ServerMessage::Failed(error) => return Err(Error::Remote(error).into()),
             _ => bail!("The terminal did not acknowledge its attachment."),
         };
-        let state = match message(&mut reader).await? {
+        // The shell's size, which the screen is drawn at, comes first.
+        let mut next = message(&mut reader).await?;
+        let shell_size = match next {
+            ServerMessage::Size { columns, rows } => {
+                next = message(&mut reader).await?;
+                Some((columns, rows))
+            }
+            _ => None,
+        };
+        let state = match next {
             ServerMessage::Screen(state) => state,
             ServerMessage::Failed(error) => return Err(Error::Remote(error).into()),
             _ => bail!("The terminal sent no initial screen."),
         };
-        Ok::<_, anyhow::Error>((prompted, state))
+        Ok::<_, anyhow::Error>((prompted, shell_size, state))
     })
     .await
     .context("The terminal attachment timed out.")??;
+    if let Some((columns, rows)) = shell_size {
+        output.send(Event::Size { columns, rows }).await?;
+    }
     output
         .send(Event::Restore {
             state: state.to_vec(),
@@ -827,6 +841,10 @@ async fn attach_once(
                         full_pending = false;
                         if !active { viewing.inactive(); }
                         output.send(Event::Active(active)).await?;
+                    }
+                    // Before the output drawn at it, and any screen sent with it.
+                    ServerMessage::Size { columns, rows } => {
+                        output.send(Event::Size { columns, rows }).await?;
                     }
                     ServerMessage::Failed(error) => return Err(Error::Remote(error).into()),
                     _ => bail!("The terminal sent an unexpected frame."),

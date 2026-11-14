@@ -7,7 +7,6 @@ use newport_protocol::{
     common::Present,
     desktop::{Kind, Operation, Reply, host, metrics},
 };
-use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, mpsc},
@@ -25,7 +24,9 @@ const UPDATE_INSTALL: &str = "update-install";
 const UPDATE_INTERVAL: Duration = Duration::from_secs(3);
 const CACHE_INTERVAL: Duration = Duration::from_secs(10);
 
-type Outcome = Result<Value, String>;
+const UNEXPECTED: &str = "Unexpected Settings response";
+
+type Outcome = Result<Reply, String>;
 type Dispatch = dyn Fn(Operation) -> Result<mpsc::Receiver<Outcome>, String>;
 
 struct Pending {
@@ -44,6 +45,9 @@ pub struct Effects {
 /// Keep one controller for the desktop session, including while Settings is hidden.
 pub struct Settings {
     resources: HashMap<&'static str, Resource>,
+    startup: Option<host::Startup>,
+    cache: Option<metrics::CacheInfo>,
+    update: Option<host::UpdateStatus>,
     // One physical worker per key, including logically invalidated reads.
     // Check and install are mutually exclusive: at most six workers exist.
     pending: HashMap<&'static str, Pending>,
@@ -70,7 +74,6 @@ impl Settings {
                             backend
                                 .execute_with_timeout(operation, timeout)
                                 .map_err(|error| error.to_string())
-                                .and_then(project_reply)
                         });
                         let _ = sender.send(outcome);
                     })
@@ -84,6 +87,9 @@ impl Settings {
     fn with_dispatch(dispatch: Box<Dispatch>, now: Box<dyn Fn() -> Instant>) -> Self {
         Self {
             resources: HashMap::new(),
+            startup: None,
+            cache: None,
+            update: None,
             pending: HashMap::new(),
             wanted_reads: HashSet::new(),
             notified_versions: HashSet::new(),
@@ -98,6 +104,21 @@ impl Settings {
     /// update-install. Mutation errors remain available until an explicit retry.
     pub fn resource(&self, key: &str) -> Option<&Resource> {
         self.resources.get(key)
+    }
+
+    /// The last accepted launch-at-login reading.
+    pub fn startup(&self) -> Option<&host::Startup> {
+        self.startup.as_ref()
+    }
+
+    /// The last accepted metrics cache reading.
+    pub fn cache(&self) -> Option<&metrics::CacheInfo> {
+        self.cache.as_ref()
+    }
+
+    /// The last accepted update status.
+    pub fn update(&self) -> Option<&host::UpdateStatus> {
+        self.update.as_ref()
     }
 
     pub fn refresh(&mut self) {
@@ -115,11 +136,11 @@ impl Settings {
     }
 
     pub fn set_launch_at_login(&mut self, enabled: bool) -> bool {
-        let Some(value) = self.resource(STARTUP).map(|row| &row.value) else {
+        let Some(startup) = &self.startup else {
             return false;
         };
-        if value["available"] != true
-            || value["enabled"] == enabled
+        if !startup.available
+            || startup.enabled == enabled
             || self.pending.contains_key(STARTUP_WRITE)
         {
             return false;
@@ -135,9 +156,7 @@ impl Settings {
     }
 
     pub fn clear_cache(&mut self) -> bool {
-        let samples = self
-            .resource(CACHE)
-            .and_then(|row| row.value["samples"].as_u64());
+        let samples = self.cache.as_ref().map(|cache| cache.samples);
         let failed = self
             .resource(CACHE_CLEAR)
             .is_some_and(|row| row.error.is_some());
@@ -159,7 +178,12 @@ impl Settings {
 
     pub fn check_updates(&mut self) -> bool {
         if !self.updates_available()
-            || !matches!(self.update_phase(), Some("idle" | "current" | "error"))
+            || !matches!(
+                self.update_phase(),
+                Some(
+                    host::UpdatePhase::Idle | host::UpdatePhase::Current | host::UpdatePhase::Error
+                )
+            )
         {
             return false;
         }
@@ -174,14 +198,14 @@ impl Settings {
 
     /// The UI owns restart confirmation; call only after the user accepts it.
     pub fn install_update(&mut self) -> bool {
-        if !self.updates_available() || self.update_phase() != Some("ready") {
+        if !self.updates_available() || self.update_phase() != Some(host::UpdatePhase::Ready) {
             return false;
         }
         let Some(version) = self
-            .resource(UPDATE)
-            .and_then(|row| row.value["version"].as_str())
+            .update
+            .as_ref()
+            .and_then(|update| update.version.clone())
             .filter(|version| !version.is_empty())
-            .map(str::to_owned)
         else {
             return false;
         };
@@ -199,13 +223,11 @@ impl Settings {
     fn updates_available(&self) -> bool {
         !self.pending.contains_key(UPDATE_CHECK)
             && !self.pending.contains_key(UPDATE_INSTALL)
-            && self
-                .resource(UPDATE)
-                .is_some_and(|row| row.value["enabled"] == true)
+            && self.update.as_ref().is_some_and(|update| update.enabled)
     }
 
-    fn update_phase(&self) -> Option<&str> {
-        self.resource(UPDATE)?.value["phase"].as_str()
+    fn update_phase(&self) -> Option<host::UpdatePhase> {
+        self.update.as_ref().map(|update| update.phase)
     }
 
     /// Drains completions even when hidden. Status polling is global; cache
@@ -356,12 +378,35 @@ impl Settings {
         }
     }
 
-    fn finish(&mut self, key: &'static str, revision: u64, result: Outcome, now: Instant) {
+    /// Settles `key`, keeping a reading's data on this controller.
+    fn finish(
+        &mut self,
+        key: &'static str,
+        revision: u64,
+        answer: Result<Answer, String>,
+        now: Instant,
+    ) {
+        let result = answer.map(|answer| self.keep(answer));
         let row = self.resources.entry(key).or_default();
         let previous = (row.presentation_revision, read_activity(row));
-        row.finish_read(revision, result, now, None);
+        row.finish_owned(revision, result, now);
         self.changed |=
             is_write(key) || previous != (row.presentation_revision, read_activity(row));
+    }
+
+    /// Stores a reading; returns whether it differs from the last one.
+    fn keep(&mut self, answer: Answer) -> bool {
+        fn replace<T: PartialEq>(slot: &mut Option<T>, value: T) -> bool {
+            let changed = slot.as_ref() != Some(&value);
+            *slot = Some(value);
+            changed
+        }
+        match answer {
+            Answer::Startup(value) => replace(&mut self.startup, value),
+            Answer::Cache(value) => replace(&mut self.cache, value),
+            Answer::Update(value) => replace(&mut self.update, value),
+            Answer::Done => true,
+        }
     }
 
     fn accept(
@@ -372,19 +417,20 @@ impl Settings {
         now: Instant,
         effects: &mut Effects,
     ) {
+        let answer = result.and_then(|reply| answer(key, reply));
         match key {
             STARTUP_WRITE => {
                 self.invalidate_read(STARTUP);
-                if let Ok(value) = &result {
-                    self.finish(STARTUP, revision, Ok(value.clone()), now);
+                if let Ok(Answer::Startup(value)) = &answer {
+                    self.finish(STARTUP, revision, Ok(Answer::Startup(value.clone())), now);
                 } else {
                     self.wanted_reads.insert(STARTUP);
                 }
             }
             CACHE_CLEAR => {
                 self.invalidate_read(CACHE);
-                if let Ok(value) = &result {
-                    self.finish(CACHE, revision, Ok(value.clone()), now);
+                if let Ok(Answer::Cache(value)) = &answer {
+                    self.finish(CACHE, revision, Ok(Answer::Cache(value.clone())), now);
                     effects.metrics_cleared = true;
                 }
                 self.wanted_reads.insert(CACHE);
@@ -394,11 +440,12 @@ impl Settings {
                 self.wanted_reads.insert(UPDATE);
             }
             UPDATE => {
-                if let Ok(value) = &result
-                    && value["enabled"] == true
-                    && value["phase"] == "ready"
-                    && let Some(version) = value["version"]
-                        .as_str()
+                if let Ok(Answer::Update(value)) = &answer
+                    && value.enabled
+                    && value.phase == host::UpdatePhase::Ready
+                    && let Some(version) = value
+                        .version
+                        .as_deref()
                         .filter(|version| !version.is_empty())
                     && self.notified_versions.insert(version.to_owned())
                 {
@@ -407,7 +454,47 @@ impl Settings {
             }
             _ => {}
         }
-        self.finish(key, revision, result, now);
+        self.finish(key, revision, answer, now);
+    }
+}
+
+/// A Settings reply, checked against the request it answers.
+enum Answer {
+    Startup(host::Startup),
+    Cache(metrics::CacheInfo),
+    Update(host::UpdateStatus),
+    /// A write that answers with no reading.
+    Done,
+}
+
+fn answer(key: &str, reply: Reply) -> Result<Answer, String> {
+    let answer = match reply {
+        Reply::Host(value) => match *value {
+            host::Reply::StartupSettings(value) | host::Reply::SetLaunchAtLogin(value) => {
+                Answer::Startup(*value)
+            }
+            host::Reply::UpdateStatus(value) => Answer::Update(*value),
+            host::Reply::CheckForUpdates(_) | host::Reply::InstallUpdate(_) => Answer::Done,
+            host::Reply::Activate(_) | host::Reply::OpenRemoteApp(_) => {
+                return Err(UNEXPECTED.into());
+            }
+        },
+        Reply::Metrics(value) => match *value {
+            metrics::Reply::Cache(value) | metrics::Reply::ClearCache(value) => {
+                Answer::Cache(*value)
+            }
+            metrics::Reply::Collect(_) | metrics::Reply::History(_) => {
+                return Err(UNEXPECTED.into());
+            }
+        },
+        _ => return Err(UNEXPECTED.into()),
+    };
+    match (&answer, key) {
+        (Answer::Startup(_), STARTUP | STARTUP_WRITE)
+        | (Answer::Cache(_), CACHE | CACHE_CLEAR)
+        | (Answer::Update(_), UPDATE)
+        | (Answer::Done, UPDATE_CHECK | UPDATE_INSTALL) => Ok(answer),
+        _ => Err(UNEXPECTED.into()),
     }
 }
 
@@ -432,53 +519,6 @@ fn request_timeout(kind: Kind) -> Duration {
         Kind::HostInstallUpdate => 600,
         _ => 30,
     })
-}
-
-pub(crate) fn project_reply(reply: Reply) -> Outcome {
-    match reply {
-        Reply::Host(value) => match *value {
-            host::Reply::StartupSettings(value) | host::Reply::SetLaunchAtLogin(value) => {
-                Ok(json!({"enabled":value.enabled,"available":value.available}))
-            }
-            host::Reply::UpdateStatus(value) => {
-                let phase = match value.phase {
-                    host::UpdatePhase::Idle => "idle",
-                    host::UpdatePhase::Checking => "checking",
-                    host::UpdatePhase::Downloading => "downloading",
-                    host::UpdatePhase::Ready => "ready",
-                    host::UpdatePhase::Installing => "installing",
-                    host::UpdatePhase::Current => "current",
-                    host::UpdatePhase::Error => "error",
-                };
-                Ok(
-                    json!({"enabled":value.enabled,"currentVersion":value.current_version,"build":{"commit":value.build.commit,"local":value.build.local,"builtAt":value.build.built_at},"phase":phase,"version":value.version,"downloaded":value.downloaded,"total":value.total,"error":value.error}),
-                )
-            }
-            host::Reply::CheckForUpdates(_) | host::Reply::InstallUpdate(_) => Ok(Value::Null),
-            host::Reply::Activate(_) | host::Reply::OpenRemoteApp(_) => {
-                Err("Unexpected Settings response".into())
-            }
-        },
-        Reply::Metrics(value) => match *value {
-            metrics::Reply::Cache(value) | metrics::Reply::ClearCache(value) => {
-                Ok(json!({"bytes":value.bytes,"samples":value.samples}))
-            }
-            metrics::Reply::Collect(_) | metrics::Reply::History(_) => {
-                Err("Unexpected Settings response".into())
-            }
-        },
-        Reply::Account(_)
-        | Reply::Connection(_)
-        | Reply::Configuration(_)
-        | Reply::Files(_)
-        | Reply::Services(_)
-        | Reply::Containers(_)
-        | Reply::Preferences(_)
-        | Reply::Git(_)
-        | Reply::Applications(_)
-        | Reply::Events(_)
-        | Reply::Terminal(_) => Err("Unexpected Settings response".into()),
-    }
 }
 
 fn guarded_call(call: impl FnOnce() -> Outcome) -> Outcome {
@@ -538,7 +578,10 @@ mod tests {
             h.settings.refresh();
             h.reply(Kind::HostStartupSettings, Ok(startup(false)));
             h.reply(Kind::MetricsCache, Ok(cache(12)));
-            h.reply(Kind::HostUpdateStatus, Ok(update("idle", None)));
+            h.reply(
+                Kind::HostUpdateStatus,
+                Ok(update(host::UpdatePhase::Idle, None)),
+            );
             h.settings.poll(true);
             h
         }
@@ -583,16 +626,55 @@ mod tests {
         }
     }
 
-    fn startup(enabled: bool) -> Value {
-        json!({"available":true,"enabled":enabled})
+    fn startup_info(enabled: bool) -> host::Startup {
+        host::Startup {
+            available: true,
+            enabled,
+        }
+    }
+    fn startup(enabled: bool) -> Reply {
+        Reply::Host(Box::new(host::Reply::StartupSettings(Box::new(
+            startup_info(enabled),
+        ))))
     }
 
-    fn cache(samples: u64) -> Value {
-        json!({"samples":samples,"bytes":samples * 80})
+    fn cache_info(samples: u64) -> metrics::CacheInfo {
+        metrics::CacheInfo {
+            samples,
+            bytes: samples * 80,
+        }
+    }
+    fn cache(samples: u64) -> Reply {
+        Reply::Metrics(Box::new(metrics::Reply::Cache(Box::new(cache_info(
+            samples,
+        )))))
     }
 
-    fn update(phase: &str, version: Option<&str>) -> Value {
-        json!({"enabled":true,"phase":phase,"version":version,"currentVersion":"0.3.0"})
+    fn update_status(phase: host::UpdatePhase, version: Option<&str>) -> host::UpdateStatus {
+        host::UpdateStatus {
+            enabled: true,
+            current_version: "0.3.0".into(),
+            build: host::BuildStamp {
+                commit: None,
+                local: false,
+                built_at: None,
+            },
+            phase,
+            version: version.map(Into::into),
+            downloaded: 0,
+            total: None,
+            error: None,
+        }
+    }
+    fn update(phase: host::UpdatePhase, version: Option<&str>) -> Reply {
+        Reply::Host(Box::new(host::Reply::UpdateStatus(Box::new(
+            update_status(phase, version),
+        ))))
+    }
+
+    /// The reply to a write that answers with no reading.
+    fn done() -> Reply {
+        Reply::Host(Box::new(host::Reply::CheckForUpdates(Box::new(Present {}))))
     }
 
     #[test]
@@ -609,7 +691,10 @@ mod tests {
                 "cached background admission is quiet"
             );
             h.reply(Kind::MetricsCache, Ok(cache(12)));
-            h.reply(Kind::HostUpdateStatus, Ok(update("idle", None)));
+            h.reply(
+                Kind::HostUpdateStatus,
+                Ok(update(host::UpdatePhase::Idle, None)),
+            );
             assert!(
                 !h.settings.poll(true).changed,
                 "identical completion is quiet"
@@ -634,7 +719,10 @@ mod tests {
         h.advance(10);
         assert!(!h.settings.poll(true).changed);
         h.reply(Kind::MetricsCache, Err("temporary failure".into()));
-        h.reply(Kind::HostUpdateStatus, Ok(update("idle", None)));
+        h.reply(
+            Kind::HostUpdateStatus,
+            Ok(update(host::UpdatePhase::Idle, None)),
+        );
         assert!(h.settings.poll(true).changed);
         let observed = h.resource(CACHE).updated_at;
         let data_revision = h.resource(CACHE).data_revision;
@@ -648,7 +736,10 @@ mod tests {
             Some("temporary failure")
         );
         h.reply(Kind::MetricsCache, Err("temporary failure".into()));
-        h.reply(Kind::HostUpdateStatus, Ok(update("idle", None)));
+        h.reply(
+            Kind::HostUpdateStatus,
+            Ok(update(host::UpdatePhase::Idle, None)),
+        );
         assert!(
             h.settings.poll(true).changed,
             "failed retry re-enables the action"
@@ -672,7 +763,10 @@ mod tests {
         assert!(h.settings.poll(true).changed);
         h.reply(Kind::HostStartupSettings, Ok(startup(false)));
         h.reply(Kind::MetricsCache, Ok(cache(12)));
-        h.reply(Kind::HostUpdateStatus, Ok(update("idle", None)));
+        h.reply(
+            Kind::HostUpdateStatus,
+            Ok(update(host::UpdatePhase::Idle, None)),
+        );
         assert!(
             h.settings.poll(true).changed,
             "manual refresh settles visibly"
@@ -680,12 +774,15 @@ mod tests {
         for _ in 0..2 {
             assert!(h.settings.check_updates());
             assert!(h.settings.poll(false).changed);
-            h.reply(Kind::HostCheckForUpdates, Ok(Value::Null));
+            h.reply(Kind::HostCheckForUpdates, Ok(done()));
             assert!(
                 h.settings.poll(false).changed,
                 "each acknowledged action settles"
             );
-            h.reply(Kind::HostUpdateStatus, Ok(update("idle", None)));
+            h.reply(
+                Kind::HostUpdateStatus,
+                Ok(update(host::UpdatePhase::Idle, None)),
+            );
             assert!(!h.settings.poll(false).changed);
         }
         assert_eq!(h.count(Kind::HostCheckForUpdates), 2);
@@ -710,7 +807,7 @@ mod tests {
 
         h.reply(Kind::MetricsCache, Err("connection closed".into()));
         h.settings.poll(true);
-        assert_eq!(h.resource(CACHE).value, cache(12));
+        assert_eq!(h.settings.cache(), Some(&cache_info(12)));
         assert_eq!(h.resource(CACHE).updated_at, updated_at);
         assert_eq!(
             h.resource(CACHE).error.as_deref(),
@@ -724,7 +821,7 @@ mod tests {
         );
         h.reply(Kind::MetricsCache, Ok(cache(13)));
         h.settings.poll(true);
-        assert_eq!(h.resource(CACHE).value, cache(13));
+        assert_eq!(h.settings.cache(), Some(&cache_info(13)));
         assert!(h.resource(CACHE).error.is_none());
     }
 
@@ -768,12 +865,12 @@ mod tests {
             h.reply(Kind::HostStartupSettings, Ok(startup(false)));
             if read_first {
                 h.settings.poll(false);
-                assert_eq!(h.resource(STARTUP).value, startup(false));
+                assert_eq!(h.settings.startup(), Some(&startup_info(false)));
                 assert!(h.resource(STARTUP_WRITE).pending);
             }
             h.reply(Kind::HostSetLaunchAtLogin, Ok(startup(true)));
             h.settings.poll(false);
-            assert_eq!(h.resource(STARTUP).value, startup(true));
+            assert_eq!(h.settings.startup(), Some(&startup_info(true)));
             assert!(!h.resource(STARTUP_WRITE).pending);
             assert_eq!(h.count(Kind::HostStartupSettings), 2);
         }
@@ -793,11 +890,11 @@ mod tests {
             h.settings.poll(true);
         }
         assert_eq!(h.count(Kind::HostStartupSettings), 2);
-        assert_eq!(h.resource(STARTUP).value, startup(true));
+        assert_eq!(h.settings.startup(), Some(&startup_info(true)));
         assert!(h.settings.pending.len() <= 6);
         h.reply(Kind::HostStartupSettings, Ok(startup(false)));
         h.settings.poll(false);
-        assert_eq!(h.resource(STARTUP).value, startup(true));
+        assert_eq!(h.settings.startup(), Some(&startup_info(true)));
         assert_eq!(h.count(Kind::HostStartupSettings), 3);
         h.reply(Kind::HostStartupSettings, Ok(startup(true)));
         h.settings.poll(false);
@@ -820,7 +917,7 @@ mod tests {
         h.reply(Kind::HostStartupSettings, Ok(startup(true)));
         h.advance(10);
         h.settings.poll(true);
-        assert_eq!(h.resource(STARTUP).value, startup(true));
+        assert_eq!(h.settings.startup(), Some(&startup_info(true)));
         assert_eq!(h.count(Kind::HostSetLaunchAtLogin), 1);
         assert!(!h.settings.set_launch_at_login(true));
     }
@@ -833,17 +930,17 @@ mod tests {
         h.reply(Kind::MetricsClearCache, Ok(cache(0)));
         let effects = h.settings.poll(false);
         assert!(effects.metrics_cleared);
-        assert_eq!(h.resource(CACHE).value, cache(0));
+        assert_eq!(h.settings.cache(), Some(&cache_info(0)));
         assert_eq!(h.count(Kind::MetricsCache), 2);
         assert!(!h.settings.poll(false).metrics_cleared);
         h.reply(Kind::MetricsCache, Ok(cache(12)));
         assert!(!h.settings.poll(false).metrics_cleared);
-        assert_eq!(h.resource(CACHE).value, cache(0));
+        assert_eq!(h.settings.cache(), Some(&cache_info(0)));
         assert_eq!(h.count(Kind::MetricsCache), 3);
         assert!(!h.settings.clear_cache());
         h.reply(Kind::MetricsCache, Ok(cache(1)));
         h.settings.poll(false);
-        assert_eq!(h.resource(CACHE).value, cache(1));
+        assert_eq!(h.settings.cache(), Some(&cache_info(1)));
     }
 
     #[test]
@@ -868,7 +965,7 @@ mod tests {
         assert_eq!(h.count(Kind::HostUpdateStatus), 2);
         h.reply(
             Kind::HostUpdateStatus,
-            Ok(update("downloading", Some("0.4.0"))),
+            Ok(update(host::UpdatePhase::Downloading, Some("0.4.0"))),
         );
         h.settings.poll(false);
         h.advance(10);
@@ -880,15 +977,21 @@ mod tests {
         assert!(h.resource(UPDATE_CHECK).pending);
         assert!(!h.settings.install_update());
         // Both completions arrive before the next poll; writes must win.
-        h.reply(Kind::HostCheckForUpdates, Ok(Value::Null));
+        h.reply(Kind::HostCheckForUpdates, Ok(done()));
         h.reply(
             Kind::HostUpdateStatus,
-            Ok(update("downloading", Some("0.4.0"))),
+            Ok(update(host::UpdatePhase::Downloading, Some("0.4.0"))),
         );
         h.settings.poll(false);
         assert_eq!(h.count(Kind::HostUpdateStatus), 4);
-        assert_eq!(h.resource(UPDATE).value["phase"], "downloading");
-        h.reply(Kind::HostUpdateStatus, Ok(update("ready", Some("0.4.0"))));
+        assert_eq!(
+            h.settings.update().unwrap().phase,
+            host::UpdatePhase::Downloading
+        );
+        h.reply(
+            Kind::HostUpdateStatus,
+            Ok(update(host::UpdatePhase::Ready, Some("0.4.0"))),
+        );
         assert_eq!(
             h.settings.poll(false).update_ready.as_deref(),
             Some("0.4.0")
@@ -916,12 +1019,13 @@ mod tests {
         assert!(!h.settings.poll(false).update_ready.is_some());
         assert_eq!(h.count(Kind::HostUpdateStatus), 1);
         assert_eq!(h.count(Kind::MetricsCache), 0);
+        use host::UpdatePhase::{Error, Ready};
         for (phase, version, expected) in [
-            ("ready", Some("0.4.0"), Some("0.4.0")),
-            ("ready", Some("0.4.0"), None),
-            ("error", Some("0.4.0"), None),
-            ("ready", Some("0.4.0"), None),
-            ("ready", Some("0.5.0"), Some("0.5.0")),
+            (Ready, Some("0.4.0"), Some("0.4.0")),
+            (Ready, Some("0.4.0"), None),
+            (Error, Some("0.4.0"), None),
+            (Ready, Some("0.4.0"), None),
+            (Ready, Some("0.5.0"), Some("0.5.0")),
         ] {
             h.reply(Kind::HostUpdateStatus, Ok(update(phase, version)));
             assert_eq!(h.settings.poll(false).update_ready.as_deref(), expected);
@@ -954,7 +1058,10 @@ mod tests {
         h.settings.poll(true);
         assert_eq!(h.count(Kind::HostUpdateStatus), 3);
         assert_eq!(h.count(Kind::MetricsCache), 3);
-        h.reply(Kind::HostUpdateStatus, Ok(update("current", None)));
+        h.reply(
+            Kind::HostUpdateStatus,
+            Ok(update(host::UpdatePhase::Current, None)),
+        );
         h.settings.poll(false);
         assert!(h.resource(UPDATE).error.is_none());
     }
@@ -969,18 +1076,29 @@ mod tests {
         h.settings.refresh();
         h.reply(
             Kind::HostStartupSettings,
-            Ok(json!({"available":false,"enabled":false})),
+            Ok(Reply::Host(Box::new(host::Reply::StartupSettings(
+                Box::new(host::Startup {
+                    available: false,
+                    enabled: false,
+                }),
+            )))),
         );
         h.reply(Kind::MetricsCache, Ok(cache(0)));
         h.reply(
             Kind::HostUpdateStatus,
-            Ok(json!({"enabled":false,"phase":"ready"})),
+            Ok(Reply::Host(Box::new(host::Reply::UpdateStatus(Box::new(
+                host::UpdateStatus {
+                    enabled: false,
+                    ..update_status(host::UpdatePhase::Ready, None)
+                },
+            ))))),
         );
         h.settings.poll(false);
         assert!(!h.settings.set_launch_at_login(true));
         assert!(!h.settings.clear_cache());
         assert!(!h.settings.install_update());
-        for phase in ["checking", "downloading", "installing", "unknown"] {
+        use host::UpdatePhase::{Checking, Downloading, Installing};
+        for phase in [Checking, Downloading, Installing] {
             h.advance(3);
             h.settings.poll(false);
             h.reply(Kind::HostUpdateStatus, Ok(update(phase, None)));
@@ -1014,7 +1132,10 @@ mod tests {
     #[test]
     fn transport_panic_and_request_timeouts_are_bounded() {
         assert!(guarded_call(|| panic!("transport panicked")).is_err());
-        assert_eq!(guarded_call(|| Ok(json!(true))), Ok(json!(true)));
+        assert!(matches!(
+            guarded_call(|| Ok(done())),
+            Ok(Reply::Host(reply)) if matches!(*reply, host::Reply::CheckForUpdates(_))
+        ));
         assert_eq!(
             request_timeout(Kind::HostStartupSettings),
             Duration::from_secs(30)

@@ -3,27 +3,41 @@
 use super::*;
 use gpui_kit::base::Selectable;
 
-use crate::git_page_demand::{Demand, identity};
+use crate::git_page_demand::Demand;
+use git_history::CommitFiles;
+use newport_protocol::git::{Delta, DiffMetadata};
+
+/// What identifies a file page for paging demand: its envelope and row
+/// count, without the rows.
+pub(super) type Identity = Option<(CommitFiles, usize)>;
+
+pub(super) fn identity(page: Option<&CommitFiles>) -> Identity {
+    page.map(|page| (git_listing::envelope(page), page.entries.len()))
+}
+
+fn partial(page: &CommitFiles) -> bool {
+    page.next_cursor.is_some() || page.metadata.truncated == Some(true)
+}
 
 /// Compact files sit above the diff. Reserve the full cap for skeletons and
 /// notices; completed short lists give their unused height back to the diff.
-fn compact_height(page: &Value, unsettled: bool) -> f32 {
-    let Some(entries) = page["entries"].as_array() else {
+fn compact_height(page: Option<&CommitFiles>, unsettled: bool) -> f32 {
+    let Some(page) = page else {
         return 130.;
     };
-    if unsettled || page["nextCursor"].is_string() || page["metadata"]["truncated"] == true {
+    if unsettled || partial(page) {
         return 130.;
     }
-    if entries.is_empty() {
+    if page.entries.is_empty() {
         return 80.;
     }
-    (34. + 28. * entries.len().min(4) as f32 + 6.).min(130.)
+    (34. + 28. * page.entries.len().min(4) as f32 + 6.).min(130.)
 }
 
-fn count_label(page: &Value) -> String {
-    let loaded = page["entries"].as_array().map(Vec::len).unwrap_or(0);
-    let partial = page["nextCursor"].is_string() || page["metadata"]["truncated"] == true;
-    match page["metadata"]["totalFiles"].as_u64() {
+fn count_label(page: &CommitFiles) -> String {
+    let loaded = page.entries.len();
+    let partial = partial(page);
+    match page.metadata.total_files {
         Some(total) if partial => format!("{loaded} of {total} files loaded"),
         Some(1) => "1 changed file".into(),
         Some(total) => format!("{total} changed files"),
@@ -35,47 +49,41 @@ fn count_label(page: &Value) -> String {
         _ => format!("{loaded} changed files"),
     }
 }
-fn select_current(page: &Value, owner: &Value, entry: &Value) -> bool {
-    page["metadata"] == *owner
-        && page["entries"]
-            .as_array()
-            .is_some_and(|entries| entries.contains(entry))
+fn select_current(page: Option<&CommitFiles>, owner: &DiffMetadata, entry: &Delta) -> bool {
+    page.is_some_and(|page| page.metadata == *owner && page.entries.contains(entry))
 }
 impl git_history::History {
     /// A first page starts a new comparison. Continuations keep the user's file
     /// and loaded diff; an initially empty page may acquire its first file later.
-    pub(super) fn accept_files(&mut self, page: Value, continuation: bool) -> Option<Value> {
+    pub(super) fn accept_files(&mut self, page: CommitFiles, continuation: bool) -> Option<Delta> {
         if !continuation {
             self.file_demand = Demand::default();
         }
-        self.files = page;
-        if continuation && self.path["bytesB64"].is_string() {
+        self.files = Some(page);
+        if continuation && self.path.is_some() {
             return None;
         }
-        self.path = Value::Null;
-        self.diff = Value::Null;
+        self.path = None;
+        self.diff = None;
         self.diff_cursor = None;
-        self.files["entries"]
-            .as_array()?
+        self.files
+            .as_ref()?
+            .entries
             .iter()
-            .find(|entry| {
-                git_history::file_path(entry)["bytesB64"]
-                    .as_str()
-                    .is_some_and(|path| !path.is_empty())
-            })
+            .find(|entry| !git_history::file_path(entry).bytes_b64.is_empty())
             .cloned()
     }
-    fn select_file(&mut self, owner: &Value, entry: &Value) -> bool {
+    fn select_file(&mut self, owner: &DiffMetadata, entry: &Delta) -> bool {
         let path = git_history::file_path(entry);
         if self.error.is_some()
-            || !select_current(&self.files, owner, entry)
-            || path["bytesB64"].as_str().is_none_or(str::is_empty)
-            || path["bytesB64"] == self.path["bytesB64"]
+            || !select_current(self.files.as_ref(), owner, entry)
+            || path.bytes_b64.is_empty()
+            || Some(&path.bytes_b64) == self.path.as_ref().map(|path| &path.bytes_b64)
         {
             return false;
         }
-        self.path = path;
-        self.diff = Value::Null;
+        self.path = Some(path);
+        self.diff = None;
         self.diff_cursor = None;
         true
     }
@@ -93,7 +101,13 @@ fn prepare_retry(
     }
     history.file_cursor = None;
     history.file_demand = Demand::default();
-    if more && history.error.is_none() && history.files["nextCursor"].is_string() {
+    if more
+        && history.error.is_none()
+        && history
+            .files
+            .as_ref()
+            .is_some_and(|files| files.next_cursor.is_some())
+    {
         resources.invalidate("git-history-files-more");
         Some(true)
     } else {
@@ -105,9 +119,9 @@ fn prepare_retry(
         ] {
             resources.invalidate(key);
         }
-        history.files = Value::Null;
-        history.path = Value::Null;
-        history.diff = Value::Null;
+        history.files = None;
+        history.path = None;
+        history.diff = None;
         history.diff_cursor = None;
         history.error = None;
         history.scroll = UniformListScrollHandle::default();
@@ -124,9 +138,9 @@ impl Newport {
                         .get(key)
                         .is_some_and(|resource| resource.pending || resource.error.is_some())
                 });
-        compact_height(&self.git.history.files, unsettled)
+        compact_height(self.git.history.files.as_ref(), unsettled)
     }
-    pub(super) fn git_history_select_file(&mut self, owner: &Value, entry: &Value) {
+    pub(super) fn git_history_select_file(&mut self, owner: &DiffMetadata, entry: &Delta) {
         if !self.git.history.select_file(owner, entry) {
             return;
         }
@@ -143,7 +157,12 @@ impl Newport {
             && !self.project_dialog_open
             && (!git_layout::compact(self.content_width, self.git.tab) || self.git.detail_open)
             && self.git.history.error.is_none()
-            && self.git.history.files["nextCursor"].is_string()
+            && self
+                .git
+                .history
+                .files
+                .as_ref()
+                .is_some_and(|files| files.next_cursor.is_some())
             && self.git.history.file_cursor.is_none()
             && ["git-history-files", "git-history-files-more"]
                 .iter()
@@ -155,18 +174,19 @@ impl Newport {
         let at_end = self.git.history.scroll.is_scrolled_to_end() != Some(false);
         let scrolled = self.git.history.file_demand.take_scrolled(
             &self.git.history.scroll,
-            self.git.history.files["entries"]
-                .as_array()
-                .map_or(0, Vec::len),
+            self.git
+                .history
+                .files
+                .as_ref()
+                .map_or(0, |files| files.entries.len()),
             28.,
             ready,
         );
-        if self
-            .git
-            .history
-            .file_demand
-            .take(&self.git.history.files, ready, at_end)
-            || (ready && scrolled)
+        if self.git.history.file_demand.take(
+            &identity(self.git.history.files.as_ref()),
+            ready,
+            at_end,
+        ) || (ready && scrolled)
         {
             self.git_history_files(true);
         }
@@ -184,9 +204,9 @@ impl Newport {
         self.git_history_files(more);
     }
     pub(super) fn git_history_file_list(&self, cx: &mut Context<Self>) -> AnyElement {
-        let page = &self.git.history.files;
-        let has_page = page["entries"].is_array();
-        let entries = rows(&page["entries"]);
+        let page = self.git.history.files.as_ref();
+        let has_page = page.is_some();
+        let entries = page.map(|page| page.entries.clone()).unwrap_or_default();
         let loading = self
             .resources
             .get("git-history-files")
@@ -204,9 +224,9 @@ impl Newport {
             .resources
             .get("git-history-files-more")
             .is_some_and(|r| r.error.is_some());
-        let more = page["nextCursor"].is_string();
-        let truncated = page["metadata"]["truncated"] == true;
-        let owner = page["metadata"].clone();
+        let more = page.is_some_and(|page| page.next_cursor.is_some());
+        let truncated = page.is_some_and(|page| page.metadata.truncated == Some(true));
+        let owner = page.map(|page| page.metadata.clone());
         let scroll_key = identity(page);
         div()
             .flex()
@@ -214,7 +234,7 @@ impl Newport {
             .size_full()
             .min_w_0()
             .min_h_0()
-            .when(has_page, |view| {
+            .when_some(page, |view, page| {
                 view.child(
                     div()
                         .id("commit-files-count")
@@ -252,8 +272,8 @@ impl Newport {
                     view.child(empty::compact(
                         if more
                             || truncated
-                            || page["metadata"]["totalFiles"]
-                                .as_u64()
+                            || page
+                                .and_then(|page| page.metadata.total_files)
                                 .is_some_and(|n| n > 0)
                         {
                             "No files in the loaded page."
@@ -286,24 +306,25 @@ impl Newport {
                                         let entry = entries[i].clone();
                                         let owner = owner.clone();
                                         let path = git_history::file_path(&entry);
-                                        let title = path["display"]
-                                            .as_str()
-                                            .unwrap_or("Unknown file")
-                                            .to_owned();
-                                        let mark = git_file_row::mark(
-                                            entry["status"].as_str().unwrap_or_default(),
-                                        );
+                                        let title = path.display.clone();
+                                        let mark = git_file_row::mark(&entry.status);
                                         let description = git_file_row::description(
-                                            &entry,
+                                            git_file_row::origin(
+                                                Some(&entry.old_path),
+                                                &entry.new_path,
+                                            ),
                                             &title,
                                             git_file_row::name(mark),
                                         );
-                                        let valid = path["bytesB64"]
-                                            .as_str()
-                                            .is_some_and(|path| !path.is_empty());
+                                        let valid = !path.bytes_b64.is_empty();
                                         let selected = valid
-                                            && path["bytesB64"]
-                                                == this.git.history.path["bytesB64"];
+                                            && Some(&path.bytes_b64)
+                                                == this
+                                                    .git
+                                                    .history
+                                                    .path
+                                                    .as_ref()
+                                                    .map(|path| &path.bytes_b64);
                                         div().h(px(28.)).w_full().min_w_0().px(px(6.)).child(
                                             git_file_row::row_focus(
                                                 crate::controls::button(("git-history-file", i)),
@@ -321,7 +342,9 @@ impl Newport {
                                             .child(git_file_row::path(title, cx))
                                             .on_click(
                                                 cx.listener(move |this, _, _, cx| {
-                                                    this.git_history_select_file(&owner, &entry);
+                                                    if let Some(owner) = &owner {
+                                                        this.git_history_select_file(owner, &entry);
+                                                    }
                                                     cx.notify();
                                                 }),
                                             ),
@@ -360,67 +383,88 @@ impl Newport {
 
 #[cfg(test)]
 mod tests {
-    use super::{Demand, compact_height, count_label, select_current};
-    use serde_json::json;
+    use super::{Demand, compact_height, count_label, identity, select_current};
+    use crate::git_history::CommitFiles;
+    use newport_protocol::git::{Delta, Page, Path};
+    fn delta(path: &str) -> Delta {
+        Delta {
+            old_path: Path::new(path.as_bytes()),
+            new_path: Path::new(path.as_bytes()),
+            old_oid: None,
+            new_oid: None,
+            old_mode: 0o100644,
+            new_mode: 0o100644,
+            status: "Modified".into(),
+        }
+    }
+    fn files(count: usize, next: Option<&str>) -> CommitFiles {
+        Page {
+            snapshot: "a".into(),
+            entries: (0..count).map(|i| delta(&format!("file-{i}"))).collect(),
+            next_cursor: next.map(Into::into),
+            metadata: crate::git_fixture::commit_metadata("one", b"file"),
+        }
+    }
     #[test]
     fn compact_file_list_gives_short_completed_lists_space_without_squashing_feedback() {
-        assert_eq!(compact_height(&json!({"entries":[{}]}), false), 68.);
-        assert_eq!(compact_height(&json!({"entries":[{},{}]}), false), 96.);
-        assert_eq!(
-            compact_height(&json!({"entries":[{},{},{},{}]}), false),
-            130.
-        );
-        assert_eq!(compact_height(&json!({"entries":[]}), false), 80.);
-        assert_eq!(compact_height(&json!({"entries":[{}]}), true), 130.);
-        assert_eq!(
-            compact_height(&json!({"entries":[{}],"nextCursor":"more"}), false),
-            130.
-        );
-        assert_eq!(
-            compact_height(&json!({"entries":[],"metadata":{"truncated":true}}), false),
-            130.
-        );
-        assert_eq!(compact_height(&serde_json::Value::Null, false), 130.);
+        assert_eq!(compact_height(Some(&files(1, None)), false), 68.);
+        assert_eq!(compact_height(Some(&files(2, None)), false), 96.);
+        assert_eq!(compact_height(Some(&files(4, None)), false), 130.);
+        assert_eq!(compact_height(Some(&files(0, None)), false), 80.);
+        assert_eq!(compact_height(Some(&files(1, None)), true), 130.);
+        assert_eq!(compact_height(Some(&files(1, Some("more"))), false), 130.);
+        let mut truncated = files(0, None);
+        truncated.metadata.truncated = Some(true);
+        assert_eq!(compact_height(Some(&truncated), false), 130.);
+        assert_eq!(compact_height(None, false), 130.);
     }
     #[test]
     fn first_file_opens_once_and_continuations_preserve_the_selected_diff() {
-        let deleted = json!({"oldPath":{"display":"removed","bytesB64":"cmVtb3ZlZA=="}});
-        let next = json!({"newPath":{"display":"second","bytesB64":"c2Vjb25k"}});
-        let page = json!({"metadata":{"commitOid":{"hex":"one"},"parentIndex":0},"entries":[{},deleted,next],"nextCursor":"next"});
+        let mut unnamed = delta("");
+        unnamed.new_path.bytes_b64.clear();
+        let deleted = Delta {
+            status: "Deleted".into(),
+            ..delta("removed")
+        };
+        let next = delta("second");
+        let mut page = files(0, Some("next"));
+        page.entries = vec![unnamed, deleted.clone(), next.clone()];
         let mut history = crate::git_history::History::default();
         let first = history.accept_files(page.clone(), false).unwrap();
         assert_eq!(first, deleted, "deleted files use their original path");
-        assert!(history.select_file(&page["metadata"], &first));
-        assert!(history.select_file(&page["metadata"], &next));
-        let loaded_diff = json!({"entries":[{"text":"loaded"}],"nextCursor":"diff-next"});
-        history.diff = loaded_diff.clone();
+        assert!(history.select_file(&page.metadata, &first));
+        assert!(history.select_file(&page.metadata, &next));
+        let loaded_diff = crate::git_fixture::diff_page(
+            "loaded",
+            crate::git_fixture::commit_metadata("one", b"second"),
+            vec![],
+            Some("diff-next"),
+        );
+        history.diff = Some(loaded_diff.clone());
         history.diff_cursor = Some("diff-next".into());
         assert!(
-            !history.select_file(&page["metadata"], &next),
+            !history.select_file(&page.metadata, &next),
             "clicking the selected file must not refetch"
         );
         let mut appended = page.clone();
-        appended["entries"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({"newPath":{"bytesB64":"dGhpcmQ="}}));
+        appended.entries.push(delta("third"));
         assert!(history.accept_files(appended, true).is_none());
-        assert_eq!(history.path, next["newPath"]);
-        assert_eq!(history.diff, loaded_diff);
+        assert_eq!(history.path, Some(next.new_path.clone()));
+        assert_eq!(history.diff, Some(loaded_diff));
         assert_eq!(history.diff_cursor.as_deref(), Some("diff-next"));
 
         let mut comparison = page.clone();
-        comparison["metadata"]["parentIndex"] = json!(1);
+        comparison.metadata.parent_index = Some(1);
         let first = history.accept_files(comparison.clone(), false).unwrap();
         assert!(
-            !history.select_file(&page["metadata"], &next),
+            !history.select_file(&page.metadata, &next),
             "retained rows cannot select an old parent"
         );
-        assert!(history.select_file(&comparison["metadata"], &first));
-        assert_eq!(history.path, deleted["oldPath"]);
-        assert!(history.diff.is_null() && history.diff_cursor.is_none());
+        assert!(history.select_file(&comparison.metadata, &first));
+        assert_eq!(history.path, Some(deleted.old_path.clone()));
+        assert!(history.diff.is_none() && history.diff_cursor.is_none());
         history.error = Some("Commit detail does not match the selection.".into());
-        assert!(!history.select_file(&comparison["metadata"], &next));
+        assert!(!history.select_file(&comparison.metadata, &next));
         assert!(
             history.error.is_some(),
             "selection cannot hide a comparison validation error"
@@ -429,28 +473,34 @@ mod tests {
     #[test]
     fn empty_first_page_waits_for_a_selectable_file_and_new_empty_comparison_clears_diff() {
         let mut history = crate::git_history::History::default();
-        let mut page = json!({"metadata":{"commitOid":{"hex":"one"}},"entries":[{}, {"newPath":{"bytesB64":""}}],"nextCursor":"next"});
+        let mut unnamed = delta("");
+        unnamed.new_path.bytes_b64.clear();
+        let mut page = files(0, Some("next"));
+        page.entries = vec![unnamed];
         assert!(history.accept_files(page.clone(), false).is_none());
-        page["entries"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({"newPath":{"display":"file","bytesB64":"ZmlsZQ=="}}));
+        page.entries.push(delta("file"));
         let first = history.accept_files(page.clone(), true).unwrap();
-        assert!(history.select_file(&page["metadata"], &first));
-        history.diff = json!({"entries":[{}]});
-        let empty = json!({"metadata":{"commitOid":{"hex":"two"}},"entries":[]});
+        assert!(history.select_file(&page.metadata, &first));
+        history.diff = Some(crate::git_fixture::diff_page(
+            "loaded",
+            crate::git_fixture::commit_metadata("one", b"file"),
+            vec![],
+            None,
+        ));
+        let mut empty = files(0, None);
+        empty.metadata = crate::git_fixture::commit_metadata("two", b"file");
         assert!(history.accept_files(empty, false).is_none());
-        assert!(history.path.is_null() && history.diff.is_null());
-        assert!(!history.select_file(&page["metadata"], &first));
+        assert!(history.path.is_none() && history.diff.is_none());
+        assert!(!history.select_file(&page.metadata, &first));
     }
     #[test]
     fn failed_continuation_can_retry_without_losing_loaded_files_or_selection() {
-        let page = json!({"entries":[{"fileIndex":0}],"nextCursor":"cursor"});
+        let page = files(1, Some("cursor"));
         let mut history = crate::git_history::History::default();
         history.oid = "commit".into();
-        history.files = page.clone();
+        history.files = Some(page.clone());
         history.file_cursor = Some("cursor".into());
-        history.path = json!({"bytesB64":"path"});
+        history.path = Some(Path::new(b"path"));
         let mut resources = crate::Resources::default();
         let generation = resources.begin("git-history-files-more").unwrap();
         assert_eq!(
@@ -467,8 +517,8 @@ mod tests {
             super::prepare_retry(&mut history, &mut resources, true),
             Some(true)
         );
-        assert_eq!(history.files, page);
-        assert_eq!(history.path["bytesB64"], "path");
+        assert_eq!(history.files.as_ref(), Some(&page));
+        assert_eq!(history.path, Some(Path::new(b"path")));
         assert!(history.file_cursor.is_none());
         assert!(resources.get("git-history-files-more").is_none());
         assert!(resources.begin("git-history-files-more").is_some());
@@ -478,9 +528,9 @@ mod tests {
         let mut history = crate::git_history::History::default();
         history.oid = "commit".into();
         history.parent = 1;
-        history.files = json!({"entries":[{}],"nextCursor":"old"});
+        history.files = Some(files(1, Some("old")));
         history.error = Some("Invalid page".into());
-        history.path = json!({"bytesB64":"path"});
+        history.path = Some(Path::new(b"path"));
         let mut resources = crate::Resources::default();
         assert_eq!(
             super::prepare_retry(&mut history, &mut resources, true),
@@ -488,51 +538,49 @@ mod tests {
         );
         assert_eq!(history.oid, "commit");
         assert_eq!(history.parent, 1);
-        assert!(history.files.is_null() && history.path.is_null() && history.error.is_none());
+        assert!(history.files.is_none() && history.path.is_none() && history.error.is_none());
     }
     #[test]
     fn scroll_demand_is_consumed_and_cannot_cross_comparisons_or_pages() {
-        let page = json!({"snapshot":"a","metadata":{"commitOid":{"hex":"one"}},"nextCursor":"first","entries":[{}]});
-        let mut demand = Demand::default();
-        assert!(!demand.take(&page, true, true));
-        demand.arm(super::identity(&page));
-        assert!(demand.take(&page, true, true));
-        assert!(!demand.take(&page, true, true));
-        let mut next = page.clone();
-        next["nextCursor"] = json!("second");
-        demand.arm(super::identity(&page));
-        assert!(!demand.take(&next, true, true));
-        demand.arm(super::identity(&page));
-        assert!(!demand.take(&page, false, true));
-        assert!(!demand.take(&page, true, true));
-        demand.arm(super::identity(&page));
-        assert!(!demand.take(&page, true, false));
+        let page = files(1, Some("first"));
+        let mut demand: Demand<super::Identity> = Demand::default();
+        assert!(!demand.take(&identity(Some(&page)), true, true));
+        demand.arm(identity(Some(&page)));
+        assert!(demand.take(&identity(Some(&page)), true, true));
+        assert!(!demand.take(&identity(Some(&page)), true, true));
+        let next = files(1, Some("second"));
+        demand.arm(identity(Some(&page)));
+        assert!(!demand.take(&identity(Some(&next)), true, true));
+        demand.arm(identity(Some(&page)));
+        assert!(!demand.take(&identity(Some(&page)), false, true));
+        assert!(!demand.take(&identity(Some(&page)), true, true));
+        demand.arm(identity(Some(&page)));
+        assert!(!demand.take(&identity(Some(&page)), true, false));
     }
     #[test]
     fn counts_distinguish_total_loaded_and_truncated() {
-        assert_eq!(
-            count_label(&json!({"metadata":{"totalFiles":1},"entries":[{}]})),
-            "1 changed file"
-        );
-        assert_eq!(
-            count_label(&json!({"metadata":{"totalFiles":120},"entries":[{}],"nextCursor":"c"})),
-            "1 of 120 files loaded"
-        );
-        assert_eq!(
-            count_label(&json!({"metadata":{"truncated":true},"entries":[{}]})),
-            "1 file loaded"
-        );
+        let mut page = files(1, None);
+        page.metadata.total_files = Some(1);
+        assert_eq!(count_label(&page), "1 changed file");
+        page.metadata.total_files = Some(120);
+        page.next_cursor = Some("c".into());
+        assert_eq!(count_label(&page), "1 of 120 files loaded");
+        page.metadata.total_files = None;
+        page.next_cursor = None;
+        page.metadata.truncated = Some(true);
+        assert_eq!(count_label(&page), "1 file loaded");
     }
     #[test]
     fn delayed_file_selection_must_belong_to_current_comparison() {
-        let file = json!({"newPath":{"display":"file","bytesB64":"ZmlsZQ=="}});
-        let page = json!({"metadata":{"commitOid":{"hex":"current"}},"entries":[file.clone()]});
-        assert!(select_current(&page, &page["metadata"], &file));
+        let page = files(1, None);
+        let file = page.entries[0].clone();
+        assert!(select_current(Some(&page), &page.metadata, &file));
+        let previous = crate::git_fixture::commit_metadata("previous", b"file");
+        assert!(!select_current(Some(&page), &previous, &file));
         assert!(!select_current(
-            &page,
-            &json!({"commitOid":{"hex":"previous"}}),
-            &file
+            Some(&page),
+            &page.metadata,
+            &delta("other")
         ));
-        assert!(!select_current(&page, &page["metadata"], &json!({})));
     }
 }

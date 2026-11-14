@@ -1,210 +1,14 @@
-//! Systemd service contracts and domain rules, with no UI, transport, or
+//! Systemd service rules over the protocol's service types, with no UI or
 //! runtime dependencies.
-use serde::{Deserialize, Serialize};
-use std::fmt;
+use newport_protocol::monitor::services::{ExitKind, Privilege, Scope, Service, Timer, Verb};
 
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
-#[serde(rename_all = "lowercase")]
-pub enum Scope {
-    #[default]
-    System,
-    User,
-}
-impl Scope {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::System => "system",
-            Self::User => "user",
-        }
-    }
-}
-impl fmt::Display for Scope {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Privilege {
-    Root,
-    Sudo,
-    Password,
-    #[default]
-    None,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ServiceVerb {
-    Start,
-    Stop,
-    Restart,
-    Reload,
-    Enable,
-    Disable,
-}
-impl ServiceVerb {
-    pub const ALL: [Self; 6] = [
-        Self::Start,
-        Self::Stop,
-        Self::Restart,
-        Self::Reload,
-        Self::Enable,
-        Self::Disable,
-    ];
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Start => "start",
-            Self::Stop => "stop",
-            Self::Restart => "restart",
-            Self::Reload => "reload",
-            Self::Enable => "enable",
-            Self::Disable => "disable",
-        }
-    }
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Start => "Start",
-            Self::Stop => "Stop",
-            Self::Restart => "Restart",
-            Self::Reload => "Reload",
-            Self::Enable => "Enable",
-            Self::Disable => "Disable",
-        }
-    }
-}
-impl fmt::Display for ServiceVerb {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ServiceUnit {
-    pub name: String,
-    pub scope: Scope,
-    pub description: String,
-    pub load: String,
-    pub active: String,
-    pub sub: String,
-    pub enabled: Option<String>,
-    pub main_pid: Option<u32>,
-    /// Epoch milliseconds of the last state change.
-    pub since: Option<i64>,
-    pub memory: Option<u64>,
-    /// Percent of one core since the agent's previous reading.
-    pub cpu: Option<f64>,
-    pub restarts: Option<u64>,
-    pub result: Option<String>,
-    pub exit_code: Option<i64>,
-    pub exit_kind: Option<String>,
-    pub fragment: Option<String>,
-    pub drop_ins: Vec<String>,
-    pub triggered_by: Vec<String>,
-    pub user: Option<String>,
-}
-impl ServiceUnit {
-    pub fn key(&self) -> String {
-        unit_key(self.scope, &self.name)
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TimerUnit {
-    pub name: String,
-    pub scope: Scope,
-    pub description: String,
-    pub active: String,
-    pub next: Option<i64>,
-    pub last: Option<i64>,
-    pub unit: Option<String>,
-}
-impl TimerUnit {
-    pub fn key(&self) -> String {
-        unit_key(self.scope, &self.name)
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UserAvailability {
-    pub available: bool,
-    pub reason: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ServicesSnapshot {
-    pub services: Vec<ServiceUnit>,
-    pub timers: Vec<TimerUnit>,
-    pub user: UserAvailability,
-    pub privilege: Privilege,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct JournalEntry {
-    pub at: Option<i64>,
-    pub priority: Option<u8>,
-    pub pid: Option<u32>,
-    pub identifier: Option<String>,
-    pub message: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct JournalPage {
-    pub entries: Vec<JournalEntry>,
-    pub cursor: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UnitFile {
-    pub text: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ActionResult {
-    pub ok: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub needs_password: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-}
-
-pub fn unit_key(scope: Scope, name: &str) -> String {
-    format!("{scope}:{name}")
-}
 pub fn short_name(name: &str) -> &str {
     name.strip_suffix(".service")
         .or_else(|| name.strip_suffix(".timer"))
         .unwrap_or(name)
 }
 
-/// The backend and agent accept systemd unit names, never arbitrary shell
-/// arguments. Timers are allowed for inspection, not service mutations.
-pub fn valid_unit(name: &str, timers: bool) -> bool {
-    let stem = name
-        .strip_suffix(".service")
-        .or_else(|| timers.then(|| name.strip_suffix(".timer")).flatten());
-    stem.is_some_and(|stem| {
-        !stem.is_empty()
-            && stem.len() <= 255
-            && !name.starts_with('-')
-            && stem
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b":_.@-\\".contains(&b))
-    })
-}
-
-pub fn is_problem(unit: &ServiceUnit) -> bool {
+pub fn is_problem(unit: &Service) -> bool {
     unit.active == "failed"
         || unit.sub == "auto-restart"
         || (unit.active == "activating" && unit.restarts.unwrap_or(0) > 0)
@@ -295,7 +99,7 @@ const PLUMBING: &[&str] = &[
     "apport",
     "systemd",
 ];
-pub fn is_owned(unit: &ServiceUnit) -> bool {
+pub fn is_owned(unit: &Service) -> bool {
     if unit.scope == Scope::User {
         return true;
     }
@@ -318,15 +122,15 @@ pub fn is_owned(unit: &ServiceUnit) -> bool {
 
 #[derive(Debug, Default)]
 pub struct ServiceGroups<'a> {
-    pub problems: Vec<&'a ServiceUnit>,
-    pub owned: Vec<&'a ServiceUnit>,
-    pub system: Vec<&'a ServiceUnit>,
+    pub problems: Vec<&'a Service>,
+    pub owned: Vec<&'a Service>,
+    pub system: Vec<&'a Service>,
 }
 
 /// Stable, case-insensitive name order; scoped identities remain separate.
 /// Browser localeCompare is locale-dependent. The core uses deterministic
 /// Unicode lowercase ordering so every client receives the same grouping.
-pub fn group_services(services: &[ServiceUnit]) -> ServiceGroups<'_> {
+pub fn group_services(services: &[Service]) -> ServiceGroups<'_> {
     let mut sorted: Vec<_> = services.iter().collect();
     sorted.sort_by_cached_key(|unit| (short_name(&unit.name).to_lowercase(), unit.scope));
     let mut groups = ServiceGroups::default();
@@ -355,7 +159,7 @@ pub struct ServiceState {
     pub tone: Tone,
 }
 
-pub fn state_of(unit: &ServiceUnit) -> ServiceState {
+pub fn state_of(unit: &Service) -> ServiceState {
     let (label, tone) = if unit.active == "failed" {
         ("Failed", Tone::Danger)
     } else if unit.sub == "auto-restart" {
@@ -376,11 +180,11 @@ pub fn state_of(unit: &ServiceUnit) -> ServiceState {
     ServiceState { label, tone }
 }
 
-pub fn failure_reason(unit: &ServiceUnit) -> Option<String> {
+pub fn failure_reason(unit: &Service) -> Option<String> {
     if unit.active != "failed" && unit.sub != "auto-restart" {
         return None;
     }
-    let code = if matches!(unit.exit_kind.as_deref(), Some("killed" | "dumped")) {
+    let code = if matches!(unit.exit_kind, Some(ExitKind::Killed | ExitKind::Dumped)) {
         Some(format!(
             "killed by signal {}",
             unit.exit_code
@@ -439,7 +243,7 @@ pub fn duration(ms: i64) -> String {
     }
 }
 
-pub fn list_note(unit: &ServiceUnit, now: i64) -> String {
+pub fn list_note(unit: &Service, now: i64) -> String {
     if unit.active == "failed" {
         return unit
             .exit_code
@@ -473,18 +277,18 @@ pub struct AvailableVerbs {
     pub disable: bool,
 }
 impl AvailableVerbs {
-    pub const fn allows(self, verb: ServiceVerb) -> bool {
+    pub const fn allows(self, verb: Verb) -> bool {
         match verb {
-            ServiceVerb::Start => self.start,
-            ServiceVerb::Stop => self.stop,
-            ServiceVerb::Restart => self.restart,
-            ServiceVerb::Reload => self.reload,
-            ServiceVerb::Enable => self.enable,
-            ServiceVerb::Disable => self.disable,
+            Verb::Start => self.start,
+            Verb::Stop => self.stop,
+            Verb::Restart => self.restart,
+            Verb::Reload => self.reload,
+            Verb::Enable => self.enable,
+            Verb::Disable => self.disable,
         }
     }
 }
-pub fn available_verbs(unit: &ServiceUnit) -> AvailableVerbs {
+pub fn available_verbs(unit: &Service) -> AvailableVerbs {
     let running = matches!(unit.active.as_str(), "active" | "reloading" | "activating");
     let bootable = !matches!(
         unit.enabled.as_deref().unwrap_or("static"),
@@ -513,7 +317,7 @@ pub fn priority_tone(priority: Option<u8>) -> Tone {
         _ => Tone::Muted,
     }
 }
-pub fn timer_note(timer: &TimerUnit, now: i64) -> String {
+pub fn timer_note(timer: &Timer, now: i64) -> String {
     if let Some(next) = timer.next.filter(|next| *next != 0 && *next > now) {
         return format!("in {}", duration(next.saturating_sub(now)));
     }
@@ -530,43 +334,9 @@ pub fn timer_note(timer: &TimerUnit, now: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
-    #[test]
-    fn malformed_required_contract_fields_are_not_successful_empty_readings() {
-        assert!(serde_json::from_value::<ServicesSnapshot>(json!({})).is_err());
-        assert!(serde_json::from_value::<JournalPage>(json!({})).is_err());
-        assert!(serde_json::from_value::<UnitFile>(json!({})).is_err());
-        assert!(serde_json::from_value::<ActionResult>(json!({})).is_err());
-        assert!(serde_json::from_value::<ServiceUnit>(json!({"name":"app.service"})).is_err());
-    }
-
-    #[test]
-    fn unit_names_preserve_backend_validation_and_timer_read_only_boundary() {
-        for name in [
-            "app.service",
-            "worker@tenant.service",
-            "app\\x20name.service",
-        ] {
-            assert!(valid_unit(name, false));
-        }
-        assert!(valid_unit("cleanup.timer", true));
-        assert!(!valid_unit("cleanup.timer", false));
-        for name in [
-            ".service",
-            "-app.service",
-            "app.service;reboot",
-            "app name.service",
-            "../app.service",
-            "app.socket",
-        ] {
-            assert!(!valid_unit(name, true));
-        }
-        assert!(valid_unit(&format!("{}.service", "a".repeat(255)), false));
-        assert!(!valid_unit(&format!("{}.service", "a".repeat(256)), false));
-    }
-    fn unit(name: &str) -> ServiceUnit {
-        ServiceUnit {
+    fn unit(name: &str) -> Service {
+        Service {
             name: name.into(),
             load: "loaded".into(),
             active: "active".into(),
@@ -580,80 +350,41 @@ mod tests {
             ..Default::default()
         }
     }
-    fn failed() -> ServiceUnit {
-        ServiceUnit {
+    fn failed() -> Service {
+        Service {
             active: "failed".into(),
             sub: "failed".into(),
             result: Some("exit-code".into()),
             exit_code: Some(1),
-            exit_kind: Some("exited".into()),
+            exit_kind: Some(ExitKind::Exited),
             ..unit("atlas-api.service")
         }
     }
-    #[test]
-    fn contract_roundtrips_camel_case_nulls_and_lowercase_enums() {
-        let value = json!({"name":"app.service","scope":"user","description":"Application","load":"loaded","active":"failed","sub":"failed","mainPid":42,"since":123,"memory":2048,"cpu":12.5,"restarts":2,"exitCode":9,"exitKind":"killed","dropIns":["/etc/app.conf"],"triggeredBy":["app.timer"]});
-        let service: ServiceUnit = serde_json::from_value(value).unwrap();
-        assert_eq!(service.scope, Scope::User);
-        assert_eq!(service.main_pid, Some(42));
-        let value = serde_json::to_value(&service).unwrap();
-        assert_eq!(value["exitCode"], 9);
-        assert_eq!(value["exitKind"], "killed");
-        assert_eq!(value["triggeredBy"], json!(["app.timer"]));
-        assert_eq!(value["enabled"], Value::Null);
-        for verb in ServiceVerb::ALL {
-            assert_eq!(serde_json::to_value(verb).unwrap(), verb.as_str());
-        }
-        for (value, privilege) in [
-            ("root", Privilege::Root),
-            ("sudo", Privilege::Sudo),
-            ("password", Privilege::Password),
-            ("none", Privilege::None),
-        ] {
-            assert_eq!(
-                serde_json::from_value::<Privilege>(json!(value)).unwrap(),
-                privilege
-            );
-        }
-        let result: ActionResult = serde_json::from_value(json!({"ok":true})).unwrap();
-        assert!(result.ok);
-        assert_eq!(result.needs_password, None);
-        let result: ActionResult = serde_json::from_value(
-            json!({"ok":false,"needsPassword":true,"command":"sudo systemctl stop app.service"}),
-        )
-        .unwrap();
-        assert_eq!(result.needs_password, Some(true));
-        assert!(result.command.is_some());
-        let snapshot:ServicesSnapshot=serde_json::from_value(json!({"services":[],"timers":[],"user":{"available":false,"reason":"No user manager"},"privilege":"none"})).unwrap();
-        assert!(!snapshot.user.available);
-        let page:JournalPage=serde_json::from_value(json!({"entries":[{"at":null,"priority":null,"pid":null,"identifier":null,"message":"message"}],"cursor":null})).unwrap();
-        assert_eq!(page.entries[0].message, "message");
-    }
-    use serde_json::Value;
+
     #[test]
     fn grouping_separates_problems_owned_and_operating_system_units() {
         let services = vec![
             unit("systemd-journald.service"),
             unit("nginx.service"),
-            ServiceUnit {
+            Service {
                 active: "activating".into(),
                 sub: "auto-restart".into(),
                 ..unit("atlas-worker.service")
             },
             failed(),
             unit("getty@tty1.service"),
-            ServiceUnit {
+            Service {
                 scope: Scope::User,
                 enabled: Some("disabled".into()),
                 ..unit("dev-tunnel.service")
             },
-            ServiceUnit {
+            Service {
                 active: "inactive".into(),
                 sub: "dead".into(),
                 enabled: Some("static".into()),
                 ..unit("certbot.service")
             },
-            ServiceUnit {
+            Service {
                 active: "inactive".into(),
                 sub: "dead".into(),
                 enabled: Some("disabled".into()),
@@ -662,7 +393,7 @@ mod tests {
             },
         ];
         let groups = group_services(&services);
-        fn names(list: Vec<&ServiceUnit>) -> Vec<&str> {
+        fn names(list: Vec<&Service>) -> Vec<&str> {
             list.into_iter()
                 .map(|u| u.name.as_str())
                 .collect::<Vec<_>>()
@@ -687,7 +418,7 @@ mod tests {
     #[test]
     fn scoped_identity_and_tie_order_keep_same_named_units_separate() {
         let services = vec![
-            ServiceUnit {
+            Service {
                 scope: Scope::User,
                 ..unit("app.service")
             },
@@ -699,7 +430,7 @@ mod tests {
         assert_eq!(groups.owned[0].scope, Scope::System);
         assert_eq!(groups.owned[1].scope, Scope::User);
         assert_eq!(
-            TimerUnit {
+            Timer {
                 name: "app.timer".into(),
                 scope: Scope::User,
                 ..Default::default()
@@ -718,7 +449,7 @@ mod tests {
             assert!(!is_owned(&unit(name)));
         }
         assert!(is_owned(&unit("redis-server.service")));
-        assert!(is_owned(&ServiceUnit {
+        assert!(is_owned(&Service {
             scope: Scope::User,
             ..unit("systemd-example.service")
         }));
@@ -756,7 +487,7 @@ mod tests {
             ("active", "running", "Running", Tone::Success),
             ("inactive", "dead", "Stopped", Tone::Muted),
         ] {
-            let u = ServiceUnit {
+            let u = Service {
                 active: active.into(),
                 sub: sub.into(),
                 ..unit("app")
@@ -777,7 +508,7 @@ mod tests {
             ("start-limit-hit", "Restarted too often; systemd gave up"),
         ] {
             assert_eq!(
-                failure_reason(&ServiceUnit {
+                failure_reason(&Service {
                     result: Some(result.into()),
                     ..failed()
                 })
@@ -786,9 +517,9 @@ mod tests {
             );
         }
         assert_eq!(
-            failure_reason(&ServiceUnit {
+            failure_reason(&Service {
                 result: Some("signal".into()),
-                exit_kind: Some("killed".into()),
+                exit_kind: Some(ExitKind::Killed),
                 exit_code: Some(9),
                 ..failed()
             })
@@ -796,9 +527,9 @@ mod tests {
             Some("Stopped: killed by signal 9")
         );
         assert_eq!(
-            failure_reason(&ServiceUnit {
+            failure_reason(&Service {
                 result: Some("core-dump".into()),
-                exit_kind: Some("dumped".into()),
+                exit_kind: Some(ExitKind::Dumped),
                 exit_code: Some(11),
                 ..failed()
             })
@@ -806,9 +537,9 @@ mod tests {
             Some("Crashed with a core dump (killed by signal 11)")
         );
         assert_eq!(
-            failure_reason(&ServiceUnit {
+            failure_reason(&Service {
                 result: Some("signal".into()),
-                exit_kind: Some("killed".into()),
+                exit_kind: Some(ExitKind::Killed),
                 exit_code: None,
                 ..failed()
             })
@@ -816,7 +547,7 @@ mod tests {
             Some("Stopped: killed by signal ?")
         );
         assert_eq!(
-            failure_reason(&ServiceUnit {
+            failure_reason(&Service {
                 result: None,
                 exit_code: Some(0),
                 ..failed()
@@ -824,7 +555,7 @@ mod tests {
             None
         );
         assert_eq!(
-            failure_reason(&ServiceUnit {
+            failure_reason(&Service {
                 active: "active".into(),
                 sub: "running".into(),
                 ..failed()
@@ -837,7 +568,7 @@ mod tests {
         assert_eq!(list_note(&failed(), 0), "exit 1");
         assert_eq!(
             list_note(
-                &ServiceUnit {
+                &Service {
                     active: "activating".into(),
                     sub: "auto-restart".into(),
                     restarts: Some(14),
@@ -850,7 +581,7 @@ mod tests {
         assert_eq!(list_note(&unit("a"), 2 * 86400000 + 3 * 3600000), "2d 3h");
         assert_eq!(
             list_note(
-                &ServiceUnit {
+                &Service {
                     active: "inactive".into(),
                     sub: "dead".into(),
                     ..unit("a")
@@ -861,7 +592,7 @@ mod tests {
         );
         assert_eq!(
             list_note(
-                &ServiceUnit {
+                &Service {
                     exit_code: Some(0),
                     result: None,
                     ..failed()
@@ -872,7 +603,7 @@ mod tests {
         );
         assert_eq!(
             list_note(
-                &ServiceUnit {
+                &Service {
                     since: Some(1000),
                     ..unit("a")
                 },
@@ -909,12 +640,12 @@ mod tests {
                 disable: true
             }
         );
-        let verbs = available_verbs(&ServiceUnit {
+        let verbs = available_verbs(&Service {
             enabled: Some("disabled".into()),
             ..failed()
         });
         assert!(verbs.start && verbs.enable && !verbs.stop && !verbs.reload);
-        let looping = available_verbs(&ServiceUnit {
+        let looping = available_verbs(&Service {
             active: "inactive".into(),
             sub: "auto-restart".into(),
             ..unit("a")
@@ -928,12 +659,12 @@ mod tests {
             Some("transient"),
             Some("alias"),
         ] {
-            let verbs = available_verbs(&ServiceUnit {
+            let verbs = available_verbs(&Service {
                 enabled: enabled.map(str::to_owned),
                 ..unit("a")
             });
             assert!(!verbs.enable && !verbs.disable);
-            assert!(verbs.allows(ServiceVerb::Restart));
+            assert!(verbs.allows(Verb::Restart));
         }
         assert!(action_blocked_reason(Scope::System, Privilege::None).is_some());
         for privilege in [Privilege::Root, Privilege::Sudo, Privilege::Password] {
@@ -952,7 +683,7 @@ mod tests {
         ] {
             assert_eq!(priority_tone(priority), tone);
         }
-        let mut timer = TimerUnit {
+        let mut timer = Timer {
             active: "active".into(),
             next: Some(120000),
             last: Some(30000),

@@ -46,7 +46,7 @@ impl Readiness {
                         )
                         .map_err(|error| error.to_string())
                         .and_then(|reply| {
-                            newport_client::desktop_result::project(reply)
+                            newport_client::backend::availability_reply(reply)
                                 .map_err(|error| error.to_string())
                         })?;
                     Ok::<_, String>(crate::terminal_setup::setup_ready(&status))

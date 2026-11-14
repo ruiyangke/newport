@@ -6,32 +6,29 @@ use newport_domain::model::Tunnel;
 impl Newport {
     pub(super) fn open_forward(
         &mut self,
-        value: Value,
+        value: configuration::Tunnel,
         remote_port: Option<u16>,
         cx: &mut Context<Self>,
     ) {
-        let result = serde_json::from_value::<Tunnel>(value)
-            .map_err(|e| e.to_string())
-            .and_then(|tunnel| {
-                let action = match remote_port {
-                    Some(remote_port) => Action::OpenPort {
-                        tunnel,
-                        remote_port,
-                    },
-                    None => Action::Open(tunnel),
-                };
-                self.tunnel_operations
-                    .start(action)
-                    .map_err(|e| e.to_string())
-            });
+        let tunnel = Tunnel::from(&value);
+        let action = match remote_port {
+            Some(remote_port) => Action::OpenPort {
+                tunnel,
+                remote_port,
+            },
+            None => Action::Open(tunnel),
+        };
+        let result = self
+            .tunnel_operations
+            .start(action)
+            .map_err(|e| e.to_string());
         if let Err(error) = result {
             self.notification = Some(Notification::error(error));
         }
         cx.notify();
     }
-    pub(super) fn tunnel_busy(&self, value: &Value) -> bool {
-        serde_json::from_value::<Tunnel>(value.clone())
-            .is_ok_and(|t| self.tunnel_operations.busy_tunnel(&t))
+    pub(super) fn tunnel_busy(&self, value: &configuration::Tunnel) -> bool {
+        self.tunnel_operations.busy_tunnel(&Tunnel::from(value))
     }
     pub(super) fn port_busy(&self, entry: &connections_grouped::Entry) -> bool {
         entry.forwards.iter().any(|t| self.tunnel_busy(t))
@@ -69,12 +66,7 @@ impl Newport {
                     connect: plan.connect,
                 })
             } else {
-                let tunnels = entry
-                    .forwards
-                    .into_iter()
-                    .map(serde_json::from_value)
-                    .collect::<Result<Vec<Tunnel>, _>>()
-                    .map_err(|e| e.to_string())?;
+                let tunnels = entry.forwards.iter().map(Tunnel::from).collect();
                 Ok(Action::SetConnected {
                     server,
                     tunnels,
@@ -98,26 +90,25 @@ impl Newport {
     /// overwritten.
     pub(super) fn set_always_on(
         &mut self,
-        forwards: Vec<Value>,
+        forwards: Vec<configuration::Tunnel>,
         enabled: bool,
         cx: &mut Context<Self>,
     ) {
         let mut tickets = Vec::new();
         for value in forwards {
-            if value["autoConnect"] == enabled && value["autoReconnect"] == enabled {
+            if value.auto_connect == enabled && value.auto_reconnect == enabled {
                 continue;
             }
-            let started = (|| -> Result<_, String> {
-                let expected: Tunnel =
-                    serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
-                let mut next = value;
-                next["autoConnect"] = json!(enabled);
-                next["autoReconnect"] = json!(enabled);
-                let tunnel: Tunnel = serde_json::from_value(next).map_err(|e| e.to_string())?;
-                self.tunnel_operations
-                    .start(Action::Update { tunnel, expected })
-                    .map_err(|e| e.to_string())
-            })();
+            let expected = Tunnel::from(&value);
+            let tunnel = Tunnel {
+                auto_connect: enabled,
+                auto_reconnect: enabled,
+                ..expected.clone()
+            };
+            let started = self
+                .tunnel_operations
+                .start(Action::Update { tunnel, expected })
+                .map_err(|e| e.to_string());
             match started {
                 Ok(ticket) => tickets.push(ticket),
                 Err(error) => self.notification = Some(Notification::error(error)),

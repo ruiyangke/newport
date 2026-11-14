@@ -18,7 +18,7 @@ impl Newport {
     pub(super) fn project_status_visible(&self, key: &str) -> bool {
         self.project_library_visible()
             && self.visible_project_rows().iter().any(|project| {
-                project["serverId"].as_str() == Some(&self.server)
+                project.server.to_string() == self.server
                     && project_library::status_key(project) == key
             })
     }
@@ -37,7 +37,7 @@ impl Newport {
                 .visible_project_rows()
                 .iter()
                 .find(|project| {
-                    project["serverId"].as_str() == Some(&self.server)
+                    project.server.to_string() == self.server
                         && self
                             .resources
                             .get(&project_library::status_key(project))
@@ -74,7 +74,7 @@ impl Newport {
                 let previous = presentation(self);
                 let generation = self.resources.begin_refresh(&key, false);
                 match request {
-                    Ok(request) => self.dispatch_git_request(&key, *request, generation),
+                    Ok(request) => self.dispatch_git_typed(&key, *request, generation),
                     Err(error) => {
                         if let Some(generation) = generation {
                             self.resources
@@ -96,10 +96,15 @@ impl Newport {
 
 #[cfg(test)]
 mod tests {
+    /// A complete status summary reporting `changes` changed files.
+    fn summary(changes: u64) -> newport_protocol::git::Reply {
+        let mut summary = crate::git_fixture::status_summary();
+        summary.total_entries = changes;
+        newport_protocol::git::Reply::StatusSummary(Box::new(summary))
+    }
     use crate::Page;
     use crate::project_library_state::typed_fixture::*;
     use gpui_kit::{ListOffset, TestAppContext, px};
-    use serde_json::json;
 
     #[gpui_kit::test]
     fn completed_checks_only_notify_the_visible_project_rows(cx: &mut TestAppContext) {
@@ -128,12 +133,7 @@ mod tests {
         let (work, _requests) = std::sync::mpsc::sync_channel(32);
         let (replies, inbox) = std::sync::mpsc::channel();
         let projects: Vec<_> = (0..3)
-            .map(|id| {
-                json!({
-                    "id":id.to_string(), "serverId":TYPED_SERVER, "name":id.to_string(),
-                    "path":{"display":format!("/{id}"), "bytesB64":newport_protocol::git::Path::new(format!("/{id}").as_bytes()).bytes_b64}
-                })
-            })
+            .map(|id| bookmark(id, TYPED_SERVER, &id.to_string(), &format!("/{id}")))
             .collect();
         let key = super::project_library::status_key(&projects[0]);
         view.update(visual, |view, _| {
@@ -144,7 +144,7 @@ mod tests {
                 let key = super::project_library::status_key(project);
                 let generation = view.resources.begin(&key).unwrap();
                 view.resources
-                    .complete(&key, generation, Ok(json!({"totalEntries":0})));
+                    .complete_git(&key, generation, Ok(summary(0)));
             }
         });
         let notices = visual.new(|cx: &mut Context<usize>| {
@@ -174,11 +174,8 @@ mod tests {
                 };
                 view.window_visible = !matches!(case, "hidden" | "hidden recovery");
                 view.selection = (case == "repository").then(|| projects[0].clone());
-                if case == "configuration unavailable" {
-                    view.snapshot["loadError"] = json!("Profile unavailable");
-                } else {
-                    view.snapshot.as_object_mut().unwrap().remove("loadError");
-                }
+                view.snapshot_mut().load_error =
+                    (case == "configuration unavailable").then(|| "Profile unavailable".into());
                 view.server = if case == "other server" {
                     "other"
                 } else {
@@ -200,19 +197,15 @@ mod tests {
                 if case != "identical" {
                     changes += 1;
                 }
-                Ok(json!({"totalEntries":changes, "truncated":false}))
+                Ok(summary(changes))
             };
             let before = notices.read_with(visual, |count, _| *count);
             replies
                 .send(crate::Completion {
-                    discovery: None,
                     server: TYPED_SERVER.into(),
                     key: key.clone(),
                     generation,
-                    result: result.clone().map_err(Into::into),
-                    image: None,
-                    pdf: None,
-                    pdf_text: None,
+                    result: crate::Outcome::Git(result.clone().map_err(Into::into)),
                 })
                 .unwrap();
             view.update(visual, |view, cx| view.tick(cx));
@@ -226,7 +219,7 @@ mod tests {
                 let resource = view.resources.get(&key).unwrap();
                 assert!(!resource.pending);
                 match result {
-                    Ok(value) => assert_eq!(resource.value, value),
+                    Ok(value) => assert_eq!(resource.git(), Some(&value)),
                     Err(error) => assert_eq!(resource.error.as_deref(), Some(error.as_str())),
                 }
             });
@@ -245,10 +238,8 @@ mod tests {
         });
         let (owner, visual) = cx.add_window_view(crate::project_library_state::typed_test_owner);
         let (work, requests) = std::sync::mpsc::sync_channel(16);
-        let project = json!({"id":"one", "serverId":TYPED_SERVER, "name":"One",
-            "path":{"display":"/one","bytesB64":"L29uZQ=="}});
-        let status = json!({"truncated":false,"totalEntries":0,
-            "head":{"name":{"display":"refs/heads/main"}}});
+        let project = bookmark(1, TYPED_SERVER, "One", "/one");
+        let status = summary(0);
         let key = newport_client::project_checks::status_key(&project);
         owner.update(visual, |this, _| {
             this.work = work.into();
@@ -257,7 +248,7 @@ mod tests {
             this.project_library_state().list.sync(&[project], 900.);
             let generation = this.resources.begin(&key).unwrap();
             this.resources
-                .complete(&key, generation, Ok(status.clone()));
+                .complete_git(&key, generation, Ok(status.clone()));
         });
         visual.run_until_parked();
         let notices = visual.new(|cx: &mut Context<usize>| {
@@ -276,7 +267,7 @@ mod tests {
             owner.update(visual, |this, _| {
                 let previous = this.resources.get(&key).unwrap().presentation_revision;
                 this.resources
-                    .complete(&key, request.generation, Ok(status.clone()));
+                    .complete_git(&key, request.generation, Ok(status.clone()));
                 assert_eq!(
                     this.resources.get(&key).unwrap().presentation_revision,
                     previous
@@ -302,29 +293,34 @@ mod tests {
             this.page = Page::Projects;
             this.window_visible = true;
             let projects: Vec<_> = (0..1000)
-                .map(|id| {
-                    json!({
-                        "id":id.to_string(),"serverId":TYPED_SERVER, "name":id.to_string(),
-                        "path":{"display":format!("/{id}"),"bytesB64":newport_protocol::git::Path::new(format!("/{id}").as_bytes()).bytes_b64}
-                    })
-                })
+                .map(|id| bookmark(id, TYPED_SERVER, &id.to_string(), &format!("/{id}")))
                 .collect();
             this.project_library_state().list.sync(&projects, 900.);
             // No viewport is laid out yet: preload only its first row.
             this.poll_project_checks(cx);
             let first = requests.try_recv().unwrap();
-            assert_eq!(git_request(&first), &newport_protocol::git::Request::StatusSummary { repo_id: None, path: Some(path(&projects[0]["path"])) });
+            assert_eq!(
+                git_request(&first),
+                &newport_protocol::git::Request::StatusSummary {
+                    repo_id: None,
+                    path: Some(projects[0].path.clone())
+                }
+            );
             this.poll_project_checks(cx);
             assert!(requests.try_recv().is_err(), "pending reads must coalesce");
-            let status = json!({"truncated":false,"totalEntries":0,"head":{"name":{"display":"refs/heads/main"}}});
-            this.resources.complete(&first.key, first.generation, Ok(status.clone()));
+            let status = newport_protocol::git::Reply::StatusSummary(Box::new(
+                crate::git_fixture::status_summary(),
+            ));
+            this.resources
+                .complete_git(&first.key, first.generation, Ok(status.clone()));
             let later = std::time::Instant::now() + std::time::Duration::from_secs(31);
             this.poll_project_checks_at(later, cx);
             this.poll_project_checks_at(later, cx);
             let refresh = requests.try_recv().unwrap();
             assert_eq!(refresh.key, first.key);
-            assert_eq!(this.resources.get(&first.key).unwrap().value, status);
-            this.resources.complete(&refresh.key, refresh.generation, Err("Offline".into()));
+            assert_eq!(this.resources.get(&first.key).unwrap().git(), Some(&status));
+            this.resources
+                .complete(&refresh.key, refresh.generation, Err("Offline".into()));
             let later = std::time::Instant::now() + std::time::Duration::from_secs(31);
             this.poll_project_checks_at(later, cx);
             this.poll_project_checks_at(later, cx);
@@ -341,24 +337,36 @@ mod tests {
                 requests.try_recv().is_err(),
                 "failed reads must respect refresh interval"
             );
-            this.project_library_state().list.state.scroll_to(ListOffset {
-                item_ix: 40,
-                offset_in_item: px(0.),
-            });
+            this.project_library_state()
+                .list
+                .state
+                .scroll_to(ListOffset {
+                    item_ix: 40,
+                    offset_in_item: px(0.),
+                });
             this.poll_project_checks(cx);
             let next = requests.try_recv().unwrap();
-            assert_eq!(git_request(&next), &newport_protocol::git::Request::StatusSummary { repo_id: None, path: Some(path(&projects[40]["path"])) });
+            assert_eq!(
+                git_request(&next),
+                &newport_protocol::git::Request::StatusSummary {
+                    repo_id: None,
+                    path: Some(projects[40].path.clone())
+                }
+            );
             assert!(
                 requests.try_recv().is_err(),
                 "offscreen repositories must not be swept"
             );
             this.resources
-                .complete(&next.key, next.generation, Ok(json!({})));
+                .complete_git(&next.key, next.generation, Ok(summary(0)));
             this.poll_project_checks(cx);
-            this.project_library_state().list.state.scroll_to(ListOffset {
-                item_ix: 80,
-                offset_in_item: px(0.),
-            });
+            this.project_library_state()
+                .list
+                .state
+                .scroll_to(ListOffset {
+                    item_ix: 80,
+                    offset_in_item: px(0.),
+                });
             this.window_visible = false;
             this.poll_project_checks(cx);
             this.window_visible = true;

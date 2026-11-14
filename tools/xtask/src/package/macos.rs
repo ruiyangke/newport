@@ -29,7 +29,7 @@ pub(super) fn finish(staged: &Staged) -> Result<PathBuf> {
         signing::codesign(&library, "-", &[])?;
     }
     signing::codesign(&layout.app, "-", &[])?;
-    for check in ["--check-needle", "--check-grammars", "--check-pdf"] {
+    for check in ["--check-needle", "--check-grammars"] {
         probe(executable, check)?;
     }
     // A distribution built from a checked signed full-agent export must embed

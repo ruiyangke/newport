@@ -1,5 +1,5 @@
 //! Destination matching and local-port planning.
-use serde_json::Value;
+use newport_protocol::desktop::configuration::{Direction, Tunnel};
 
 /// Check an editor's original value against the authoritative configuration.
 /// The backend must repeat this check against the revision committed by save.
@@ -93,47 +93,29 @@ pub fn destination_hosts(remote_host: &str) -> Vec<String> {
     }]
 }
 
-pub fn reaches(tunnel: &Value, server: &str, port: &Value) -> bool {
-    let Some(number) = port["port"].as_u64() else {
-        return false;
-    };
-    let Some(first) = tunnel["remotePort"].as_u64() else {
-        return false;
-    };
-    tunnel["serverId"] == server
-        && tunnel["direction"].as_str().unwrap_or("local") == "local"
-        && host(tunnel["remoteHost"].as_str().unwrap_or(""))
-            == host(port["address"].as_str().unwrap_or(""))
-        && number >= first
-        && number <= tunnel["remotePortEnd"].as_u64().unwrap_or(first)
-}
-
 /// Match a saved configuration to one actual observed destination. A row label
 /// or a sibling address never participates in this decision.
 pub fn reaches_endpoint(
-    tunnel: &Value,
-    server: &str,
+    tunnel: &Tunnel,
+    server: uuid::Uuid,
     endpoint: crate::port_discovery::Endpoint,
 ) -> bool {
     let Ok(destination) = endpoint.destination() else {
         return false;
     };
-    let Some(first) = tunnel["remotePort"].as_u64() else {
-        return false;
-    };
-    tunnel["serverId"] == server
-        && tunnel["direction"].as_str().unwrap_or("local") == "local"
-        && destination_hosts(tunnel["remoteHost"].as_str().unwrap_or(""))
-            .contains(&destination.host)
-        && u64::from(destination.port) >= first
-        && u64::from(destination.port) <= tunnel["remotePortEnd"].as_u64().unwrap_or(first)
+    let first = tunnel.remote_port;
+    tunnel.server_id == server
+        && tunnel.direction == Direction::Local
+        && destination_hosts(&tunnel.remote_host).contains(&destination.host)
+        && destination.port >= first
+        && destination.port <= tunnel.remote_port_end.unwrap_or(first)
 }
 
 /// Match a saved configuration to an observed listener. A dual-stack socket on
 /// `::` is reachable through `127.0.0.1` as well as `::1`.
 pub fn reaches_member(
-    tunnel: &Value,
-    server: &str,
+    tunnel: &Tunnel,
+    server: uuid::Uuid,
     member: &crate::port_discovery::Member,
 ) -> bool {
     reaches_endpoint(tunnel, server, member.endpoint)
@@ -202,10 +184,9 @@ pub fn discovered_tunnel(
 #[cfg(test)]
 mod tests {
     use super::{
-        destination_hosts, discovered_tunnel, host, local_endpoint, on_server, reaches,
-        validate_update,
+        Direction, Tunnel, destination_hosts, discovered_tunnel, host, local_endpoint, on_server,
+        reaches_endpoint, validate_update,
     };
-    use serde_json::json;
 
     #[test]
     fn explicit_loopback_destinations_do_not_fall_back_to_another_family() {
@@ -306,17 +287,52 @@ mod tests {
     }
     #[test]
     fn matching_respects_destination_range_server_and_direction() {
-        let mut tunnel = json!({"serverId":"a", "remoteHost":"localhost.", "remotePort":3000,"remotePortEnd":3005});
-        let port = json!({"port":3003,"address":"0.0.0.0"});
-        assert!(reaches(&tunnel, "a", &port));
-        assert!(!reaches(&tunnel, "b", &port));
-        assert!(!reaches(
+        let server = uuid::Uuid::from_u128(1);
+        let mut tunnel = Tunnel {
+            id: uuid::Uuid::from_u128(2),
+            name: "App".into(),
+            server_id: server,
+            local_port: 3000,
+            local_port_end: None,
+            remote_host: "localhost.".into(),
+            remote_port: 3000,
+            remote_port_end: Some(3005),
+            auto_connect: false,
+            auto_reconnect: true,
+            direction: Direction::Local,
+            project: None,
+        };
+        let endpoint = |address: [u8; 4], port| crate::port_discovery::Endpoint {
+            address: std::net::Ipv4Addr::from(address).into(),
+            port,
+            interface: None,
+        };
+        assert!(reaches_endpoint(
             &tunnel,
-            "a",
-            &json!({"port":3003,"address":"10.0.0.5"})
+            server,
+            endpoint([127, 0, 0, 1], 3003)
         ));
-        tunnel["direction"] = json!("remote");
-        assert!(!reaches(&tunnel, "a", &port));
+        assert!(!reaches_endpoint(
+            &tunnel,
+            server,
+            endpoint([127, 0, 0, 1], 3006)
+        ));
+        assert!(!reaches_endpoint(
+            &tunnel,
+            uuid::Uuid::from_u128(3),
+            endpoint([127, 0, 0, 1], 3003)
+        ));
+        assert!(!reaches_endpoint(
+            &tunnel,
+            server,
+            endpoint([10, 0, 0, 5], 3003)
+        ));
+        tunnel.direction = Direction::Remote;
+        assert!(!reaches_endpoint(
+            &tunnel,
+            server,
+            endpoint([127, 0, 0, 1], 3003)
+        ));
         assert_eq!(host("::"), "::1");
         assert_eq!(host("0:0:0:0:0:0:0:1"), "::1");
     }

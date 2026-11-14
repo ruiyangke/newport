@@ -1,17 +1,10 @@
 //! Inputs for adding existing remote repositories to the local project library.
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde_json::Value;
-#[cfg(test)]
-use serde_json::json;
+use newport_protocol::git::{Reply, StatusSummary};
 /// Files currently accepts UTF-8 absolute paths. The wire bytes are the
 /// identity; `display` may be lossy and must never be used to navigate.
-pub fn files_path(project: &Value, server: &str) -> Option<String> {
-    if project["serverId"].as_str() != Some(server) {
-        return None;
-    }
-    let bytes = STANDARD
-        .decode(project["path"]["bytesB64"].as_str()?)
-        .ok()?;
+pub fn files_path(path: &newport_protocol::git::Path) -> Option<String> {
+    let bytes = STANDARD.decode(&path.bytes_b64).ok()?;
     let path = String::from_utf8(bytes).ok()?;
     (path.starts_with('/') && !path.contains('\0')).then_some(path)
 }
@@ -51,23 +44,22 @@ pub struct Status {
     /// Comparison with locally stored upstream refs; never implies a fetch.
     pub ahead: Option<u64>,
 }
-pub fn status(value: &Value) -> Option<Status> {
-    if value["truncated"] != false {
+pub fn status(value: &StatusSummary) -> Option<Status> {
+    if value.truncated {
         return None;
     }
-    let changes = value["totalEntries"].as_u64()?;
-    let head = &value["head"];
-    let branch = if head["detached"] == true {
-        let oid = head["oid"]["hex"].as_str()?;
+    let head = &value.head;
+    let branch = if head.detached {
+        let oid = &head.oid.as_ref()?.hex;
         format!("Detached {}", oid.chars().take(8).collect::<String>())
     } else {
-        let name = head["name"]["display"].as_str()?;
+        let name = head.name.as_ref()?.display.as_str();
         name.strip_prefix("refs/heads/").unwrap_or(name).to_owned()
     };
     Some(Status {
         branch,
-        changes,
-        ahead: value["ahead"].as_u64(),
+        changes: value.total_entries,
+        ahead: value.ahead,
     })
 }
 
@@ -80,7 +72,10 @@ pub struct Reading<'a> {
     pub previous: bool,
 }
 pub fn reading(resource: Option<&crate::resources::Resource>) -> Reading<'_> {
-    let status = resource.and_then(|r| status(&r.value));
+    let status = resource.and_then(|r| match r.git()? {
+        Reply::StatusSummary(summary) => status(summary),
+        _ => None,
+    });
     let pending = resource.is_some_and(|r| r.display_pending());
     let error = resource.and_then(|r| r.error.as_deref());
     let previous = status.is_some() && (pending || error.is_some());
@@ -95,9 +90,39 @@ pub fn reading(resource: Option<&crate::resources::Resource>) -> Reading<'_> {
 #[cfg(test)]
 mod status_tests {
     use super::*;
+    use newport_protocol::git::{GroupCounts, Head, ObjectId, Path};
+    fn summary(total: u64, ahead: Option<u64>) -> StatusSummary {
+        StatusSummary {
+            head: Head {
+                oid: None,
+                name: Some(Path::new(b"refs/heads/main")),
+                detached: false,
+                unborn: false,
+            },
+            operation_state: "none".into(),
+            integration: None,
+            ahead,
+            behind: None,
+            basis: "local".into(),
+            upstream_ref: None,
+            upstream: None,
+            truncated: false,
+            total_entries: total,
+            group_counts: GroupCounts {
+                staged: 0,
+                unstaged: 0,
+                untracked: 0,
+                conflicted: 0,
+            },
+            matched_entries: None,
+        }
+    }
+    fn reply(value: &StatusSummary) -> Result<Reply, crate::request_error::RequestError> {
+        Ok(Reply::StatusSummary(Box::new(value.clone())))
+    }
     #[test]
     fn status_requires_complete_counts_and_handles_detached_and_unborn_heads() {
-        let mut value = json!({"truncated":false,"totalEntries":0,"head":{"name":{"display":"refs/heads/main"},"detached":false}});
+        let mut value = summary(0, None);
         assert_eq!(
             status(&value),
             Some(Status {
@@ -106,13 +131,19 @@ mod status_tests {
                 ahead: None,
             })
         );
-        value["truncated"] = json!(true);
+        value.truncated = true;
         assert_eq!(status(&value), None);
-        value["truncated"] = json!(false);
-        value["totalEntries"] = Value::Null;
-        assert_eq!(status(&value), None);
-        value["totalEntries"] = json!(2);
-        value["head"] = json!({"detached":true,"oid":{"hex":"0123456789abcdef"}});
+        value.truncated = false;
+        value.total_entries = 2;
+        value.head = Head {
+            oid: Some(ObjectId {
+                algorithm: "sha1".into(),
+                hex: "0123456789abcdef".into(),
+            }),
+            name: None,
+            detached: true,
+            unborn: false,
+        };
         assert_eq!(
             status(&value),
             Some(Status {
@@ -121,7 +152,7 @@ mod status_tests {
                 ahead: None,
             })
         );
-        value["head"]["oid"] = Value::Null;
+        value.head.oid = None;
         assert_eq!(status(&value), None);
     }
 
@@ -133,8 +164,8 @@ mod status_tests {
         assert!(first.pending);
         assert!(!first.previous);
         assert!(first.status.is_none());
-        let value = json!({"truncated":false,"totalEntries":0,"ahead":3,"head":{"name":{"display":"refs/heads/main"}}});
-        resources.complete("status", initial, Ok(value.clone()));
+        let value = summary(0, Some(3));
+        resources.complete_git("status", initial, reply(&value));
         let ready = reading(resources.get("status"));
         assert!(!ready.pending && !ready.previous && ready.error.is_none());
         assert_eq!(ready.status.unwrap().ahead, Some(3));
@@ -149,17 +180,16 @@ mod status_tests {
         assert_eq!(failed.status.unwrap().ahead, Some(3));
         let retry = resources.begin_refresh("status", true).unwrap();
         assert!(reading(resources.get("status")).previous);
-        resources.complete("status", retry, Ok(value));
+        resources.complete_git("status", retry, reply(&value));
         assert!(!reading(resources.get("status")).previous);
     }
 
     #[test]
     fn background_observations_keep_cached_status_stable_and_errors_visible() {
         let mut resources = crate::resources::Resources::default();
-        let value = json!({"truncated":false,"totalEntries":2,
-            "head":{"name":{"display":"refs/heads/main"}},"ahead":3});
+        let value = summary(2, Some(3));
         let first = resources.begin("status").unwrap();
-        resources.complete("status", first, Ok(value.clone()));
+        resources.complete_git("status", first, reply(&value));
         let background = resources.begin_refresh("status", false).unwrap();
         let cached = reading(resources.get("status"));
         assert!(!cached.pending && !cached.previous);
@@ -172,21 +202,18 @@ mod status_tests {
         // A manual refresh joins this read and restores visible activity.
         assert!(resources.begin_refresh("status", true).is_none());
         assert!(reading(resources.get("status")).pending);
-        resources.complete("status", retry, Ok(value));
+        resources.complete_git("status", retry, reply(&value));
         let recovered = reading(resources.get("status"));
         assert!(!recovered.pending && !recovered.previous && recovered.error.is_none());
     }
 
     #[test]
-    fn absent_or_invalid_ahead_is_unknown_and_partial_status_is_not_clean() {
-        let mut value = json!({"truncated":false,"totalEntries":0,"head":{"name":{"display":"refs/heads/main"}}});
-        for ahead in [Value::Null, json!(-1), json!("3")] {
-            value["ahead"] = ahead;
-            assert_eq!(status(&value).unwrap().ahead, None);
-        }
-        value["ahead"] = json!(0);
+    fn absent_ahead_is_unknown_and_partial_status_is_not_clean() {
+        let mut value = summary(0, None);
+        assert_eq!(status(&value).unwrap().ahead, None);
+        value.ahead = Some(0);
         assert_eq!(status(&value).unwrap().ahead, Some(0));
-        value["truncated"] = json!(true);
+        value.truncated = true;
         assert!(status(&value).is_none());
         let mut resources = crate::resources::Resources::default();
         let request = resources.begin("status").unwrap();
@@ -201,19 +228,18 @@ mod status_tests {
 mod tests {
     use super::*;
     #[test]
-    fn files_navigation_uses_exact_bytes_and_rejects_invalid_or_foreign_paths() {
-        let mut project = json!({"serverId":"server", "path":{"display":"/wrong", "bytesB64":STANDARD.encode("/home/日本語/project ")}});
-        assert_eq!(
-            files_path(&project, "server").as_deref(),
-            Some("/home/日本語/project ")
-        );
-        assert!(files_path(&project, "other").is_none());
+    fn files_navigation_uses_exact_bytes_and_rejects_invalid_paths() {
+        let mut path = newport_protocol::git::Path {
+            bytes_b64: STANDARD.encode("/home/日本語/project "),
+            display: "/wrong".into(),
+        };
+        assert_eq!(files_path(&path).as_deref(), Some("/home/日本語/project "));
         for bytes in [b"relative".as_slice(), b"/nul\0path", b"/invalid\xff"] {
-            project["path"]["bytesB64"] = json!(STANDARD.encode(bytes));
-            assert!(files_path(&project, "server").is_none());
+            path.bytes_b64 = STANDARD.encode(bytes);
+            assert!(files_path(&path).is_none());
         }
-        project["path"]["bytesB64"] = json!("invalid base64");
-        assert!(files_path(&project, "server").is_none());
+        path.bytes_b64 = "invalid base64".into();
+        assert!(files_path(&path).is_none());
     }
     #[test]
     fn adding_a_bookmark_preserves_path_bytes_and_explicit_display_name() {

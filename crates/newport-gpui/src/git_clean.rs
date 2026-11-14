@@ -12,7 +12,7 @@ impl Newport {
             && !self.git.changes.filtering()
             && !self.git.changes.searching()
             && WorkingTree::for_page(
-                &self.git.page,
+                self.git.status_page(),
                 self.resources.get("git-list"),
                 self.git.error.is_some(),
             ) == WorkingTree::Clean
@@ -23,14 +23,14 @@ impl Newport {
             self.resources.invalidate(COMMIT);
             return;
         }
-        let Some(oid) = clean::head_oid(&self.git.page) else {
+        let Some(oid) = self.git.status_page().and_then(clean::head_oid) else {
             self.resources.invalidate(COMMIT);
             return;
         };
         if self.resources.get(COMMIT).is_some() {
             return;
         }
-        self.request_git(
+        self.request_git_typed(
             COMMIT,
             GitRequest::Commit {
                 repo_id: self.git_repository_id(),
@@ -40,12 +40,18 @@ impl Newport {
     }
 
     pub(super) fn git_clean_view(&self, cx: &mut Context<Self>) -> AnyElement {
-        let head = &self.git.page["metadata"]["head"];
-        let oid = clean::head_oid(&self.git.page);
+        let status = self.git.status_page();
+        let unborn = status.is_some_and(|status| status.metadata.head.unborn);
+        let oid = status.and_then(clean::head_oid);
         let resource = self.resources.get(COMMIT);
         let commit = resource
             .filter(|r| !r.pending && r.error.is_none())
-            .and_then(|r| clean::matching_commit(&self.git.page, &r.value));
+            .and_then(|r| match (status, r.git()) {
+                (Some(status), Some(newport_protocol::git::Reply::Commit(commit))) => {
+                    clean::matching_commit(status, commit)
+                }
+                _ => None,
+            });
         let pending = oid.is_some() && resource.is_none_or(|r| r.pending);
         let failed = oid.is_some() && resource.is_some_and(|r| !r.pending) && commit.is_none();
         empty::content(
@@ -54,7 +60,7 @@ impl Newport {
             "Your working tree is clean.",
             cx,
         )
-        .when(head["unborn"] == true, |view| {
+        .when(unborn, |view| {
             view.child(
                 crate::label("No commits yet")
                     .text_size(px(crate::ui::FONT_SIZE))
@@ -98,7 +104,9 @@ impl Newport {
                                 .truncate()
                                 .text_size(px(crate::ui::FONT_SIZE))
                                 .child(
-                                    text(&commit["message"], "display")
+                                    commit
+                                        .message
+                                        .display
                                         .lines()
                                         .next()
                                         .unwrap_or("Empty commit message")
@@ -107,7 +115,7 @@ impl Newport {
                         )
                         .child(
                             crate::label(git_commit_header::relative_time(
-                                &commit["time"],
+                                commit.time,
                                 chrono::Utc::now().timestamp(),
                             ))
                             .text_size(px(crate::ui::FONT_SIZE))

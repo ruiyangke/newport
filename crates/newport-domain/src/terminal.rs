@@ -28,6 +28,9 @@ pub struct HeldShell {
     pub name: Option<String>,
     /// The title the shell's program set last, for a tab not attached yet.
     pub title: Option<String>,
+    /// What the shell's coding agent last reported, for a tab not attached
+    /// yet: an OSC 7501 program status report.
+    pub agent: Option<String>,
     pub creator: Mac,
     pub attached: Vec<AttachedMac>,
     /// Seconds since the Unix epoch.

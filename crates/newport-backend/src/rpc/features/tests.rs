@@ -1,5 +1,6 @@
 use super::*;
 use crate::{manager::Manager, model::Server, profile::Store, rpc};
+use newport_protocol::desktop::{files, metrics};
 use serde_json::{Value, json};
 use std::{path::PathBuf, time::Duration};
 use uuid::Uuid;
@@ -133,6 +134,38 @@ impl Fixture {
         .await
         .unwrap()
     }
+    async fn execute(
+        &self,
+        method: &'static str,
+        args: Value,
+    ) -> Result<newport_protocol::desktop::Reply, String> {
+        let endpoint = self.endpoint.clone();
+        tokio::task::spawn_blocking(move || {
+            rpc::test_fixture::execute(endpoint, method, args, std::time::Duration::from_secs(30))
+        })
+        .await
+        .unwrap()
+    }
+    async fn metrics(&self, method: &'static str, args: Value) -> metrics::Reply {
+        match self.execute(method, args).await.unwrap() {
+            newport_protocol::desktop::Reply::Metrics(reply) => *reply,
+            other => panic!("expected a metrics reply, got {other:?}"),
+        }
+    }
+    async fn files(&self, method: &'static str, args: Value) -> files::Reply {
+        match self.execute(method, args).await.unwrap() {
+            newport_protocol::desktop::Reply::Files(reply) => *reply,
+            other => panic!("expected a files reply, got {other:?}"),
+        }
+    }
+    async fn snapshot(&self) -> Result<newport_protocol::desktop::configuration::Snapshot, String> {
+        let endpoint = self.endpoint.clone();
+        tokio::task::spawn_blocking(move || {
+            rpc::test_fixture::snapshot(endpoint, std::time::Duration::from_secs(30))
+        })
+        .await
+        .unwrap()
+    }
     async fn stop(self) {
         self.shutdown.send(()).unwrap();
         self.task.await.unwrap().unwrap();
@@ -166,11 +199,8 @@ impl Fixture {
 #[tokio::test]
 async fn native_client_reads_and_clears_real_metric_storage() {
     let fixture = Fixture::start().await;
-    let snapshot = fixture.call("snapshot", json!({})).await.unwrap();
-    assert_eq!(
-        snapshot["config"]["servers"][0]["id"],
-        fixture.server.id.to_string()
-    );
+    let snapshot = fixture.snapshot().await.unwrap();
+    assert_eq!(snapshot.config.servers[0].id, fixture.server.id);
     let at = crate::metrics_db::now_ms();
     fixture
         .metrics
@@ -184,25 +214,36 @@ async fn native_client_reads_and_clears_real_metric_storage() {
         .await
         .unwrap();
     let args = json!({"id":fixture.server.id});
-    let history = fixture.call("cockpit_history", args.clone()).await.unwrap();
-    assert_eq!(history.as_array().unwrap().len(), 1);
-    assert_eq!(history[0]["at"], at);
-    assert_eq!(history[0]["data"], json!({"cpu":42.0,"network":[]}));
-    let cache = fixture.call("get_metrics_cache", json!({})).await.unwrap();
-    assert_eq!(cache["samples"], 1);
-    assert!(cache["bytes"].as_u64().unwrap() > 0);
+    let metrics::Reply::History(history) = fixture.metrics("cockpit_history", args.clone()).await
+    else {
+        panic!("expected history");
+    };
+    assert_eq!(history.samples.len(), 1);
+    assert_eq!(history.samples[0].at, at);
+    let metrics::SampleValue::Raw(raw) = &history.samples[0].value else {
+        panic!("expected a raw sample");
+    };
+    assert_eq!(raw.measures.cpu, Some(42.));
+    assert_eq!(raw.measures.memory_total, None);
+    assert!(raw.network.is_empty() && raw.uptime.is_none() && raw.disks.is_none());
+    let metrics::Reply::Cache(cache) = fixture.metrics("get_metrics_cache", json!({})).await else {
+        panic!("expected cache information");
+    };
+    assert_eq!(cache.samples, 1);
+    assert!(cache.bytes > 0);
 
     // An edited profile must not expose the old endpoint's history.
     fixture.manager.lock().await.config.servers[0].ssh_host = "new-endpoint".into();
-    assert_eq!(
-        fixture.call("cockpit_history", args).await.unwrap(),
-        json!([])
-    );
-    let cleared = fixture
-        .call("clear_metrics_cache", json!({}))
-        .await
-        .unwrap();
-    assert_eq!(cleared["samples"], 0);
+    assert!(matches!(
+        fixture.metrics("cockpit_history", args).await,
+        metrics::Reply::History(history) if history.samples.is_empty()
+    ));
+    let metrics::Reply::ClearCache(cleared) =
+        fixture.metrics("clear_metrics_cache", json!({})).await
+    else {
+        panic!("expected cleared cache information");
+    };
+    assert_eq!(cleared.samples, 0);
     assert_eq!(fixture.metrics.cache_info().await.unwrap().samples, 0);
     fixture.stop().await;
 }
@@ -303,14 +344,26 @@ async fn native_feature_routes_preserve_validation_before_any_remote_action() {
     .unwrap()
     .unwrap_err();
     assert!(refused.to_string().contains("terminal"), "{refused}");
-    assert_eq!(
-        fixture
-            .call("terminal_close", json!({"session":session}))
-            .await
-            .unwrap(),
-        Value::Null
-    );
-    assert!(fixture.call("snapshot", json!({})).await.is_ok());
+    let endpoint = fixture.endpoint.clone();
+    let closed = tokio::task::spawn_blocking(move || {
+        newport_client::backend::Backend::at_path(endpoint).execute_with_timeout(
+            newport_protocol::desktop::Operation::Terminal(Box::new(
+                newport_protocol::desktop::terminal::Operation::Close(Box::new(
+                    newport_protocol::desktop::terminal::CloseArgs { session },
+                )),
+            )),
+            Duration::from_secs(30),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        closed,
+        newport_protocol::desktop::Reply::Terminal(reply)
+            if matches!(*reply, newport_protocol::desktop::terminal::Reply::Close(_))
+    ));
+    assert!(fixture.snapshot().await.is_ok());
     fixture.stop().await;
 }
 
@@ -324,9 +377,13 @@ async fn native_file_client_roundtrip_preserves_scope_and_cancellation() {
         .unwrap();
     fixture.server.identity_file = Some(std::env::var("NEWPORT_TEST_IDENTITY").unwrap());
     fixture.manager.lock().await.config.servers[0] = fixture.server.clone();
-    let snapshot = fixture.call("snapshot", json!({})).await.unwrap();
-    let scope =
-        newport_domain::connection_scope::connection(&snapshot["config"]["servers"][0], &snapshot);
+    let snapshot = fixture.snapshot().await.unwrap();
+    let revision = snapshot.runtime.connection_revision(fixture.server.id);
+    let scope = crate::rpc::test_fixture::tuple(
+        &fixture
+            .server
+            .connection_scope(revision, snapshot.instance_id),
+    );
     let id = fixture.server.id;
     let listing = fixture
         .call(
@@ -355,17 +412,22 @@ async fn native_file_client_roundtrip_preserves_scope_and_cancellation() {
         .await
         .unwrap();
     let remote = uploaded.as_str().unwrap();
-    let preview = fixture
-        .call(
+    let files::Reply::Preview(preview) = fixture
+        .files(
             "files_preview",
             json!({
                 "id":id,"operation":Uuid::new_v4(),"path":remote,"expectedConnection":scope
             }),
         )
         .await
-        .unwrap();
-    assert_eq!(preview["kind"], "text");
-    assert_eq!(preview["content"], payload);
+    else {
+        panic!("expected a preview");
+    };
+    assert_eq!(preview.kind, files::PreviewKind::Text);
+    assert_eq!(
+        preview.content,
+        files::Content::Text(Box::new(payload.clone()))
+    );
     let destination = fixture.directory.path().join("download.txt");
     std::fs::write(&destination, "old destination").unwrap();
     fixture
@@ -399,13 +461,12 @@ async fn native_file_client_roundtrip_preserves_scope_and_cancellation() {
         .await
         .unwrap_err();
     assert!(cancelled.contains("cancelled"), "{cancelled}");
-    assert_eq!(
+    assert!(matches!(
         fixture
-            .call("files_progress", json!({"operation":operation}))
-            .await
-            .unwrap(),
-        Value::Null
-    );
+            .files("files_progress", json!({"operation":operation}))
+            .await,
+        files::Reply::Progress(lookup) if lookup.progress.is_none()
+    ));
     assert_eq!(std::fs::read_to_string(&destination).unwrap(), payload);
 
     fixture.manager.lock().await.advance_connection_revision(id);

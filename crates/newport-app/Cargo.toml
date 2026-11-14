@@ -1,6 +1,6 @@
 [package]
 name = "newport-app"
-version = "0.7.3"
+version = "0.7.4"
 edition = "2024"
 license = "AGPL-3.0-only"
 publish = false
@@ -14,7 +14,7 @@ newport-protocol = { path = "../newport-protocol" }
 newport-backend = { path = "../newport-backend" }
 newport-client = { path = "../newport-client" }
 newport-domain = { path = "../newport-domain" }
-newport-platform = { path = "../newport-platform", features = ["tray", "updates", "pdf"] }
+newport-platform = { path = "../newport-platform", features = ["tray", "updates"] }
 newport-gpui = { path = "../newport-gpui" }
 gpui-kit = "=0.8.1"
 async-channel = "2"

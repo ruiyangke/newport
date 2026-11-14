@@ -1,13 +1,11 @@
 //! Opt-in partial-index acceptance through desktop IPC, SSH and the installed agent.
 //! All mutations are confined to a UUID-owned repository in the loopback fixture.
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use newport_client::{
-    backend::Backend,
-    git_discard,
-    git_operation::{Operation, State},
-    git_selection::Review,
+use newport_client::{backend::Backend, git_discard, git_selection::Review};
+use newport_protocol::{
+    desktop,
+    git::{self as protocol, Operation, OperationState as State},
 };
-use newport_protocol::{common::Present, desktop, git as protocol};
 use serde_json::Value;
 use std::{
     io::Write,
@@ -110,9 +108,33 @@ impl Drop for Fixture {
         }
     }
 }
-fn request(backend: &Backend, server: &str, request: protocol::Request) -> Result<Value, String> {
+/// Sends a Git read and returns its checked reply.
+fn reply(
+    backend: &Backend,
+    server: &str,
+    request: protocol::Request,
+) -> Result<protocol::Reply, String> {
     backend
-        .request_git(
+        .git(
+            server
+                .parse::<uuid::Uuid>()
+                .map_err(|error| error.to_string())?,
+            request,
+            false,
+        )
+        .map_err(|error| error.to_string())
+}
+/// [`reply`] as JSON, for assertions on its fields.
+fn request(backend: &Backend, server: &str, request: protocol::Request) -> Result<Value, String> {
+    serde_json::to_value(reply(backend, server, request)?).map_err(|error| error.to_string())
+}
+fn read(
+    backend: &Backend,
+    server: &str,
+    request: protocol::Request,
+) -> Result<protocol::Reply, String> {
+    backend
+        .git(
             server
                 .parse::<uuid::Uuid>()
                 .map_err(|error| error.to_string())?,
@@ -159,7 +181,7 @@ fn selection(
     staged: bool,
     wanted: &[&str],
 ) -> Result<(Review, Vec<String>, Vec<String>), String> {
-    let status = request(
+    let protocol::Reply::Status(status) = read(
         backend,
         server,
         protocol::Request::Status {
@@ -168,24 +190,24 @@ fn selection(
             page_size: 20,
             cursor: None,
         },
-    )?;
-    assert!(status["nextCursor"].is_null());
-    let entry = status["entries"]
-        .as_array()
-        .ok_or("Missing entries")?
+    )?
+    else {
+        return Err("Expected a status page".into());
+    };
+    assert!(status.next_cursor.is_none());
+    let path = protocol::Path::new(FILE.as_bytes());
+    let entry = status
+        .entries
         .iter()
-        .find(|entry| entry["path"]["bytesB64"] == STANDARD.encode(FILE))
+        .find(|entry| entry.path.bytes_b64 == path.bytes_b64)
         .ok_or("Missing fixture file")?;
-    let page = request(
+    let protocol::Reply::DiffPage(page) = read(
         backend,
         server,
         protocol::Request::DiffPage {
             repo_id: repo.into(),
-            snapshot: status["snapshot"]
-                .as_str()
-                .ok_or("Missing snapshot")?
-                .into(),
-            entry_id: entry["entryId"].as_str().ok_or("Missing entry ID")?.into(),
+            snapshot: status.snapshot.clone(),
+            entry_id: entry.entry_id.clone(),
             side: if staged {
                 protocol::Side::HeadToIndex
             } else {
@@ -197,24 +219,23 @@ fn selection(
             cursor: None,
             line_encoding: None,
         },
-    )?;
+    )?
+    else {
+        return Err("Expected a diff page".into());
+    };
     let review = Review::from_page(&page)?;
     let mut lines = vec![];
-    for file in page["entries"].as_array().ok_or("Missing diff files")? {
-        for hunk in file["hunks"].as_array().ok_or("Missing hunks")? {
-            for line in hunk["lines"].as_array().ok_or("Missing lines")? {
-                if !matches!(line["origin"].as_str(), Some("+" | "-")) {
+    for file in &page.entries {
+        for hunk in &file.hunks {
+            for line in &hunk.lines {
+                if !matches!(line.origin.as_str(), "+" | "-") {
                     continue;
                 }
-                let bytes = STANDARD
-                    .decode(
-                        line["contentBytesB64"]
-                            .as_str()
-                            .ok_or("Missing line bytes")?,
-                    )
-                    .map_err(|e| e.to_string())?;
-                if wanted.iter().any(|content| content.as_bytes() == bytes) {
-                    lines.push(line["id"].as_str().ok_or("Missing line ID")?.to_owned());
+                if wanted
+                    .iter()
+                    .any(|content| content.as_bytes() == line.content_bytes_b64.0)
+                {
+                    lines.push(line.id.clone().ok_or("Missing line ID")?);
                 }
             }
         }
@@ -250,24 +271,21 @@ fn partial_index_changes_preserve_unselected_bytes_and_reject_stale_reviews() ->
     assert_eq!(exec(&["id", "-un"])?.trim(), "fixture");
     let backend = Backend::discover();
     let state = backend
-        .execute_rendered(desktop::Operation::Configuration(Box::new(
-            desktop::configuration::Operation::Snapshot(Box::new(Present {})),
-        )))
+        .configuration_snapshot()
         .map_err(|error| error.to_string())?;
-    let servers: Vec<_> = state["config"]["servers"]
-        .as_array()
-        .ok_or("Missing servers")?
+    let servers: Vec<_> = state
+        .config
+        .servers
         .iter()
-        .filter(|s| {
-            s["sshHost"] == "127.0.0.1" && s["sshPort"] == port && s["sshUser"] == "fixture"
-        })
+        .filter(|s| s.ssh_host == "127.0.0.1" && s.ssh_port == port && s.ssh_user == "fixture")
         .collect();
     assert_eq!(
         servers.len(),
         1,
         "Expected one disposable loopback fixture server"
     );
-    let server = servers[0]["id"].as_str().ok_or("Missing server ID")?;
+    let server = servers[0].id.to_string();
+    let server = server.as_str();
     let fixture = Fixture::new()?;
     fixture.git(&["init", "--initial-branch=main"])?;
     fixture.git(&["config", "user.name", "Native Test"])?;

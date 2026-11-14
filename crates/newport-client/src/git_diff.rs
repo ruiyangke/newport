@@ -1,6 +1,5 @@
 //! Reassemble byte-oriented Git diff lines before decoding text or selecting it.
-use base64::{Engine, engine::general_purpose::STANDARD};
-use serde_json::Value;
+use newport_protocol::git::LineFragment;
 
 const INVALID: &str = "The agent returned an invalid diff piece.";
 const CONTINUATION: &str = "Diff line continuation does not match.";
@@ -36,29 +35,25 @@ impl Lines {
         file: u64,
         hunk: u64,
         hunk_id: Option<&str>,
-        piece: &Value,
+        piece: &LineFragment,
     ) -> Result<Option<Line>, String> {
-        let index = number(&piece["lineIndex"])?;
-        let offset = number(&piece["byteOffset"])?;
-        let complete = piece["lineComplete"].as_bool().ok_or(INVALID)?;
-        let origin = piece["origin"].as_str().ok_or(INVALID)?;
-        let old = nullable_number(piece.get("oldLine"))?;
-        let new = nullable_number(piece.get("newLine"))?;
-        let encoded = piece["contentBytesB64"]
-            .as_str()
-            .filter(|value| value.len() <= 5464)
-            .ok_or(INVALID)?;
-        let bytes = STANDARD.decode(encoded).map_err(|_| INVALID)?;
+        let index = number(piece.line_index)?;
+        let offset = number(piece.byte_offset)?;
+        let complete = piece.line_complete;
+        let origin = piece.origin.as_str();
+        let old = piece.old_line.map(number).transpose()?;
+        let new = piece.new_line.map(number).transpose()?;
+        let bytes = piece.content_bytes_b64.0.clone();
         if bytes.len() > 4096
             || (!complete && bytes.len() != 4096)
             || ![" ", "+", "-", "=", ">", "<"].contains(&origin)
         {
             return Err(INVALID.into());
         }
-        let id = match piece.get("id") {
-            None | Some(Value::Null) => None,
-            Some(Value::String(id)) if !id.is_empty() => Some(id.as_str()),
-            _ => return Err(INVALID.into()),
+        let id = match piece.id.as_deref() {
+            None => None,
+            Some(id) if !id.is_empty() => Some(id),
+            Some(_) => return Err(INVALID.into()),
         };
         if id.is_some() && (!complete || !matches!(origin, "+" | "-")) {
             return Err(INVALID.into());
@@ -123,31 +118,28 @@ impl Lines {
     }
 }
 
-fn number(value: &Value) -> Result<u64, String> {
-    value
-        .as_u64()
-        .filter(|n| *n <= 9_007_199_254_740_991)
+fn number(value: u64) -> Result<u64, String> {
+    (value <= 9_007_199_254_740_991)
+        .then_some(value)
         .ok_or_else(|| INVALID.into())
-}
-
-fn nullable_number(value: Option<&Value>) -> Result<Option<u64>, String> {
-    match value {
-        Some(Value::Null) => Ok(None),
-        Some(value) => number(value).map(Some),
-        None => Err(INVALID.into()),
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use newport_protocol::git::Binary;
 
-    fn piece(bytes: &[u8], offset: u64, complete: bool) -> Value {
-        json!({"lineIndex":0,"byteOffset":offset,"lineComplete":complete,
-            "origin":"+","oldLine":null,"newLine":1,
-            "contentBytesB64":STANDARD.encode(bytes),
-            "id":if complete { json!("line-id") } else { Value::Null }})
+    fn piece(bytes: &[u8], offset: u64, complete: bool) -> LineFragment {
+        LineFragment {
+            line_index: 0,
+            byte_offset: offset,
+            line_complete: complete,
+            origin: "+".into(),
+            old_line: None,
+            new_line: Some(1),
+            content_bytes_b64: Binary(bytes.to_vec()),
+            id: complete.then(|| "line-id".into()),
+        }
     }
 
     #[test]
@@ -172,7 +164,7 @@ mod tests {
         for has_more in [false, true] {
             let mut lines = Lines::default();
             lines
-                .push(0, 0, Some("hunk"), &piece(&vec![b'x'; 4096], 0, false))
+                .push(0, 0, Some("hunk"), &piece(&[b'x'; 4096], 0, false))
                 .unwrap();
             let result = lines.finish(has_more);
             if has_more {
@@ -187,19 +179,20 @@ mod tests {
 
     #[test]
     fn changed_fragment_identity_offsets_and_early_ids_are_rejected() {
-        let first = piece(&vec![b'x'; 4096], 0, false);
-        for (field, value) in [
-            ("lineIndex", json!(1)),
-            ("byteOffset", json!(4095)),
-            ("origin", json!("-")),
-            ("oldLine", json!(1)),
-            ("newLine", json!(2)),
-        ] {
+        let first = piece(&[b'x'; 4096], 0, false);
+        let edits: [fn(&mut LineFragment); 5] = [
+            |p| p.line_index = 1,
+            |p| p.byte_offset = 4095,
+            |p| p.origin = "-".into(),
+            |p| p.old_line = Some(1),
+            |p| p.new_line = Some(2),
+        ];
+        for edit in edits {
             let mut lines = Lines::default();
             lines.push(0, 0, Some("hunk"), &first).unwrap();
             let mut last = piece(b"tail", 4096, true);
-            last[field] = value;
-            assert!(lines.push(0, 0, Some("hunk"), &last).is_err(), "{field}");
+            edit(&mut last);
+            assert!(lines.push(0, 0, Some("hunk"), &last).is_err());
         }
         let mut lines = Lines::default();
         lines.push(0, 0, Some("hunk"), &first).unwrap();
@@ -209,7 +202,7 @@ mod tests {
                 .is_err()
         );
         let mut early = first;
-        early["id"] = json!("too-early");
+        early.id = Some("too-early".into());
         assert!(Lines::default().push(0, 0, Some("hunk"), &early).is_err());
     }
 
@@ -219,7 +212,7 @@ mod tests {
             let mut lines = Lines::default();
             let mut row = piece(b"line", 0, true);
             lines.push(0, 0, None, &row).unwrap();
-            row["lineIndex"] = json!(next);
+            row.line_index = next;
             assert!(lines.push(0, 0, None, &row).is_err());
         }
     }

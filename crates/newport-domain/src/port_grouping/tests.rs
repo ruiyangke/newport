@@ -1,5 +1,5 @@
 use super::*;
-use serde_json::json;
+use newport_protocol::git::Path;
 
 use crate::port_discovery as d;
 use std::{
@@ -132,8 +132,38 @@ fn pid(port: &Port) -> u32 {
 fn branch(port: &Port) -> Option<String> {
     port.worktree().and_then(|worktree| worktree.branch)
 }
-fn forward(id: &str, port: u16, project: &str) -> Value {
-    json!({"id":id,"serverId":"s","remoteHost":"127.0.0.1","remotePort":port,"project":project})
+/// The server every fixture listener and forward belongs to.
+const S: uuid::Uuid = uuid::Uuid::from_u128(1);
+/// Another server, whose records the grouping must ignore.
+const ELSEWHERE: uuid::Uuid = uuid::Uuid::from_u128(2);
+/// A stable identity for the fixture name `id`.
+fn id(id: &str) -> uuid::Uuid {
+    uuid::Uuid::from_u128(id.bytes().fold(0, |id, byte| id << 8 | u128::from(byte)))
+}
+fn forward(name: &str, port: u16, project: &str) -> Tunnel {
+    Tunnel {
+        id: id(name),
+        name: String::new(),
+        server_id: S,
+        local_port: port,
+        local_port_end: None,
+        remote_host: "127.0.0.1".into(),
+        remote_port: port,
+        remote_port_end: None,
+        auto_connect: false,
+        auto_reconnect: false,
+        direction: Direction::Local,
+        project: Some(project.into()),
+    }
+}
+/// A saved project on this server.
+fn known(name: &str, path: &str) -> Bookmark {
+    Bookmark {
+        id: id(name),
+        server: S,
+        name: name.into(),
+        path: Path::new(path.as_bytes()),
+    }
 }
 fn checkout_listener(port: u16, path: &str, branch: &str) -> d::Member {
     let mut member = listener(port, u32::from(port), "127.0.0.1", "/repo");
@@ -149,22 +179,22 @@ fn checkout_listener(port: u16, path: &str, branch: &str) -> d::Member {
 fn saved_forward_keeps_observed_checkout_and_custom_name_when_listener_disappears() {
     let mut associations = WorktreeAssociations::default();
     let mut tunnel = forward("web", 3000, "/repo");
-    tunnel["name"] = json!("My custom name");
+    tunnel.name = "My custom name".into();
     let saved = [tunnel.clone()];
     associations.group(
         vec![checkout_listener(3000, "/checkouts/ui/", "ui")],
         &saved,
-        "s",
+        S,
         &[],
     );
-    let projects = associations.group(vec![], &saved, "s", &[]);
+    let projects = associations.group(vec![], &saved, S, &[]);
     let project = &projects[0];
     assert_eq!(project.key, "/repo");
     assert_eq!(project.worktrees[0].path, "/checkouts/ui");
     assert_eq!(project.worktrees[0].branch.as_deref(), Some("ui"));
     assert!(project.entries[0].is_saved());
     assert_eq!(
-        project.entries[0].port.definition().unwrap()["name"],
+        project.entries[0].port.definition().unwrap().name,
         "My custom name"
     );
     assert_eq!(project.entries[0].forwards, [tunnel]);
@@ -172,10 +202,10 @@ fn saved_forward_keeps_observed_checkout_and_custom_name_when_listener_disappear
     associations.group(
         vec![checkout_listener(3000, "/checkouts/ui", "renamed")],
         &saved,
-        "s",
+        S,
         &[],
     );
-    let project = associations.group(vec![], &saved, "s", &[]).remove(0);
+    let project = associations.group(vec![], &saved, S, &[]).remove(0);
     assert_eq!(project.worktrees[0].branch.as_deref(), Some("renamed"));
 }
 
@@ -184,43 +214,45 @@ fn checkout_associations_are_server_scoped_and_invalidated_by_destination_change
     let mut associations = WorktreeAssociations::default();
     let tunnel = forward("web", 3000, "/repo");
     let mut foreign = tunnel.clone();
-    foreign["serverId"] = json!("other");
+    foreign.server_id = ELSEWHERE;
     let saved = [tunnel.clone(), foreign];
     associations.group(
         vec![checkout_listener(3000, "/checkouts/ui", "ui")],
         &saved,
-        "s",
+        S,
         &[],
     );
     assert!(
-        associations.group(vec![], &saved, "other", &[])[0]
+        associations.group(vec![], &saved, ELSEWHERE, &[])[0]
             .worktrees
             .is_empty()
     );
     assert_eq!(
-        associations.group(vec![], &saved, "s", &[])[0]
+        associations.group(vec![], &saved, S, &[])[0]
             .worktrees
             .len(),
         1
     );
 
-    for (field, replacement) in [
-        ("remotePort", json!(3001)),
-        ("remotePortEnd", json!(3002)),
-        ("remoteHost", json!("192.0.2.1")),
-        ("direction", json!("remote")),
-        ("project", json!("/another")),
-    ] {
+    type Edit = (&'static str, fn(&mut Tunnel));
+    let edits: [Edit; 5] = [
+        ("remote port", |t| t.remote_port = 3001),
+        ("remote port end", |t| t.remote_port_end = Some(3002)),
+        ("remote host", |t| t.remote_host = "192.0.2.1".into()),
+        ("direction", |t| t.direction = Direction::Remote),
+        ("project", |t| t.project = Some("/another".into())),
+    ];
+    for (field, edit) in edits {
         associations.group(
             vec![checkout_listener(3000, "/checkouts/ui", "ui")],
             &saved,
-            "s",
+            S,
             &[],
         );
         let mut edited = tunnel.clone();
-        edited[field] = replacement;
+        edit(&mut edited);
         assert!(
-            associations.group(vec![], &[edited], "s", &[])[0]
+            associations.group(vec![], &[edited], S, &[])[0]
                 .worktrees
                 .is_empty(),
             "{field}"
@@ -229,13 +261,13 @@ fn checkout_associations_are_server_scoped_and_invalidated_by_destination_change
     associations.group(
         vec![checkout_listener(3000, "/checkouts/ui", "ui")],
         &saved,
-        "s",
+        S,
         &[],
     );
-    associations.group(vec![], &[], "s", &[]);
+    associations.group(vec![], &[], S, &[]);
     assert!(associations.entries.is_empty());
     assert!(
-        associations.group(vec![], &saved, "s", &[])[0]
+        associations.group(vec![], &saved, S, &[])[0]
             .worktrees
             .is_empty()
     );
@@ -251,14 +283,14 @@ fn live_checkout_rename_updates_stopped_forwards_and_survives_all_listeners_stop
             checkout_listener(3001, "/checkouts/ui", "old"),
         ],
         &saved,
-        "s",
+        S,
         &[],
     );
     // Even an unsaved listener carries authoritative checkout metadata.
     let live = associations.group(
         vec![checkout_listener(3002, "/checkouts/ui", "new")],
         &saved,
-        "s",
+        S,
         &[],
     );
     assert_eq!(live[0].entries.len(), 3);
@@ -269,7 +301,7 @@ fn live_checkout_rename_updates_stopped_forwards_and_survives_all_listeners_stop
             .all(|entry| branch(&entry.port).as_deref() == Some("new"))
     );
     assert_eq!(live[0].worktrees.len(), 1);
-    let stopped = associations.group(vec![], &saved, "s", &[]);
+    let stopped = associations.group(vec![], &saved, S, &[]);
     assert_eq!(stopped[0].entries.len(), 2);
     assert!(
         stopped[0]
@@ -284,12 +316,12 @@ fn live_checkout_rename_updates_stopped_forwards_and_survives_all_listeners_stop
 fn ambiguous_range_or_unknown_replacement_drops_checkout_association() {
     let mut associations = WorktreeAssociations::default();
     let mut tunnel = forward("range", 3000, "/repo");
-    tunnel["remotePortEnd"] = json!(3002);
+    tunnel.remote_port_end = Some(3002);
     let saved = [tunnel];
     let first = checkout_listener(3000, "/checkouts/ui", "ui");
-    associations.group(vec![first.clone()], &saved, "s", &[]);
+    associations.group(vec![first.clone()], &saved, S, &[]);
     assert_eq!(
-        associations.group(vec![], &saved, "s", &[])[0]
+        associations.group(vec![], &saved, S, &[])[0]
             .worktrees
             .len(),
         1
@@ -301,23 +333,23 @@ fn ambiguous_range_or_unknown_replacement_drops_checkout_association() {
             first.clone(),
         ],
         &saved,
-        "s",
+        S,
         &[],
     );
     assert!(
-        associations.group(vec![], &saved, "s", &[])[0]
+        associations.group(vec![], &saved, S, &[])[0]
             .worktrees
             .is_empty()
     );
-    associations.group(vec![first], &saved, "s", &[]);
+    associations.group(vec![first], &saved, S, &[]);
     associations.group(
         vec![listener(3000, 9000, "127.0.0.1", "/repo")],
         &saved,
-        "s",
+        S,
         &[],
     );
     assert!(
-        associations.group(vec![], &saved, "s", &[])[0]
+        associations.group(vec![], &saved, S, &[])[0]
             .worktrees
             .is_empty()
     );
@@ -328,7 +360,7 @@ fn listener_selection_does_not_expand_to_hidden_new_or_saved_only_rows() {
     let ports = (8000..8003)
         .map(|port| listener(port, u32::from(port), "127.0.0.1", "/repo"))
         .collect();
-    let original = group(ports, &[], "s", &[]).remove(0);
+    let original = group(ports, &[], S, &[]).remove(0);
     let selection = ListenerSelection::capture(&original.entries[..2]);
     // The first selected listener disappeared. The hidden listener, a new
     // discovery, and a saved-only forward must not replace it in the batch.
@@ -337,7 +369,7 @@ fn listener_selection_does_not_expand_to_hidden_new_or_saved_only_rows() {
             .map(|port| listener(port, u32::from(port), "127.0.0.1", "/repo"))
             .collect(),
         &[forward("saved-only", 8000, "/repo")],
-        "s",
+        S,
         &[],
     )
     .remove(0);
@@ -354,7 +386,7 @@ fn listener_selection_does_not_expand_to_hidden_new_or_saved_only_rows() {
 #[test]
 fn listener_selection_rejects_replaced_process_destination_and_checkout() {
     let mut port = checkout_listener(8000, "/repo/feature/", "feature");
-    let original = group(vec![port.clone()], &[], "s", &[]).remove(0);
+    let original = group(vec![port.clone()], &[], S, &[]).remove(0);
     let selection = ListenerSelection::capture(&original.entries);
     for case in 0..5 {
         let mut changed = port.clone();
@@ -365,46 +397,54 @@ fn listener_selection_rejects_replaced_process_destination_and_checkout() {
             3 => project(&mut changed).checkout.as_mut().unwrap().path = "/repo/other".into(),
             _ => project(&mut changed).root = "/different".into(),
         }
-        let latest = group(vec![changed], &[], "s", &[]).remove(0);
+        let latest = group(vec![changed], &[], S, &[]).remove(0);
         assert!(selection.resolve(latest.entries).is_empty(), "case {case}");
     }
     let checkout = project(&mut port).checkout.as_mut().unwrap();
     checkout.path = "/repo/feature".into();
     checkout.branch = Some("renamed-branch".into());
     owner(&mut port).name = Some("node".into());
-    let latest = group(vec![port], &[], "s", &[]).remove(0);
+    let latest = group(vec![port], &[], S, &[]).remove(0);
     assert_eq!(selection.resolve(latest.entries.clone()), latest.entries);
 }
 
 #[test]
 fn listener_selection_plans_with_latest_saved_forward_and_runtime() {
-    use crate::{forwarding::discovered_tunnel, forwarding_batch, model::Tunnel};
+    use crate::{forwarding::discovered_tunnel, forwarding_batch, model};
     use uuid::Uuid;
+    /// The saved form of a planned forward, as the configuration holds it.
+    fn saved(t: &model::Tunnel) -> Tunnel {
+        Tunnel {
+            id: t.id,
+            name: t.name.clone(),
+            server_id: t.server_id,
+            local_port: t.local_port,
+            local_port_end: t.local_port_end,
+            remote_host: t.remote_host.clone(),
+            remote_port: t.remote_port,
+            remote_port_end: t.remote_port_end,
+            auto_connect: t.auto_connect,
+            auto_reconnect: t.auto_reconnect,
+            direction: match t.direction {
+                model::Direction::Local => Direction::Local,
+                model::Direction::Remote => Direction::Remote,
+            },
+            project: t.project.clone(),
+        }
+    }
 
     let server = Uuid::new_v4();
     let ports: Vec<_> = (8000..8003)
         .map(|port| listener(port, u32::from(port), "127.0.0.1", "/repo"))
         .collect();
     let original_forward = discovered_tunnel(&[], server, "127.0.0.1", 8000).unwrap();
-    let original = group(
-        ports.clone(),
-        &[serde_json::to_value(&original_forward).unwrap()],
-        &server.to_string(),
-        &[],
-    )
-    .remove(0);
+    let original = group(ports.clone(), &[saved(&original_forward)], server, &[]).remove(0);
     let selection = ListenerSelection::capture(&original.entries[..2]);
     let mut latest_forward = original_forward.clone();
     latest_forward.id = Uuid::new_v4();
     latest_forward.local_port = 18000;
     latest_forward.name = "Changed after render".into();
-    let latest = group(
-        ports,
-        &[serde_json::to_value(&latest_forward).unwrap()],
-        &server.to_string(),
-        &[],
-    )
-    .remove(0);
+    let latest = group(ports, &[saved(&latest_forward)], server, &[]).remove(0);
     let entries = selection
         .resolve(latest.entries)
         .into_iter()
@@ -416,8 +456,11 @@ fn listener_selection_plans_with_latest_saved_forward_and_runtime() {
             }),
             forwards: entry
                 .forwards
-                .into_iter()
-                .map(|value| serde_json::from_value::<Tunnel>(value).unwrap())
+                .iter()
+                .map(|forward| {
+                    assert_eq!(*forward, saved(&latest_forward));
+                    latest_forward.clone()
+                })
                 .collect(),
         })
         .collect::<Vec<_>>();
@@ -478,7 +521,7 @@ fn project_names_sources_and_catch_all() {
         published(6379, "cache", "0.0.0.0", "", Some("cache")),
         package,
     ];
-    let projects = group(ports, &[], "s", &[]);
+    let projects = group(ports, &[], S, &[]);
     assert_eq!(
         projects
             .iter()
@@ -506,11 +549,14 @@ fn known_names_fold_nested_roots_at_the_longest_path_boundary() {
         listener(3, 3, "127.0.0.1", "/srv/repository"),
     ];
     let known = vec![
-        json!({"name":"Repository", "path":"/srv/repo/"}),
-        json!({"name":"API", "path":{"display":"/srv/repo/packages/","bytesB64":""}, "serverId":"s"}),
-        json!({"name":"Wrong server", "path":"/srv/repository", "serverId":"elsewhere"}),
+        known("Repository", "/srv/repo/"),
+        known("API", "/srv/repo/packages/"),
+        Bookmark {
+            server: ELSEWHERE,
+            ..known("Wrong server", "/srv/repository")
+        },
     ];
-    let projects = group(ports, &[], "s", &known);
+    let projects = group(ports, &[], S, &known);
     assert_eq!(
         projects
             .iter()
@@ -534,15 +580,15 @@ fn known_root_slash_absorbs_absolute_paths_but_not_other_or_compose_names() {
             published(4, "named", "0.0.0.0", "", Some("named")),
         ],
         &[],
-        "s",
-        &[json!({"name":"Root", "path":"/"})],
+        S,
+        &[known("Root", "/")],
     );
     let root = projects.iter().find(|p| p.key == "/").unwrap();
     assert_eq!(root.name, "Root");
     assert_eq!(root.entries.len(), 2);
     assert_eq!(projects.len(), 3);
     assert_eq!(
-        group(vec![listener(1, 1, "127.0.0.1", "/")], &[], "s", &[])[0].name,
+        group(vec![listener(1, 1, "127.0.0.1", "/")], &[], S, &[])[0].name,
         "/"
     );
 }
@@ -557,8 +603,8 @@ fn dual_stack_preserves_all_addresses_and_owner_isolation_without_choosing_a_des
         listener(3000, 7, "127.0.0.1", ""),
     ];
     let mut ipv6 = forward("v6", 3000, "");
-    ipv6["remoteHost"] = json!("::1");
-    let projects = group(ports, &[ipv6, forward("v4", 3000, "")], "s", &[]);
+    ipv6.remote_host = "::1".into();
+    let projects = group(ports, &[ipv6, forward("v4", 3000, "")], S, &[]);
     let entries = &projects[0].entries;
     assert_eq!(entries.len(), 2);
     assert_eq!(pid(&entries[0].port), 7);
@@ -571,12 +617,8 @@ fn dual_stack_preserves_all_addresses_and_owner_isolation_without_choosing_a_des
         ["0.0.0.0", "127.0.0.1", "192.0.2.2", "::"]
     );
     assert_eq!(
-        entries[0]
-            .forwards
-            .iter()
-            .map(|t| text(t, "id"))
-            .collect::<Vec<_>>(),
-        ["v4", "v6"]
+        entries[0].forwards.iter().map(|t| t.id).collect::<Vec<_>>(),
+        [id("v4"), id("v6")]
     );
     assert_eq!(pid(&entries[1].port), 8);
     assert_eq!(entries[1].forwards.len(), 1);
@@ -595,7 +637,7 @@ fn publications_group_by_container_and_unknown_socket_holders_stay_separate() {
         a,
         b,
     ];
-    let groups = group(ports, &[], "s", &[]);
+    let groups = group(ports, &[], S, &[]);
     assert_eq!(groups[0].entries.len(), 4);
     let api = groups[0]
         .entries
@@ -615,9 +657,9 @@ fn publications_group_by_container_and_unknown_socket_holders_stay_separate() {
 #[test]
 fn saved_leftovers_keep_filed_projects_and_exclude_foreign_servers() {
     let mut reverse = forward("reverse", 5432, "");
-    reverse["direction"] = json!("remote");
+    reverse.direction = Direction::Remote;
     let mut foreign = forward("foreign", 9999, "/srv/foreign");
-    foreign["serverId"] = json!("elsewhere");
+    foreign.server_id = ELSEWHERE;
     let projects = group(
         vec![listener(5432, 1, "0.0.0.0", "/srv/db")],
         &[
@@ -626,19 +668,19 @@ fn saved_leftovers_keep_filed_projects_and_exclude_foreign_servers() {
             reverse.clone(),
             foreign,
         ],
-        "s",
-        &[json!({"path":"/srv/repo", "name":"My application"})],
+        S,
+        &[known("My application", "/srv/repo")],
     );
     assert_eq!(projects.len(), 3);
     assert_eq!(projects[0].key, "/srv/db");
     assert!(!projects[0].entries[0].is_saved());
-    assert_eq!(projects[0].entries[0].forwards[0]["id"], "db");
+    assert_eq!(projects[0].entries[0].forwards[0].id, id("db"));
     assert_eq!(projects[1].name, "My application");
     assert!(projects[1].entries[0].is_saved());
     assert!(projects[1].entries[0].addresses.is_empty());
     assert_eq!(
-        projects[1].entries[0].port.definition().unwrap()["id"],
-        "filed"
+        projects[1].entries[0].port.definition().unwrap().id,
+        id("filed")
     );
     assert_eq!(projects[2].entries[0].forwards, [reverse]);
 }
@@ -646,15 +688,15 @@ fn saved_leftovers_keep_filed_projects_and_exclude_foreign_servers() {
 #[test]
 fn filed_forward_attributes_unknown_listener_and_ranges_attach_to_each_reached_port() {
     let mut range = forward("range", 3000, "/srv/repo/pkg");
-    range["remotePortEnd"] = json!(3002);
+    range.remote_port_end = Some(3002);
     let projects = group(
         vec![
             listener(3002, 2, "127.0.0.1", ""),
             listener(3000, 1, "127.0.0.1", ""),
         ],
         &[range.clone()],
-        "s",
-        &[json!({"name":"Repo", "path":"/srv/repo"})],
+        S,
+        &[known("Repo", "/srv/repo")],
     );
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0].key, "/srv/repo");
@@ -679,7 +721,7 @@ fn linked_worktrees_share_repository_and_main_checkout_sorts_first() {
         project(port).root = "/srv/repo".into();
     }
     project(&mut ports[1]).checkout.as_mut().unwrap().main = Some(true);
-    let projects = group(ports, &[], "s", &[]);
+    let projects = group(ports, &[], S, &[]);
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0].entries.len(), 3);
     assert_eq!(
@@ -703,12 +745,12 @@ fn linked_worktrees_share_repository_and_main_checkout_sorts_first() {
 fn narrowed_selection_removes_forwards_of_unselected_siblings() {
     let a = listener(3000, 7, "0.0.0.0", "/repo");
     let b = listener(3000, 7, "::", "/repo");
-    let original = group(vec![a.clone()], &[], "s", &[]).remove(0);
+    let original = group(vec![a.clone()], &[], S, &[]).remove(0);
     let selection = ListenerSelection::capture(&original.entries);
     let v4 = forward("v4", 3000, "/repo");
     let mut v6 = forward("v6", 3000, "/repo");
-    v6["remoteHost"] = json!("::1");
-    let latest = group(vec![a, b], &[v4.clone(), v6], "s", &[]).remove(0);
+    v6.remote_host = "::1".into();
+    let latest = group(vec![a, b], &[v4.clone(), v6], S, &[]).remove(0);
     assert_eq!(latest.entries.len(), 1);
     assert_eq!(latest.entries[0].forwards.len(), 2);
     let selected = selection.resolve(latest.entries);
@@ -729,12 +771,7 @@ fn system_services_are_separate_from_saved_projects_and_unknown_owners() {
     let mut unknown = listener(53, 2, "127.0.0.1", "");
     socket(&mut unknown).holders.clear();
     socket(&mut unknown).uid = 0;
-    let projects = group(
-        vec![service, unknown],
-        &[],
-        "s",
-        &[json!({"name":"Root", "path":"/"})],
-    );
+    let projects = group(vec![service, unknown], &[], S, &[known("Root", "/")]);
     assert_eq!(projects.len(), 2);
     assert_eq!(projects[0].key, SYSTEM);
     assert_eq!(projects[0].source, Source::System);
@@ -747,10 +784,10 @@ fn system_services_are_separate_from_saved_projects_and_unknown_owners() {
 #[test]
 fn a_dual_stack_listener_on_any_ipv6_address_is_reached_through_ipv4_loopback() {
     let saved = |listener: d::Member| {
-        group(vec![listener], &[forward("web", 3000, "")], "s", &[])
+        group(vec![listener], &[forward("web", 3000, "")], S, &[])
             .into_iter()
             .flat_map(|project| project.entries)
-            .find(|entry| entry.forwards.iter().any(|t| t["id"] == "web"))
+            .find(|entry| entry.forwards.iter().any(|t| t.id == id("web")))
             .unwrap()
             .is_saved()
     };

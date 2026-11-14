@@ -67,16 +67,19 @@ impl Newport {
     }
     pub(super) fn can_lock_worktree(&self) -> bool {
         self.git.checkouts.open
-            && self.git.repo["capabilities"]["readOnly"] == false
+            && self.git.writable()
             && !self.git_mutation_blocks_write()
-            && self.git.checkouts.contains(&self.git.checkouts.selected)
-            && lock_target(&self.git.checkouts.selected).is_some()
-            && self.git.checkouts.page["entries"]
-                .as_array()
-                .is_some_and(|rows| rows.contains(&self.git.checkouts.selected))
-            && self.git.checkouts.page["snapshot"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty())
+            && self
+                .git
+                .checkouts
+                .selected
+                .as_ref()
+                .is_some_and(|selected| {
+                    self.git.checkouts.contains(selected)
+                        && lock_target(selected).is_some()
+                        && self.git.checkouts.entries().contains(selected)
+                })
+            && self.git.checkouts.snapshot().is_some_and(|s| !s.is_empty())
             && self
                 .resources
                 .get("git-checkouts")
@@ -86,7 +89,8 @@ impl Newport {
         if !self.can_lock_worktree() || self.git_worktree_review_open() {
             return;
         }
-        let Some((name, unlock)) = lock_target(&self.git.checkouts.selected) else {
+        let Some((name, unlock)) = self.git.checkouts.selected.as_ref().and_then(lock_target)
+        else {
             return;
         };
         let reason = cx.new(|cx| InputState::new(window, cx).placeholder("Optional lock reason"));
@@ -102,8 +106,8 @@ impl Newport {
         self.git.worktree_lock = Some(LockForm {
             id: uuid::Uuid::new_v4(),
             name,
-            path: text(&self.git.checkouts.selected["path"], "display"),
-            snapshot: text(&self.git.checkouts.page, "snapshot"),
+            path: self.selected_worktree_path(),
+            snapshot: self.git.checkouts.snapshot().unwrap_or_default().to_owned(),
             unlock,
             reason,
             _subscription: subscription,
@@ -244,14 +248,18 @@ impl RepairForm {
 impl Newport {
     pub(super) fn can_repair_worktree(&self) -> bool {
         self.can_lock_worktree()
-            && self.git.checkouts.selected["current"] == false
-            && self.git.checkouts.selected["state"] == "missing"
+            && self
+                .git
+                .checkouts
+                .selected
+                .as_ref()
+                .is_some_and(|selected| !selected.current && selected.state == "missing")
     }
     pub(super) fn review_worktree_repair(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_repair_worktree() || self.git_worktree_review_open() {
             return;
         }
-        let Some((name, _)) = lock_target(&self.git.checkouts.selected) else {
+        let Some((name, _)) = self.git.checkouts.selected.as_ref().and_then(lock_target) else {
             return;
         };
         let path = cx.new(|cx| {
@@ -267,8 +275,8 @@ impl Newport {
         self.git.worktree_repair = Some(RepairForm {
             id: uuid::Uuid::new_v4(),
             name,
-            original_path: text(&self.git.checkouts.selected["path"], "display"),
-            snapshot: text(&self.git.checkouts.page, "snapshot"),
+            original_path: self.selected_worktree_path(),
+            snapshot: self.git.checkouts.snapshot().unwrap_or_default().to_owned(),
             path,
             _subscription: subscription,
         });
@@ -331,20 +339,33 @@ pub(super) struct RemoveReview {
 
 impl Newport {
     pub(super) fn can_remove_worktree(&self) -> bool {
-        self.can_lock_worktree() && removal_target(&self.git.checkouts.selected).is_some()
+        self.can_lock_worktree()
+            && self
+                .git
+                .checkouts
+                .selected
+                .as_ref()
+                .and_then(removal_target)
+                .is_some()
     }
     pub(super) fn review_worktree_removal(&mut self, cx: &mut Context<Self>) {
         if !self.can_remove_worktree() || self.git_worktree_review_open() {
             return;
         }
-        let Some((name, missing)) = removal_target(&self.git.checkouts.selected) else {
+        let Some((name, missing)) = self
+            .git
+            .checkouts
+            .selected
+            .as_ref()
+            .and_then(removal_target)
+        else {
             return;
         };
         self.git.worktree_remove = Some(RemoveReview {
             name,
             missing,
-            path: text(&self.git.checkouts.selected["path"], "display"),
-            snapshot: text(&self.git.checkouts.page, "snapshot"),
+            path: self.selected_worktree_path(),
+            snapshot: self.git.checkouts.snapshot().unwrap_or_default().to_owned(),
         });
         cx.notify();
     }
@@ -401,9 +422,18 @@ impl Newport {
             && review_matches(
                 name,
                 snapshot,
-                &self.git.checkouts.selected,
-                &self.git.checkouts.page,
+                self.git.checkouts.selected.as_ref(),
+                self.git.checkouts.page.as_ref(),
             )
+    }
+    /// The selected checkout's path, as a review shows it.
+    fn selected_worktree_path(&self) -> String {
+        self.git
+            .checkouts
+            .selected
+            .as_ref()
+            .map(|selected| selected.path.display.clone())
+            .unwrap_or_default()
     }
     pub(super) fn git_worktree_review_stale(&self) -> bool {
         self.git

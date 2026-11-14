@@ -1,4 +1,10 @@
 //! Typed desktop applications contracts.
+
+/// Why the desktop didn't hand an application to the server.
+pub const APPLICATION_NOT_SUBMITTED: &str = "APPLICATION_NOT_SUBMITTED";
+/// Why a request for a connection that has since changed was refused.
+pub const APPLICATION_CONNECTION_CHANGED: &str = "APPLICATION_CONNECTION_CHANGED";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Runtime {
     pub instance: uuid::Uuid,
@@ -111,9 +117,12 @@ pub struct Stopped {
     pub stopped: bool,
 }
 
+/// Software apps on a Newport display need from the server.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Requirement {
     Dbus,
+    /// For X11-only apps and the X11 parts of Wayland apps, such as a
+    /// browser's profile dialog. The display starts it on demand.
     Xwayland,
     Fonts,
     Gles,
@@ -121,62 +130,80 @@ pub enum Requirement {
     Audio,
 }
 
+/// Why an installed requirement doesn't run for this account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Inactive {
+    /// It runs only for regular users.
     Root,
+    /// Its user service is installed but stopped.
     Stopped,
+    /// It is installed, but didn't start when tried.
     Failed,
 }
 
-#[derive(Clone, Debug)]
+/// What a check found wrong with a requirement.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Finding {
     Missing(Box<crate::common::Present>),
+    /// Installed, older than Newport needs.
     Outdated(Box<String>),
+    /// Installed, but it doesn't run for this account.
     Inactive(Box<crate::desktop::applications::Inactive>),
+    /// The check couldn't tell.
     Unverified(Box<crate::common::Present>),
 }
 
-#[derive(Clone, Debug)]
+/// A requirement the server doesn't meet.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Gap {
     pub requirement: crate::desktop::applications::Requirement,
     pub finding: crate::desktop::applications::Finding,
 }
 
+/// How the server's account runs a command as root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Elevation {
+    /// The account is root.
     Root,
     Sudo,
     Doas,
+    /// Neither `sudo` nor `doas` is installed.
     Unavailable,
 }
 
+/// An image-based system's own way to add packages, in place of its package
+/// manager. Both take effect after a restart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Updater {
+    /// Fedora Atomic desktops and CoreOS.
     RpmOstree,
+    /// openSUSE MicroOS, Aeon and Kalpa.
     TransactionalUpdate,
 }
 
-#[derive(Clone, Debug)]
+/// What the server's account can do about gaps.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Host {
     pub elevation: crate::desktop::applications::Elevation,
     pub updater: Option<crate::desktop::applications::Updater>,
+    /// The account has a systemd user manager to start services with.
     pub user_services: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LegacyAgent {
     pub revision: String,
     pub agent: String,
     pub built_at: Option<u64>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectedRuntime {
     pub build_sha256: String,
     pub product: crate::product::Variant,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Availability {
     pub agent: Option<String>,
     pub legacy_agent: Option<String>,

@@ -8,6 +8,8 @@ use std::io::{self, Read, Write};
 mod scan;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use scan::tables;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
@@ -193,6 +195,10 @@ pub fn encode_server(message: &ServerMessage) -> Result<Vec<u8>, Error> {
         ServerMessage::Active(active) => M::Active(pb::Active { active: *active }),
         ServerMessage::Failed(value) => M::Error(failure_to_wire(value)),
         ServerMessage::Renamed(name) => M::Renamed(pb::Renamed { name: name.clone() }),
+        ServerMessage::Size { columns, rows } => M::Size(pb::Size {
+            columns: u32::from(*columns),
+            rows: u32::from(*rows),
+        }),
     };
     encode(
         &pb::ServerFrame {
@@ -224,6 +230,10 @@ pub fn decode_server(body: Bytes) -> Result<ServerMessage, Error> {
         M::Active(value) => ServerMessage::Active(value.active),
         M::Error(value) => ServerMessage::Failed(failure_from_wire(value)?),
         M::Renamed(value) => ServerMessage::Renamed(value.name),
+        M::Size(value) => {
+            let (columns, rows) = size(value)?;
+            ServerMessage::Size { columns, rows }
+        }
     };
     message.validate()?;
     Ok(message)

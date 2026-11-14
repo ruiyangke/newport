@@ -1,10 +1,10 @@
 //! Bounded remote discovery and configuration reads.
 use crate::backend::Backend;
-use serde::Deserialize;
-use serde_json::{Value, json};
+use newport_protocol::git::{Page, Remote, RemoteName, Reply, Request, TotalEntries};
 use std::collections::HashSet;
 
 pub const PAGE_SIZE: usize = 20;
+type NamePage = Page<RemoteName, TotalEntries>;
 #[derive(Clone, Debug)]
 pub struct Names {
     pub entries: Vec<String>,
@@ -12,70 +12,56 @@ pub struct Names {
     pub total: usize,
     snapshot: String,
 }
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WirePage {
-    entries: Vec<Name>,
-    next_cursor: Option<String>,
-    snapshot: String,
-    metadata: Metadata,
-}
-#[derive(Deserialize)]
-struct Name {
-    name: String,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Metadata {
-    total_entries: usize,
-}
 impl Names {
-    pub fn decode(value: Value) -> Result<Self, String> {
-        Self::decode_bounded(value, PAGE_SIZE)
+    /// Checks one page: distinct nonempty names, a count that covers them,
+    /// and a cursor only while names remain.
+    pub fn from_page(page: &NamePage) -> Result<Self, String> {
+        Self::bounded(page, PAGE_SIZE)
     }
-    fn decode_bounded(value: Value, limit: usize) -> Result<Self, String> {
-        let page: WirePage =
-            serde_json::from_value(value).map_err(|_| "Invalid remote names response.")?;
-        let entries: Vec<_> = page.entries.into_iter().map(|n| n.name).collect();
+    fn bounded(page: &NamePage, limit: usize) -> Result<Self, String> {
+        let entries: Vec<_> = page.entries.iter().map(|n| n.name.clone()).collect();
+        let total = usize::try_from(page.metadata.total_entries).unwrap_or(usize::MAX);
         if page.snapshot.is_empty()
             || entries.len() > limit
-            || entries.len() > page.metadata.total_entries
+            || entries.len() > total
             || entries.iter().any(|n| n.is_empty())
             || entries.iter().collect::<HashSet<_>>().len() != entries.len()
-            || page.next_cursor.as_ref().is_some_and(|c| {
-                c.is_empty() || entries.is_empty() || entries.len() >= page.metadata.total_entries
-            })
+            || page
+                .next_cursor
+                .as_ref()
+                .is_some_and(|c| c.is_empty() || entries.is_empty() || entries.len() >= total)
         {
             return Err("Invalid remote names page. Reload remotes.".into());
         }
         Ok(Self {
             entries,
-            next_cursor: page.next_cursor,
-            total: page.metadata.total_entries,
-            snapshot: page.snapshot,
+            next_cursor: page.next_cursor.clone(),
+            total,
+            snapshot: page.snapshot.clone(),
         })
     }
-    pub fn validate_first(value: &Value) -> Result<(), String> {
-        let page = Self::decode(value.clone())?;
+    /// Checks a first page, which must hold every name unless it continues.
+    pub fn validate_first(page: &NamePage) -> Result<(), String> {
+        let page = Self::from_page(page)?;
         if page.next_cursor.is_none() && page.entries.len() != page.total {
             return Err("Incomplete remote names page. Reload remotes.".into());
         }
         Ok(())
     }
-    pub fn merge_values(
-        previous: &Value,
-        mut incoming: Value,
+    /// Appends a continuation page to the accepted names, keeping the
+    /// incoming envelope. Errors leave the accepted page untouched.
+    pub fn merge(
+        previous: &NamePage,
+        mut incoming: NamePage,
         cursor: &str,
-    ) -> Result<Value, String> {
-        let mut accumulated = Self::decode_bounded(previous.clone(), usize::MAX)?;
-        accumulated.append(Self::decode(incoming.clone())?, cursor)?;
-        incoming["entries"] = json!(
-            accumulated
-                .entries
-                .into_iter()
-                .map(|name| json!({"name":name}))
-                .collect::<Vec<_>>()
-        );
+    ) -> Result<NamePage, String> {
+        let mut accumulated = Self::bounded(previous, usize::MAX)?;
+        accumulated.append(Self::from_page(&incoming)?, cursor)?;
+        incoming.entries = accumulated
+            .entries
+            .into_iter()
+            .map(|name| RemoteName { name })
+            .collect();
         Ok(incoming)
     }
     pub fn append(&mut self, next: Self, cursor: &str) -> Result<(), String> {
@@ -116,10 +102,10 @@ impl Backend {
         cursor: Option<&str>,
     ) -> Result<Names, String> {
         let server = uuid::Uuid::parse_str(server).map_err(|error| error.to_string())?;
-        Names::decode(
-            self.request_git(
+        let reply = self
+            .git(
                 server,
-                newport_protocol::git::Request::RemoteNames {
+                Request::RemoteNames {
                     repo_id: repo.into(),
                     filter: query.into(),
                     page_size: PAGE_SIZE,
@@ -127,38 +113,54 @@ impl Backend {
                 },
                 false,
             )
-            .map_err(|error| error.to_string())?,
-        )
+            .map_err(|error| error.to_string())?;
+        let Reply::RemoteNames(page) = reply else {
+            return Err("Invalid remote names response.".into());
+        };
+        Names::from_page(&page)
     }
-    pub fn git_remote(&self, server: &str, repo: &str, name: &str) -> Result<Value, String> {
+    /// The selected remote's configuration, once it names `name` and carries
+    /// the token a write must present.
+    pub fn git_remote(&self, server: &str, repo: &str, name: &str) -> Result<Remote, String> {
         let server = uuid::Uuid::parse_str(server).map_err(|error| error.to_string())?;
-        let result = self
-            .request_git(
+        let reply = self
+            .git(
                 server,
-                newport_protocol::git::Request::Remote {
+                Request::Remote {
                     repo_id: repo.into(),
                     name: name.into(),
                 },
                 false,
             )
             .map_err(|error| error.to_string())?;
-        if result["name"].as_str() != Some(name)
-            || result["token"].as_str().is_none_or(str::is_empty)
-            || ["url", "pushUrl"]
-                .iter()
-                .any(|key| !result[key].is_null() && !result[key].is_string())
-        {
-            return Err("Invalid remote configuration. Select the remote again.".into());
+        match reply {
+            Reply::Remote(remote) if remote.name == name && !remote.token.is_empty() => Ok(*remote),
+            _ => Err("Invalid remote configuration. Select the remote again.".into()),
         }
-        Ok(result)
     }
 }
 #[cfg(test)]
 mod tests {
-    use super::{Names, PAGE_SIZE};
-    use serde_json::json;
-    fn page(names: &[&str], cursor: Option<&str>, snapshot: &str, total: usize) -> Names {
-        Names::decode(json!({"entries":names.iter().map(|n|json!({"name":n})).collect::<Vec<_>>(),"nextCursor":cursor,"snapshot":snapshot,"metadata":{"totalEntries":total}})).unwrap()
+    use super::{NamePage, Names, PAGE_SIZE};
+    use newport_protocol::git::{Page, RemoteName, TotalEntries};
+    fn wire(names: &[String], cursor: Option<&str>, snapshot: &str, total: u64) -> NamePage {
+        Page {
+            snapshot: snapshot.into(),
+            entries: names
+                .iter()
+                .map(|name| RemoteName { name: name.clone() })
+                .collect(),
+            next_cursor: cursor.map(Into::into),
+            metadata: TotalEntries {
+                total_entries: total,
+            },
+        }
+    }
+    fn named(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| (*n).to_owned()).collect()
+    }
+    fn page(names: &[&str], cursor: Option<&str>, snapshot: &str, total: u64) -> Names {
+        Names::from_page(&wire(&named(names), cursor, snapshot, total)).unwrap()
     }
     #[test]
     fn pages_reject_changed_snapshot_repeated_cursor_and_duplicates_without_losing_rows() {
@@ -196,20 +198,21 @@ mod tests {
             page(&["backup", "origin"], None, "s", 2).default_name(),
             Some("origin")
         );
-        assert!(Names::decode(json!({"entries":(0..=PAGE_SIZE).map(|n|json!({"name":format!("remote-{n}")})).collect::<Vec<_>>(),"nextCursor":null,"snapshot":"s","metadata":{"totalEntries":PAGE_SIZE+1}})).is_err());
+        let oversized: Vec<_> = (0..=PAGE_SIZE).map(|n| format!("remote-{n}")).collect();
+        assert!(Names::from_page(&wire(&oversized, None, "s", PAGE_SIZE as u64 + 1)).is_err());
     }
     #[test]
     fn full_page_merge_preserves_rows_and_rejects_incomplete_or_duplicate_results() {
-        let first = json!({"entries":(0..20).map(|i|json!({"name":format!("remote-{i}")})).collect::<Vec<_>>(),"snapshot":"s","nextCursor":"next","metadata":{"totalEntries":21}});
+        let names: Vec<_> = (0..20).map(|i| format!("remote-{i}")).collect();
+        let first = wire(&names, Some("next"), "s", 21);
         assert!(Names::validate_first(&first).is_ok());
-        let last = json!({"entries":[{"name":"remote-20"}],"snapshot":"s","nextCursor":null,"metadata":{"totalEntries":21}});
+        let last = wire(&named(&["remote-20"]), None, "s", 21);
         assert!(Names::validate_first(&last).is_err());
-        let merged = Names::merge_values(&first, last.clone(), "next").unwrap();
-        assert_eq!(merged["entries"].as_array().unwrap().len(), 21);
-        assert!(merged["nextCursor"].is_null());
-        let mut repeated = last;
-        repeated["entries"][0]["name"] = json!("remote-0");
-        assert!(Names::merge_values(&first, repeated, "next").is_err());
-        assert_eq!(first["entries"].as_array().unwrap().len(), 20);
+        let merged = Names::merge(&first, last.clone(), "next").unwrap();
+        assert_eq!(merged.entries.len(), 21);
+        assert!(merged.next_cursor.is_none());
+        let repeated = wire(&named(&["remote-0"]), None, "s", 21);
+        assert!(Names::merge(&first, repeated, "next").is_err());
+        assert_eq!(first.entries.len(), 20);
     }
 }

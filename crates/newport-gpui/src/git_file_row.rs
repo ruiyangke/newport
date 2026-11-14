@@ -149,8 +149,8 @@ pub(super) fn filename_first(path: &str, cx: &App) -> Div {
         })
 }
 
-pub(super) fn description(entry: &Value, title: &str, status: &str) -> String {
-    if let Some(origin) = origin(entry) {
+pub(super) fn description(origin: Option<&str>, title: &str, status: &str) -> String {
+    if let Some(origin) = origin {
         format!("{title} · {status}\nfrom {origin}")
     } else {
         format!("{title} · {status}")
@@ -158,17 +158,13 @@ pub(super) fn description(entry: &Value, title: &str, status: &str) -> String {
 }
 /// Compare protocol path identities, not lossy display strings. Two distinct
 /// non-UTF-8 paths can have the same display label.
-pub(super) fn origin(entry: &Value) -> Option<&str> {
-    let old = &entry["oldPath"];
-    let new = entry
-        .get("newPath")
-        .or_else(|| entry.get("path"))
-        .unwrap_or(&Value::Null);
-    let old_id = old["bytesB64"].as_str()?;
-    let new_id = new["bytesB64"].as_str()?;
-    (!old_id.is_empty() && !new_id.is_empty() && old_id != new_id)
-        .then(|| old["display"].as_str())
-        .flatten()
+pub(super) fn origin<'a>(
+    old: Option<&'a newport_protocol::git::Path>,
+    new: &newport_protocol::git::Path,
+) -> Option<&'a str> {
+    let old = old?;
+    (!old.bytes_b64.is_empty() && !new.bytes_b64.is_empty() && old.bytes_b64 != new.bytes_b64)
+        .then_some(old.display.as_str())
 }
 #[cfg(test)]
 mod tests {
@@ -176,7 +172,7 @@ mod tests {
     use gpui_kit::{
         self as gpui, Bounds, Context, IntoElement, Pixels, Render, Window, div, prelude::*, px,
     };
-    use serde_json::{Value, json};
+    use newport_protocol::git::Path;
     use std::{cell::RefCell, rc::Rc};
     struct PathView {
         bounds: Rc<RefCell<Vec<Bounds<Pixels>>>>,
@@ -229,17 +225,17 @@ mod tests {
     }
     #[test]
     fn rename_origin_uses_path_identity_and_ignores_deleted_or_incomplete_paths() {
-        let mut entry = json!({
-            "oldPath":{"bytesB64":"b2xk","display":"same display"},
-            "path":{"bytesB64":"bmV3","display":"same display"}
-        });
-        assert_eq!(origin(&entry), Some("same display"));
-        entry["path"]["bytesB64"] = json!("b2xk");
-        assert_eq!(origin(&entry), None);
-        entry["path"] = Value::Null;
-        assert_eq!(origin(&entry), None);
-        entry["newPath"] = json!({"display":"missing identity"});
-        assert_eq!(origin(&entry), None);
+        let path = |bytes: &str| Path {
+            bytes_b64: bytes.into(),
+            display: "same display".into(),
+        };
+        assert_eq!(
+            origin(Some(&path("b2xk")), &path("bmV3")),
+            Some("same display")
+        );
+        assert_eq!(origin(Some(&path("b2xk")), &path("b2xk")), None);
+        assert_eq!(origin(None, &path("bmV3")), None);
+        assert_eq!(origin(Some(&path("b2xk")), &path("")), None);
     }
     #[test]
     fn paths_preserve_bytes_and_statuses_are_explicit() {
@@ -258,13 +254,6 @@ mod tests {
             assert_eq!(name(letter), title);
         }
         assert_eq!(mark("Modified"), "M");
-        assert!(
-            description(
-                &json!({"oldPath":{"bytesB64":"a","display":"old"},"newPath":{"bytesB64":"b"}}),
-                "new",
-                "Renamed"
-            )
-            .ends_with("from old")
-        );
+        assert!(description(Some("old"), "new", "Renamed").ends_with("from old"));
     }
 }

@@ -1,5 +1,6 @@
 use super::*;
 use gpui_kit::component::tab::Tab;
+use newport_client::git_worktree::WorktreePage;
 use newport_protocol::git::Request as GitRequest;
 
 /// Pending and failed validation share the field's hint slot. Long errors wrap
@@ -58,10 +59,16 @@ impl FormOrigin {
             Self::BranchPicker | Self::CheckoutPicker => picker_open,
         }
     }
-    fn review_matches(self, tab: usize, picker_open: bool, snapshot: &str, page: &Value) -> bool {
+    fn review_matches(
+        self,
+        tab: usize,
+        picker_open: bool,
+        snapshot: &str,
+        page: Option<&WorktreePage>,
+    ) -> bool {
         self.active(tab, picker_open)
             && !snapshot.is_empty()
-            && page["snapshot"].as_str() == Some(snapshot)
+            && page.is_some_and(|page| page.snapshot == snapshot)
     }
 }
 pub(super) struct Form {
@@ -99,9 +106,9 @@ pub(super) struct Draft {
     open_after: bool,
 }
 impl Draft {
-    pub(super) fn open_destination(&self) -> Option<Value> {
-        use base64::Engine as _;
-        self.open_after.then(|| json!({"display":self.path,"bytesB64":base64::engine::general_purpose::STANDARD.encode(&self.path)}))
+    pub(super) fn open_destination(&self) -> Option<newport_protocol::git::Path> {
+        self.open_after
+            .then(|| newport_protocol::git::Path::new(self.path.as_bytes()))
     }
     fn target(&self) -> newport_client::git_worktree::CreateTarget<'_> {
         newport_client::git_worktree::CreateTarget {
@@ -165,26 +172,37 @@ impl Form {
     }
 }
 
-fn owner_path(branch: &Value, page: &Value) -> Option<Value> {
+fn owner_path(
+    branch: Option<&newport_protocol::git::Branch>,
+    owners: &[newport_protocol::git::Worktree],
+) -> Option<newport_protocol::git::Path> {
     use base64::Engine as _;
-    let (name, _) = super::git::local_branch_target(branch)?;
-    let owner = page["entries"].as_array()?.first()?;
+    let (name, _) = super::git::local_branch_target(branch?)?;
+    let owner = owners.first()?;
     let expected = base64::engine::general_purpose::STANDARD.encode(format!("refs/heads/{name}"));
-    if owner["head"]["name"]["bytesB64"] != expected {
+    if owner.head.name.as_ref().map(|name| &name.bytes_b64) != Some(&expected) {
         return None;
     }
-    super::git::worktree_path(owner)
+    super::git::worktree_destination(owner)
 }
 impl Newport {
+    /// The worktrees the selected branch's owner read found.
+    fn branch_owners(&self) -> &[newport_protocol::git::Worktree] {
+        match self.git_reply("git-branch-worktree-owner") {
+            Some(newport_protocol::git::Reply::Worktrees(page)) => &page.entries,
+            _ => &[],
+        }
+    }
     pub(super) fn git_branch_worktree_unoccupied(&self) -> bool {
         self.resources
             .get("git-branch-worktree-owner")
             .is_some_and(|r| !r.pending && r.error.is_none())
-            && self.value("git-branch-worktree-owner")["entries"]
-                .as_array()
-                .is_some_and(Vec::is_empty)
+            && matches!(
+                self.git_reply("git-branch-worktree-owner"),
+                Some(newport_protocol::git::Reply::Worktrees(page)) if page.entries.is_empty()
+            )
     }
-    pub(super) fn branch_owner_path(&self) -> Option<Value> {
+    pub(super) fn branch_owner_path(&self) -> Option<newport_protocol::git::Path> {
         if !self.git.branches.open
             || self.git.branches.error.is_some()
             || !self
@@ -194,10 +212,7 @@ impl Newport {
         {
             return None;
         }
-        owner_path(
-            &self.git.branches.selected,
-            &self.value("git-branch-worktree-owner"),
-        )
+        owner_path(self.git.branches.selected.as_ref(), self.branch_owners())
     }
     pub(super) fn open_branch_worktree(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = self.branch_owner_path() {
@@ -210,10 +225,16 @@ impl Newport {
         if !self.git.branches.open {
             return;
         }
-        let Some((branch, _)) = super::git::local_branch_target(&self.git.branches.selected) else {
+        let Some((branch, _)) = self
+            .git
+            .branches
+            .selected
+            .as_ref()
+            .and_then(super::git::local_branch_target)
+        else {
             return;
         };
-        self.request_git(
+        self.request_git_typed(
             "git-branch-worktree-owner",
             GitRequest::Worktrees {
                 repo_id: self.git_repository_id(),
@@ -227,8 +248,7 @@ impl Newport {
         );
     }
     pub(super) fn git_branch_worktree_hint(&self, cx: &mut Context<Self>) -> AnyElement {
-        let page = self.value("git-branch-worktree-owner");
-        let owner = page["entries"].as_array().and_then(|rows| rows.first());
+        let owner = self.branch_owners().first();
         div()
             .flex()
             .flex_col()
@@ -238,11 +258,8 @@ impl Newport {
             .child(self.status("git-branch-worktree-owner", cx))
             .when_some(owner, |view, owner| {
                 view.child(
-                    crate::label(format!(
-                        "Already checked out in {}",
-                        text(&owner["path"], "display")
-                    ))
-                    .text_size(px(crate::ui::FONT_SIZE)),
+                    crate::label(format!("Already checked out in {}", owner.path.display))
+                        .text_size(px(crate::ui::FONT_SIZE)),
                 )
                 .child(
                     crate::controls::button("open-branch-worktree")
@@ -254,10 +271,13 @@ impl Newport {
             .into_any_element()
     }
 
-    fn worktree_creation_page(&self, origin: FormOrigin) -> Value {
+    fn worktree_creation_page(&self, origin: FormOrigin) -> Option<&WorktreePage> {
         match origin {
-            FormOrigin::BranchPicker => self.value(origin.resource_key()),
-            FormOrigin::CheckoutPicker => self.git.checkouts.page.clone(),
+            FormOrigin::BranchPicker => match self.git_reply(origin.resource_key()) {
+                Some(newport_protocol::git::Reply::Worktrees(page)) => Some(page),
+                _ => None,
+            },
+            FormOrigin::CheckoutPicker => self.git.checkouts.page.as_ref(),
         }
     }
     pub(super) fn can_create_branch_worktree(&self) -> bool {
@@ -266,8 +286,9 @@ impl Newport {
             && self.can_create_worktree_from(FormOrigin::BranchPicker)
             && !self.git_worktree_review_open()
             && self.git_branch_worktree_unoccupied()
-            && self.git.branches.selected["current"] == false
-            && super::git::local_branch_target(&self.git.branches.selected).is_some()
+            && self.git.branches.selected.as_ref().is_some_and(|branch| {
+                !branch.current && super::git::local_branch_target(branch).is_some()
+            })
             && self
                 .resources
                 .get("git-branches")
@@ -277,7 +298,12 @@ impl Newport {
         if !self.can_create_branch_worktree() {
             return;
         }
-        let Some((branch, oid)) = super::git::local_branch_target(&self.git.branches.selected)
+        let Some((branch, oid)) = self
+            .git
+            .branches
+            .selected
+            .as_ref()
+            .and_then(super::git::local_branch_target)
         else {
             return;
         };
@@ -306,7 +332,7 @@ impl Newport {
     fn can_create_worktree_from(&self, origin: FormOrigin) -> bool {
         origin.active(self.git.tab, self.worktree_origin_open(origin))
             && !self.git_mutation_blocks_write()
-            && self.git.repo["capabilities"]["readOnly"] == false
+            && self.git.writable()
             && if origin == FormOrigin::BranchPicker {
                 self.git.branches.error.is_none()
             } else {
@@ -316,9 +342,9 @@ impl Newport {
                 .resources
                 .get(origin.resource_key())
                 .is_some_and(|r| !r.pending && r.error.is_none())
-            && self.worktree_creation_page(origin)["snapshot"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty())
+            && self
+                .worktree_creation_page(origin)
+                .is_some_and(|page| !page.snapshot.is_empty())
     }
     fn new_worktree_from(
         &mut self,
@@ -330,6 +356,22 @@ impl Newport {
             return;
         }
         let page = self.worktree_creation_page(origin);
+        let oid = page
+            .and_then(|page| page.metadata.current.as_ref())
+            .and_then(|current| current.head.oid.as_ref())
+            .map(|oid| oid.hex.clone())
+            .unwrap_or_default();
+        let snapshot = page.map(|page| page.snapshot.clone()).unwrap_or_default();
+        let main_root = page
+            .and_then(|page| page.metadata.main.as_ref())
+            .map(|main| main.path.display.as_str())
+            .unwrap_or_else(|| {
+                self.git
+                    .root()
+                    .map(|root| root.display.as_str())
+                    .unwrap_or_default()
+            })
+            .to_owned();
         let path = cx.new(|cx| InputState::new(window, cx).placeholder("Absolute remote path"));
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Worktree name"));
         crate::controls::focus_editor(&name, window, cx);
@@ -339,7 +381,7 @@ impl Newport {
                 super::git_worktree_picker::WorktreeBranchPicker::new(
                     self.server.clone(),
                     self.git_repository_id(),
-                    self.git.repo["bare"] == true,
+                    self.git.bare() == Some(true),
                     newport_client::git_branch::WorktreeBranchUse::Existing,
                     window,
                     cx,
@@ -351,7 +393,7 @@ impl Newport {
                 super::git_worktree_picker::WorktreeBranchPicker::new(
                     self.server.clone(),
                     self.git_repository_id(),
-                    self.git.repo["bare"] == true,
+                    self.git.bare() == Some(true),
                     newport_client::git_branch::WorktreeBranchUse::StartingPoint,
                     window,
                     cx,
@@ -395,17 +437,10 @@ impl Newport {
             new_branch: true,
             locked: false,
             open_after: true,
-            oid: text(&page["metadata"]["current"]["head"]["oid"], "hex"),
+            oid,
             existing_branch: None,
-            snapshot: text(&page, "snapshot"),
-            main_root: page["metadata"]["main"]["path"]["display"]
-                .as_str()
-                .unwrap_or_else(|| {
-                    self.git.repo["root"]["display"]
-                        .as_str()
-                        .unwrap_or_default()
-                })
-                .to_owned(),
+            snapshot,
+            main_root,
             suggested_name: Default::default(),
             suggested_path: Default::default(),
             name_review: Default::default(),
@@ -447,7 +482,7 @@ impl Newport {
                 self.git.tab,
                 self.worktree_origin_open(form.origin),
                 &form.snapshot,
-                &self.worktree_creation_page(form.origin),
+                self.worktree_creation_page(form.origin),
             )
     }
     pub(super) fn sync_worktree_creation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -475,7 +510,12 @@ impl Newport {
                 let branch = checked_branch.to_owned();
                 let id = form.id;
                 let server = self.server.clone();
-                let repo = text(&self.git.repo, "repoId");
+                let repo = self
+                    .git
+                    .repo
+                    .as_ref()
+                    .map(|repo| repo.repo_id.clone())
+                    .unwrap_or_default();
                 let executor = cx.background_executor().clone();
                 form.branch_check_task = Some(cx.spawn(async move |owner, cx| {
                     executor.timer(Duration::from_millis(200)).await;
@@ -502,7 +542,12 @@ impl Newport {
                 let name = draft.name.clone();
                 let id = form.id;
                 let server = self.server.clone();
-                let repo = text(&self.git.repo, "repoId");
+                let repo = self
+                    .git
+                    .repo
+                    .as_ref()
+                    .map(|repo| repo.repo_id.clone())
+                    .unwrap_or_default();
                 let executor = cx.background_executor().clone();
                 form.name_check_task = Some(cx.spawn(async move |owner, cx| {
                     executor.timer(Duration::from_millis(200)).await;
@@ -555,7 +600,7 @@ impl Newport {
             self.git.tab,
             self.worktree_origin_open(form.origin),
             &form.snapshot,
-            &self.worktree_creation_page(form.origin),
+            self.worktree_creation_page(form.origin),
         );
         div()
             .flex()
@@ -782,7 +827,6 @@ mod tests {
     };
     use gpui_kit as gpui;
     use gpui_kit::base::test_support::snapshots;
-    use serde_json::json;
 
     struct HintHost {
         review: newport_client::git_worktree::NameReview,
@@ -887,10 +931,7 @@ mod tests {
         let newport_protocol::git::Action::WorktreeAdd { path, .. } = &action else {
             panic!("Expected worktree creation");
         };
-        assert_eq!(
-            draft.open_destination(),
-            Some(serde_json::to_value(path).unwrap())
-        );
+        assert_eq!(draft.open_destination(), Some(path.clone()));
         draft.open_after = false;
         assert!(draft.open_destination().is_none());
         assert_eq!(draft.target().action().unwrap(), action);
@@ -898,42 +939,77 @@ mod tests {
     #[test]
     fn owner_navigation_requires_matching_branch_and_available_checkout() {
         let encode = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
-        let branch = json!({"name":{"display":"topic","bytesB64":encode("topic")},"oid":{"hex":"abc"},"remote":false});
-        let mut page = json!({"entries":[{"kind":"linked","current":false,"state":"available","path":{"display":"/checkout","bytesB64":encode("/checkout")},"head":{"name":{"bytesB64":encode("refs/heads/topic")}}}]});
+        use newport_protocol::git::{Head, Path, Worktree};
+        let branch = crate::git_fixture::branch("topic", "abc");
+        let mut owner = Worktree {
+            name: None,
+            kind: "linked".into(),
+            path: Path::new(b"/checkout"),
+            git_dir: Path::new(b"/checkout/.git"),
+            current: false,
+            state: "available".into(),
+            head: Head {
+                oid: None,
+                name: Some(Path::new(b"refs/heads/topic")),
+                detached: false,
+                unborn: false,
+            },
+            locked: false,
+            lock_reason: None,
+            prunable: false,
+        };
         assert_eq!(
-            owner_path(&branch, &page),
-            Some(page["entries"][0]["path"].clone())
+            owner_path(Some(&branch), std::slice::from_ref(&owner)),
+            Some(Path::new(b"/checkout"))
         );
-        page["entries"][0]["head"]["name"]["bytesB64"] = json!(encode("refs/heads/other"));
-        assert!(owner_path(&branch, &page).is_none());
-        page["entries"][0]["head"]["name"]["bytesB64"] = json!(encode("refs/heads/topic"));
-        page["entries"][0]["state"] = json!("missing");
-        assert!(owner_path(&branch, &page).is_none());
+        owner.head.name.as_mut().unwrap().bytes_b64 = encode("refs/heads/other");
+        assert!(owner_path(Some(&branch), std::slice::from_ref(&owner)).is_none());
+        owner.head.name.as_mut().unwrap().bytes_b64 = encode("refs/heads/topic");
+        owner.state = "missing".into();
+        assert!(owner_path(Some(&branch), std::slice::from_ref(&owner)).is_none());
+        assert!(owner_path(None, &[]).is_none());
     }
     #[test]
     fn worktree_review_keeps_origin_and_rejects_changed_snapshot() {
-        let page = json!({"snapshot":"worktrees-before"});
-        let branches = json!({"snapshot":"branches-before"});
+        let page = crate::git_fixture::worktree_page("worktrees-before", vec![], None);
+        let branches = crate::git_fixture::worktree_page("branches-before", vec![], None);
+        let unnamed = crate::git_fixture::worktree_page("", vec![], None);
         assert_eq!(FormOrigin::CheckoutPicker.resource_key(), "git-checkouts");
         for tab in [0, 1, 3, 4, 5, 6] {
             assert!(FormOrigin::CheckoutPicker.review_matches(
                 tab,
                 true,
                 "worktrees-before",
-                &page
+                Some(&page)
             ));
             assert!(!FormOrigin::CheckoutPicker.review_matches(
                 tab,
                 false,
                 "worktrees-before",
-                &page
+                Some(&page)
             ));
-            assert!(!FormOrigin::CheckoutPicker.review_matches(tab, true, "changed", &page));
+            assert!(!FormOrigin::CheckoutPicker.review_matches(tab, true, "changed", Some(&page)));
+            assert!(!FormOrigin::CheckoutPicker.review_matches(
+                tab,
+                true,
+                "worktrees-before",
+                None
+            ));
         }
         assert_eq!(FormOrigin::BranchPicker.resource_key(), "git-worktree-list");
-        assert!(FormOrigin::BranchPicker.review_matches(1, true, "branches-before", &branches));
-        assert!(!FormOrigin::BranchPicker.review_matches(1, false, "branches-before", &branches));
-        assert!(!FormOrigin::BranchPicker.review_matches(1, true, "branches-before", &page));
-        assert!(!FormOrigin::BranchPicker.review_matches(1, true, "", &json!({"snapshot":""})));
+        assert!(FormOrigin::BranchPicker.review_matches(
+            1,
+            true,
+            "branches-before",
+            Some(&branches)
+        ));
+        assert!(!FormOrigin::BranchPicker.review_matches(
+            1,
+            false,
+            "branches-before",
+            Some(&branches)
+        ));
+        assert!(!FormOrigin::BranchPicker.review_matches(1, true, "branches-before", Some(&page)));
+        assert!(!FormOrigin::BranchPicker.review_matches(1, true, "", Some(&unnamed)));
     }
 }

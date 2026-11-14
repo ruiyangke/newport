@@ -11,6 +11,7 @@ pub mod display;
 pub mod encoding;
 pub mod git;
 pub mod integration;
+pub mod lsp;
 pub mod monitor;
 pub mod product;
 pub mod remote_apps;

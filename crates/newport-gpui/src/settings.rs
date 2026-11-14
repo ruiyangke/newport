@@ -212,12 +212,39 @@ impl Newport {
     /// Theme and sidebar choices go to preferences.json through the backend,
     /// its only writer, so drawing never waits on the disk.
     pub(super) fn save_window_preferences(&mut self, patch: desktop::preferences::WindowPatch) {
-        self.request(
+        self.request_work(
             WINDOW_PREFERENCES,
-            desktop::Operation::Preferences(Box::new(desktop::preferences::Operation::SetWindow(
-                Box::new(desktop::preferences::SetWindowArgs { patch }),
-            ))),
+            request_dispatch::Request::Typed(Box::new(desktop::Operation::Preferences(Box::new(
+                desktop::preferences::Operation::SetWindow(Box::new(
+                    desktop::preferences::SetWindowArgs { patch },
+                )),
+            )))),
         );
+    }
+    /// Settles a window preferences save. Returns whether its generation was
+    /// still current.
+    pub(super) fn complete_window_preferences(
+        &mut self,
+        generation: u64,
+        result: Result<desktop::Reply, newport_client::request_error::RequestError>,
+    ) -> bool {
+        let error = match result {
+            Ok(desktop::Reply::Preferences(reply))
+                if matches!(*reply, desktop::preferences::Reply::SetWindow(_)) =>
+            {
+                None
+            }
+            Ok(_) => Some("The backend answered a preferences save with another reply.".into()),
+            Err(error) => Some(error),
+        };
+        let saved = error.is_none();
+        let status = newport_client::resources::QueryStatus {
+            error,
+            updated_at: saved.then(now_millis).flatten(),
+            ..Default::default()
+        };
+        self.resources
+            .complete_query(WINDOW_PREFERENCES, generation, &status, saved, saved)
     }
     pub(super) fn save_sidebar(&mut self) {
         self.save_window_preferences(desktop::preferences::WindowPatch {
@@ -269,11 +296,11 @@ impl Newport {
                 cx.notify();
             });
         }
-        let update = self.settings_state.resource("update").map(|r| &r.value);
+        let update = self.settings_state.update();
         if self.page != Page::Settings
-            || update.is_none_or(|value| {
-                value["enabled"] != true
-                    || self.settings_ui.confirmation.as_deref() != value["version"].as_str()
+            || update.is_none_or(|update| {
+                !update.enabled
+                    || self.settings_ui.confirmation.as_deref() != update.version.as_deref()
             })
         {
             self.settings_ui.confirmation = None;
@@ -281,7 +308,7 @@ impl Newport {
     }
 
     pub(super) fn settings(&self, cx: &mut Context<Self>) -> AnyElement {
-        let state = PageState::from_resources(|key| self.settings_state.resource(key));
+        let state = PageState::from_settings(&self.settings_state);
         let owner = cx.weak_entity();
         SettingsView {
             state,
@@ -318,13 +345,14 @@ impl Newport {
                             this.settings_state.clear_cache();
                         }
                         Action::Update => {
-                            let update = this.settings_state.resource("update");
-                            let ready = update
-                                .filter(|r| {
-                                    r.value["enabled"] == true && r.value["phase"] == "ready"
+                            let ready = this
+                                .settings_state
+                                .update()
+                                .filter(|update| {
+                                    update.enabled
+                                        && update.phase == desktop::host::UpdatePhase::Ready
                                 })
-                                .and_then(|r| r.value["version"].as_str())
-                                .map(str::to_owned);
+                                .and_then(|update| update.version.clone());
                             if let Some(version) = ready {
                                 this.settings_ui.confirmation = Some(version);
                             } else {
@@ -342,10 +370,10 @@ impl Newport {
                                     .confirmation
                                     .as_deref()
                                     .is_some_and(|version| {
-                                        this.settings_state.resource("update").is_some_and(|r| {
-                                            r.value["enabled"] == true
-                                                && r.value["phase"] == "ready"
-                                                && r.value["version"].as_str() == Some(version)
+                                        this.settings_state.update().is_some_and(|update| {
+                                            update.enabled
+                                                && update.phase == desktop::host::UpdatePhase::Ready
+                                                && update.version.as_deref() == Some(version)
                                         })
                                     });
                             if approved {
@@ -361,18 +389,29 @@ impl Newport {
     }
 }
 
-#[derive(Clone, Default)]
-struct Reading {
-    value: Value,
+/// A Settings resource's state, with the reading its controller keeps.
+#[derive(Clone)]
+struct Reading<T> {
+    value: Option<T>,
     error: Option<String>,
     pending: bool,
     success: bool,
 }
-impl Reading {
-    fn from(resource: Option<&newport_client::resources::Resource>) -> Self {
+impl<T> Default for Reading<T> {
+    fn default() -> Self {
+        Self {
+            value: None,
+            error: None,
+            pending: false,
+            success: false,
+        }
+    }
+}
+impl<T: Clone> Reading<T> {
+    fn from(resource: Option<&newport_client::resources::Resource>, value: Option<&T>) -> Self {
         resource
             .map(|r| Self {
-                value: r.value.clone(),
+                value: value.cloned(),
                 error: r.error.clone(),
                 pending: r.pending,
                 success: !r.pending && r.error.is_none() && r.revision > 0,
@@ -380,7 +419,7 @@ impl Reading {
             .unwrap_or_default()
     }
     fn loaded(&self) -> bool {
-        !self.value.is_null()
+        self.value.is_some()
     }
     fn loading(&self) -> bool {
         !self.loaded() && self.error.is_none()
@@ -388,62 +427,82 @@ impl Reading {
 }
 #[derive(Clone, Default)]
 struct PageState {
-    startup: Reading,
-    cache: Reading,
-    update: Reading,
-    startup_write: Reading,
-    cache_clear: Reading,
-    update_check: Reading,
-    update_install: Reading,
+    startup: Reading<desktop::host::Startup>,
+    cache: Reading<desktop::metrics::CacheInfo>,
+    update: Reading<desktop::host::UpdateStatus>,
+    startup_write: Reading<()>,
+    cache_clear: Reading<()>,
+    update_check: Reading<()>,
+    update_install: Reading<()>,
 }
 impl PageState {
-    fn from_resources<'a>(
-        resource: impl Fn(&str) -> Option<&'a newport_client::resources::Resource>,
-    ) -> Self {
+    fn from_settings(settings: &newport_client::settings::Settings) -> Self {
+        let write = |key| Reading::from(settings.resource(key), None);
         Self {
-            startup: Reading::from(resource("startup")),
-            cache: Reading::from(resource("cache")),
-            update: Reading::from(resource("update")),
-            startup_write: Reading::from(resource("startup-write")),
-            cache_clear: Reading::from(resource("cache-clear")),
-            update_check: Reading::from(resource("update-check")),
-            update_install: Reading::from(resource("update-install")),
+            startup: Reading::from(settings.resource("startup"), settings.startup()),
+            cache: Reading::from(settings.resource("cache"), settings.cache()),
+            update: Reading::from(settings.resource("update"), settings.update()),
+            startup_write: write("startup-write"),
+            cache_clear: write("cache-clear"),
+            update_check: write("update-check"),
+            update_install: write("update-install"),
         }
     }
+    fn update_phase(&self) -> Option<desktop::host::UpdatePhase> {
+        self.update.value.as_ref().map(|update| update.phase)
+    }
+    fn update_enabled(&self) -> bool {
+        self.update
+            .value
+            .as_ref()
+            .is_some_and(|update| update.enabled)
+    }
+    fn update_version(&self) -> Option<&str> {
+        self.update.value.as_ref()?.version.as_deref()
+    }
     fn update_busy(&self) -> bool {
+        use desktop::host::UpdatePhase::{Checking, Downloading, Installing};
         self.update_check.pending
             || self.update_install.pending
             || matches!(
-                self.update.value["phase"].as_str(),
-                Some("checking" | "downloading" | "installing")
+                self.update_phase(),
+                Some(Checking | Downloading | Installing)
             )
     }
     fn update_ready(&self) -> bool {
-        self.update.value["phase"] == "ready"
+        self.update_phase() == Some(desktop::host::UpdatePhase::Ready)
     }
     fn update_message(&self) -> String {
-        let data = &self.update.value;
-        if self.update.loaded() && data["enabled"] != true {
+        use desktop::host::UpdatePhase;
+        let Some(update) = &self.update.value else {
+            return "Updates download automatically. You choose when to restart.".into();
+        };
+        if !update.enabled {
             return "Updates are unavailable in this build.".into();
         }
-        match data["phase"].as_str() {
-            Some("downloading") => data["total"]
-                .as_f64()
-                .filter(|total| *total > 0.)
+        match update.phase {
+            UpdatePhase::Downloading => update
+                .total
+                .filter(|total| *total > 0)
                 .map(|total| {
                     format!(
                         "Downloading… {:.0}%",
-                        (data["downloaded"].as_f64().unwrap_or(0.) / total * 100.)
+                        (update.downloaded as f64 / total as f64 * 100.)
                             .round()
                             .clamp(0., 100.)
                     )
                 })
                 .unwrap_or_else(|| "Downloading…".into()),
-            Some("checking") => "Checking for updates…".into(),
-            Some("installing") => "Installing…".into(),
-            Some("ready") => format!("Version {} is ready to install.", text(data, "version")),
-            Some("current") => "You’re up to date.".into(),
-            _ => "Updates download automatically. You choose when to restart.".into(),
+            UpdatePhase::Checking => "Checking for updates…".into(),
+            UpdatePhase::Installing => "Installing…".into(),
+            UpdatePhase::Ready => format!(
+                "Version {} is ready to install.",
+                update.version.as_deref().unwrap_or("—")
+            ),
+            UpdatePhase::Current => "You’re up to date.".into(),
+            UpdatePhase::Idle | UpdatePhase::Error => {
+                "Updates download automatically. You choose when to restart.".into()
+            }
         }
     }
 }
@@ -565,7 +624,10 @@ impl SettingsView {
     fn startup(&self, cx: &App) -> impl IntoElement {
         let startup = &self.state.startup;
         let pending = self.state.startup_write.pending;
-        let available = startup.value["available"] == true;
+        let available = startup
+            .value
+            .as_ref()
+            .is_some_and(|startup| startup.available);
         let callback = self.on_action.clone();
         let content = section("startup", "Startup", false, cx).child(
             row()
@@ -600,7 +662,12 @@ impl SettingsView {
                         FocusTarget::Startup,
                         crate::controls::switch("launch-at-login")
                             .accessibility_label("Launch at login")
-                            .checked(startup.value["enabled"] == true)
+                            .checked(
+                                startup
+                                    .value
+                                    .as_ref()
+                                    .is_some_and(|startup| startup.enabled),
+                            )
                             .disabled(!available || pending)
                             .on_click(move |checked, window, cx| {
                                 callback(Action::Startup(*checked), window, cx)
@@ -624,7 +691,12 @@ impl SettingsView {
             .error
             .clone()
             .or_else(|| self.state.update_check.error.clone())
-            .or_else(|| update.value["error"].as_str().map(str::to_owned))
+            .or_else(|| {
+                update
+                    .value
+                    .as_ref()
+                    .and_then(|update| update.error.clone())
+            })
             .or_else(|| update.error.clone());
         let mut detail = div().flex_1().min_w(px(180.));
         if update.loading() {
@@ -634,14 +706,19 @@ impl SettingsView {
         } else {
             detail = detail
                 .child(
-                    update.value["currentVersion"]
-                        .as_str()
-                        .map(|v| format!("Newport {v}"))
+                    update
+                        .value
+                        .as_ref()
+                        .map(|update| format!("Newport {}", update.current_version))
                         .unwrap_or_else(|| "Newport".into()),
                 )
-                .when_some(build_line(&update.value["build"]), |detail, line| {
-                    detail.child(help(line, cx).id("build-info"))
-                })
+                .when_some(
+                    update
+                        .value
+                        .as_ref()
+                        .and_then(|update| build_line(&update.build)),
+                    |detail, line| detail.child(help(line, cx).id("build-info")),
+                )
                 .child(
                     help(self.state.update_message(), cx)
                         .id("update-phase")
@@ -662,7 +739,7 @@ impl SettingsView {
                     &self.on_action,
                     &self.reveal,
                 )
-                .disabled(update.value["enabled"] != true || busy)
+                .disabled(!self.state.update_enabled() || busy)
                 .loading(busy),
             ),
         );
@@ -670,7 +747,7 @@ impl SettingsView {
             && self
                 .confirmation
                 .as_deref()
-                .is_some_and(|version| update.value["version"].as_str() == Some(version))
+                .is_some_and(|version| self.state.update_version() == Some(version))
         {
             content = content.child(
                 div()
@@ -708,7 +785,7 @@ impl SettingsView {
                                 .primary()
                                 .disabled(
                                     self.state.update_install.pending
-                                        || update.value["enabled"] != true,
+                                        || !self.state.update_enabled(),
                                 ),
                             ),
                     ),
@@ -733,10 +810,9 @@ impl SettingsView {
                     .id("metrics-cache-size")
                     .role(accesskit::Role::Label)
                     .aria_label("Metrics cache size")
-                    .child(if cache.loaded() {
-                        bytes(&cache.value["bytes"])
-                    } else {
-                        "Unavailable".into()
+                    .child(match &cache.value {
+                        Some(cache) => byte_size(cache.bytes as f64),
+                        None => "Unavailable".into(),
                     }),
             )
         };
@@ -772,7 +848,7 @@ impl SettingsView {
                             .disabled(
                                 !cache.loaded()
                                     || clear.pending
-                                    || (cache.value["samples"].as_u64().unwrap_or(0) == 0
+                                    || (cache.value.as_ref().map_or(0, |cache| cache.samples) == 0
                                         && clear.error.is_none()),
                             )
                             .loading(clear.pending),
@@ -809,7 +885,7 @@ impl SettingsView {
                     .aria_label("Cache cleared.")
                     .mt(px(12.)),
             );
-        } else if cache.loaded() && cache.value["samples"] == 0 {
+        } else if cache.value.as_ref().is_some_and(|cache| cache.samples == 0) {
             content = content.child(empty::compact("No recorded history.", cx));
         }
         content
@@ -978,15 +1054,13 @@ fn action_button(
 
 /// What this build is, so builds of one version can be told apart: its
 /// commit, whether the checkout had changes, and when it was built.
-fn build_line(build: &Value) -> Option<String> {
-    let commit = build["commit"].as_str();
-    let built = build["builtAt"]
-        .as_i64()
-        .map(crate::localized_time::detail_date);
+fn build_line(build: &desktop::host::BuildStamp) -> Option<String> {
+    let commit = build.commit.as_deref();
+    let built = build.built_at.map(crate::localized_time::detail_date);
     if commit.is_none() && built.is_none() {
         return None;
     }
-    let mut line = String::from(if build["local"] == true {
+    let mut line = String::from(if build.local {
         "Development build"
     } else {
         "Build"
@@ -1007,24 +1081,26 @@ mod tests {
     #[test]
     fn the_build_line_names_the_commit_its_changes_and_when_it_was_built() {
         let built = crate::localized_time::detail_date(1_793_000_000_000);
+        let stamp =
+            |commit: Option<&str>, local, built_at| newport_protocol::desktop::host::BuildStamp {
+                commit: commit.map(Into::into),
+                local,
+                built_at,
+            };
         for (build, expected) in [
             (
-                serde_json::json!({"commit": "8443065a+", "local": true, "builtAt": 1_793_000_000_000i64}),
+                stamp(Some("8443065a+"), true, Some(1_793_000_000_000)),
                 Some(format!(
                     "Development build 8443065a with local changes, built {built}"
                 )),
             ),
             (
-                serde_json::json!({"commit": "8443065a", "local": false, "builtAt": null}),
+                stamp(Some("8443065a"), false, None),
                 Some("Build 8443065a".to_owned()),
             ),
-            (
-                serde_json::json!({"commit": null, "local": true, "builtAt": null}),
-                None,
-            ),
-            (serde_json::Value::Null, None),
+            (stamp(None, true, None), None),
         ] {
-            assert_eq!(super::build_line(&build), expected, "{build}");
+            assert_eq!(super::build_line(&build), expected, "{build:?}");
         }
     }
 
@@ -1037,7 +1113,7 @@ mod tests {
     };
     use gpui_kit as gpui;
     use gpui_kit::base::test_support::{ElementSnapshot, snapshots};
-    use serde_json::json;
+    use newport_protocol::desktop::host::{self, UpdatePhase};
     use std::rc::Rc;
 
     struct Harness {
@@ -1065,9 +1141,7 @@ mod tests {
                         view.actions.push(action);
                         match action {
                             Action::Update if view.state.update_ready() => {
-                                view.confirmation = view.state.update.value["version"]
-                                    .as_str()
-                                    .map(str::to_owned)
+                                view.confirmation = view.state.update_version().map(str::to_owned)
                             }
                             Action::Later => view.confirmation = None,
                             Action::Install => view.state.update_install.pending = true,
@@ -1085,19 +1159,41 @@ mod tests {
     fn loaded() -> PageState {
         PageState {
             startup: Reading {
-                value: json!({"available":true,"enabled":false}),
+                value: Some(host::Startup {
+                    available: true,
+                    enabled: false,
+                }),
                 ..Default::default()
             },
             update: Reading {
-                value: json!({"enabled":true,"phase":"current","currentVersion":"0.3.0","version":null}),
+                value: Some(host::UpdateStatus {
+                    enabled: true,
+                    current_version: "0.3.0".into(),
+                    build: host::BuildStamp {
+                        commit: None,
+                        local: false,
+                        built_at: None,
+                    },
+                    phase: UpdatePhase::Current,
+                    version: None,
+                    downloaded: 0,
+                    total: None,
+                    error: None,
+                }),
                 ..Default::default()
             },
             cache: Reading {
-                value: json!({"bytes":2048,"samples":12}),
+                value: Some(newport_protocol::desktop::metrics::CacheInfo {
+                    bytes: 2048,
+                    samples: 12,
+                }),
                 ..Default::default()
             },
             ..Default::default()
         }
+    }
+    fn update_of(state: &mut PageState) -> &mut host::UpdateStatus {
+        state.update.value.as_mut().unwrap()
     }
     fn harness(
         cx: &mut TestAppContext,
@@ -1202,8 +1298,8 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let mut state = loaded();
-        state.update.value["phase"] = json!("ready");
-        state.update.value["version"] = json!("0.4.0");
+        update_of(&mut state).phase = UpdatePhase::Ready;
+        update_of(&mut state).version = Some("0.4.0".into());
         state.cache.error = Some("Couldn’t refresh the cache size.".into());
         let (view, cx) = harness(cx, state);
         cx.simulate_resize(size(px(360.), px(220.)));
@@ -1253,7 +1349,7 @@ mod tests {
         // Initial startup failures hide its disabled switch from tab order and
         // add Try again after Cache. The dynamic final control must reveal as well.
         view.update(cx, |view, cx| {
-            view.state.startup.value = serde_json::Value::Null;
+            view.state.startup.value = None;
             view.state.startup.error = Some("Couldn’t read login settings.".into());
             cx.notify();
         });
@@ -1389,8 +1485,8 @@ mod tests {
     #[gpui::test]
     fn ready_update_requires_separate_review_and_restart_actions(cx: &mut TestAppContext) {
         let mut state = loaded();
-        state.update.value["phase"] = json!("ready");
-        state.update.value["version"] = json!("0.4.0");
+        update_of(&mut state).phase = UpdatePhase::Ready;
+        update_of(&mut state).version = Some("0.4.0".into());
         let (view, cx) = harness(cx, state);
         cx.update(|window, _| {
             assert!(
@@ -1427,7 +1523,7 @@ mod tests {
         assert_eq!(view.read_with(cx, |view, _| view.actions.len()), 4);
         view.update(cx, |view, cx| {
             view.state.update_install.pending = false;
-            view.state.update.value["version"] = json!("0.4.1");
+            update_of(&mut view.state).version = Some("0.4.1".into());
             cx.notify();
         });
         draw(cx);
@@ -1455,9 +1551,9 @@ mod tests {
         );
         view.update(cx, |view, cx| {
             view.state.startup_write.pending = false;
-            view.state.startup.value["available"] = json!(false);
+            view.state.startup.value.as_mut().unwrap().available = false;
             view.state.cache_clear.pending = false;
-            view.state.cache.value["samples"] = json!(0);
+            view.state.cache.value.as_mut().unwrap().samples = 0;
             cx.notify();
         });
         draw(cx);
@@ -1497,24 +1593,24 @@ mod tests {
         let mut state = loaded();
         for (phase, message) in [
             (
-                "idle",
+                UpdatePhase::Idle,
                 "Updates download automatically. You choose when to restart.",
             ),
-            ("checking", "Checking for updates…"),
-            ("installing", "Installing…"),
-            ("current", "You’re up to date."),
+            (UpdatePhase::Checking, "Checking for updates…"),
+            (UpdatePhase::Installing, "Installing…"),
+            (UpdatePhase::Current, "You’re up to date."),
         ] {
-            state.update.value["phase"] = json!(phase);
+            update_of(&mut state).phase = phase;
             assert_eq!(state.update_message(), message);
         }
-        state.update.value["phase"] = json!("downloading");
+        update_of(&mut state).phase = UpdatePhase::Downloading;
         assert_eq!(state.update_message(), "Downloading…");
-        state.update.value["total"] = json!(200);
-        state.update.value["downloaded"] = json!(67);
+        update_of(&mut state).total = Some(200);
+        update_of(&mut state).downloaded = 67;
         assert_eq!(state.update_message(), "Downloading… 34%");
-        state.update.value["downloaded"] = json!(400);
+        update_of(&mut state).downloaded = 400;
         assert_eq!(state.update_message(), "Downloading… 100%");
-        state.update.value["enabled"] = json!(false);
+        update_of(&mut state).enabled = false;
         assert_eq!(
             state.update_message(),
             "Updates are unavailable in this build."

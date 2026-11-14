@@ -21,6 +21,7 @@ use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
+use newport_protocol::git::code;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     ffi::OsStr,
@@ -111,7 +112,10 @@ impl RepoRef {
         let path = Path::new(OsStr::from_bytes(&git_dir));
         let metadata = fs::metadata(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                Error::new("REPO_NOT_FOUND", "The repository is no longer available.")
+                Error::new(
+                    code::REPO_NOT_FOUND,
+                    "The repository is no longer available.",
+                )
             } else {
                 Error::new("IO_ERROR", "A repository file could not be read.")
             }

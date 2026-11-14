@@ -1,8 +1,5 @@
 //! Partial index changes refer to server-generated IDs, never client patch text.
-use newport_protocol::git::{Action, HunkSelection};
-use serde_json::Value;
-#[cfg(test)]
-use serde_json::json;
+use newport_protocol::git::{Action, HunkSelection, Side};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone)]
@@ -16,95 +13,93 @@ pub struct Review {
     complete_hunks: BTreeSet<String>,
 }
 impl Review {
-    pub fn from_page(page: &Value) -> Result<Self, String> {
+    pub fn from_page(page: &crate::git_diff_page::DiffPage) -> Result<Self, String> {
         let unavailable = || {
             "Individual hunks are unavailable for this comparison. Use the file actions.".to_owned()
         };
-        let has_more = match &page["nextCursor"] {
-            Value::Null => false,
-            Value::String(cursor) if !cursor.is_empty() => true,
-            _ => return Err(unavailable()),
-        };
-        let meta = &page["metadata"];
-        if meta["readOnly"] != false || meta["truncated"] == true || meta["totalFiles"] != 1 {
+        if page.next_cursor.as_deref() == Some("") {
             return Err(unavailable());
         }
-        let snapshot = meta["sourceSnapshot"]
-            .as_str()
+        let meta = &page.metadata;
+        if meta.read_only || meta.truncated == Some(true) || meta.total_files != Some(1) {
+            return Err(unavailable());
+        }
+        let snapshot = meta
+            .source_snapshot
+            .as_deref()
             .filter(|v| !v.is_empty())
             .ok_or_else(unavailable)?;
-        let entry = meta["entryId"]
-            .as_str()
+        let entry = meta
+            .entry_id
+            .as_deref()
             .filter(|v| !v.is_empty())
             .ok_or_else(unavailable)?;
-        let staged = match meta["side"].as_str() {
-            Some("head_to_index") => true,
-            Some("index_to_worktree") => false,
+        let staged = match meta.side {
+            Some(Side::HeadToIndex) => true,
+            Some(Side::IndexToWorktree) => false,
             _ => return Err(unavailable()),
         };
-        let context = meta["contextLines"]
-            .as_u64()
-            .and_then(|value| u32::try_from(value).ok())
+        let context = meta
+            .context_lines
             .filter(|value| *value <= 25)
             .ok_or_else(unavailable)?;
-        let files = page["entries"]
-            .as_array()
-            .filter(|v| !v.is_empty())
-            .ok_or_else(unavailable)?;
+        let files = &page.entries;
+        if files.is_empty() {
+            return Err(unavailable());
+        }
         let mut hunks: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut deletions = BTreeSet::new();
         let mut totals = BTreeMap::new();
         let mut completed: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
         for file in files {
             // Accumulated pages contain repeated fragments of the same file/hunk.
-            let text_mode = |mode: &Value| matches!(mode.as_u64(), Some(0o100644 | 0o100755));
-            let modes = match file["status"].as_str() {
-                Some("Modified") => {
-                    file["oldMode"] == file["newMode"] && text_mode(&file["oldMode"])
-                }
-                Some("Added" | "Untracked") => text_mode(&file["newMode"]),
-                Some("Deleted") => text_mode(&file["oldMode"]),
+            let text_mode = |mode: u32| matches!(mode, 0o100644 | 0o100755);
+            let modes = match file.status.as_str() {
+                "Modified" => file.old_mode == file.new_mode && text_mode(file.old_mode),
+                "Added" | "Untracked" => text_mode(file.new_mode),
+                "Deleted" => text_mode(file.old_mode),
                 _ => false,
             };
-            if file["fileIndex"] != 0
-                || file["binary"] == true
-                || !file["omissionReason"].is_null()
+            if file.file_index != 0
+                || file.binary
+                || file.omission_reason.is_some()
                 || !modes
-                || !file["oldPath"]["bytesB64"].is_string()
-                || file["oldPath"]["bytesB64"] != file["newPath"]["bytesB64"]
+                || file.old_path.bytes_b64 != file.new_path.bytes_b64
             {
                 return Err(unavailable());
             }
-            for hunk in file["hunks"].as_array().ok_or_else(unavailable)? {
-                let id = hunk["id"]
-                    .as_str()
+            for hunk in &file.hunks {
+                let id = hunk
+                    .id
+                    .as_deref()
                     .filter(|v| !v.is_empty())
                     .ok_or_else(unavailable)?;
                 let lines = hunks.entry(id.to_owned()).or_default();
-                if let Some(total) = hunk.get("totalLines") {
-                    let total = total.as_u64().filter(|n| *n > 0).ok_or_else(unavailable)?;
-                    if totals
-                        .insert(id.to_owned(), total)
-                        .is_some_and(|old| old != total)
-                    {
-                        return Err(unavailable());
-                    }
+                let total = Some(hunk.total_lines)
+                    .filter(|n| *n > 0)
+                    .ok_or_else(unavailable)?;
+                if totals
+                    .insert(id.to_owned(), total)
+                    .is_some_and(|old| old != total)
+                {
+                    return Err(unavailable());
                 }
-                for line in hunk["lines"].as_array().ok_or_else(unavailable)? {
-                    if line["lineComplete"] == true
-                        && let Some(index) = line["lineIndex"].as_u64()
-                    {
-                        completed.entry(id.to_owned()).or_default().insert(index);
+                for line in &hunk.lines {
+                    if !line.line_complete {
+                        continue;
                     }
-                    if matches!(line["origin"].as_str(), Some("+" | "-"))
-                        && line["lineComplete"] == true
-                    {
-                        let id = line["id"]
-                            .as_str()
+                    completed
+                        .entry(id.to_owned())
+                        .or_default()
+                        .insert(line.line_index);
+                    if matches!(line.origin.as_str(), "+" | "-") {
+                        let id = line
+                            .id
+                            .as_deref()
                             .filter(|v| !v.is_empty())
                             .ok_or_else(unavailable)?;
                         lines.insert(id.to_owned());
-                        if line["origin"] == "-" {
+                        if line.origin == "-" {
                             deletions.insert(id.to_owned());
                         }
                     }
@@ -121,15 +116,12 @@ impl Review {
         let complete_hunks = hunks
             .keys()
             .filter(|id| {
-                match totals.get(*id) {
-                    Some(total) => completed.get(*id).is_some_and(|indices| {
-                        indices.len() as u64 == *total
-                            && indices.first() == Some(&0)
-                            && indices.last() == Some(&(total - 1))
-                    }),
-                    // Older non-paginated responses have no per-hunk totals.
-                    None => !has_more,
-                }
+                let total = totals[*id];
+                completed.get(*id).is_some_and(|indices| {
+                    indices.len() as u64 == total
+                        && indices.first() == Some(&0)
+                        && indices.last() == Some(&(total - 1))
+                })
             })
             .cloned()
             .collect();
@@ -252,14 +244,58 @@ impl Review {
 #[cfg(test)]
 mod tests {
     use super::*;
-    pub(super) fn page() -> Value {
-        json!({"snapshot":"diff", "nextCursor":null, "metadata":{"readOnly":false,"totalFiles":1,"sourceSnapshot":"status","entryId":"entry","side":"index_to_worktree","contextLines":3},
-            "entries":[{"fileIndex":0,"status":"Modified","oldMode":33188,"newMode":33188,"oldPath":{"bytesB64":"Zg=="},"newPath":{"bytesB64":"Zg=="},"hunks":[{"id":"h1","lines":[{"id":"l1","origin":"+","lineComplete":true}]}]}]})
+    use crate::git_diff_page::DiffPage;
+    use newport_protocol::git::{Binary, HunkFragment, LineFragment};
+
+    /// A changed line, or a context line when `id` is `None` and `origin` is
+    /// not a change.
+    fn line(index: u64, id: Option<&str>, origin: &str, complete: bool) -> LineFragment {
+        LineFragment {
+            line_index: index,
+            byte_offset: 0,
+            line_complete: complete,
+            origin: origin.into(),
+            old_line: None,
+            new_line: None,
+            content_bytes_b64: Binary::default(),
+            id: id.map(Into::into),
+        }
+    }
+    fn hunk(id: &str, total: u64, lines: Vec<LineFragment>) -> HunkFragment {
+        HunkFragment {
+            id: Some(id.into()),
+            index: 0,
+            old_start: 0,
+            old_lines: 0,
+            new_start: 0,
+            new_lines: 0,
+            total_lines: total,
+            lines,
+        }
+    }
+    /// Lines numbered in order, as one complete hunk.
+    fn changes(id: &str, lines: &[(&str, &str)]) -> HunkFragment {
+        hunk(
+            id,
+            lines.len() as u64,
+            lines
+                .iter()
+                .enumerate()
+                .map(|(index, (line_id, origin))| line(index as u64, Some(line_id), origin, true))
+                .collect(),
+        )
+    }
+    pub(super) fn page() -> DiffPage {
+        let mut page = crate::git_diff_page::tests::page(true);
+        page.snapshot = "diff".into();
+        page.metadata.entry_id = Some("entry".into());
+        page.entries[0].hunks = vec![changes("h1", &[("l1", "+")])];
+        page
     }
     #[test]
     fn context_is_bounded_before_typed_action_construction() {
         let mut page = page();
-        page["metadata"]["contextLines"] = json!(25);
+        page.metadata.context_lines = Some(25);
         let review = Review::from_page(&page).unwrap();
         assert!(matches!(
             review.action(&["h1".into()], None).unwrap(),
@@ -271,24 +307,27 @@ mod tests {
                 ..
             }
         ));
-        for context in [26, u64::from(u32::MAX) + 1, u64::MAX] {
-            page["metadata"]["contextLines"] = json!(context);
+        for context in [26, u32::MAX] {
+            page.metadata.context_lines = Some(context);
             assert!(Review::from_page(&page).is_err());
         }
     }
 
     #[test]
     fn loaded_lines_are_actionable_before_the_hunk_is_complete() {
-        for side in ["index_to_worktree", "head_to_index"] {
+        for side in [Side::IndexToWorktree, Side::HeadToIndex] {
             let mut page = page();
-            page["nextCursor"] = json!("more");
-            page["metadata"]["side"] = json!(side);
-            page["entries"][0]["hunks"][0]["totalLines"] = json!(3);
-            page["entries"][0]["hunks"][0]["lines"] = json!([
-                {"lineIndex":0,"origin":" ","lineComplete":true},
-                {"lineIndex":1,"id":"l1","origin":"+","lineComplete":true},
-                {"lineIndex":2,"origin":"+","lineComplete":false}
-            ]);
+            page.next_cursor = Some("more".into());
+            page.metadata.side = Some(side);
+            page.entries[0].hunks[0] = hunk(
+                "h1",
+                3,
+                vec![
+                    line(0, None, " ", true),
+                    line(1, Some("l1"), "+", true),
+                    line(2, None, "+", false),
+                ],
+            );
             let review = Review::from_page(&page).unwrap();
             assert!(review.contains_line("h1", "l1"));
             assert!(!review.hunk_complete("h1"));
@@ -299,12 +338,10 @@ mod tests {
                     .action(&["h1".into()], Some(&["unloaded".into()]))
                     .is_err()
             );
-            let mut second = page["entries"][0].clone();
-            second["hunks"][0]["lines"] = json!([
-                {"lineIndex":2,"id":"l2","origin":"+","lineComplete":true}
-            ]);
+            let mut second = page.entries[0].clone();
+            second.hunks[0].lines = vec![line(2, Some("l2"), "+", true)];
             // Other hunks remain unloaded; this hunk is now complete.
-            page["entries"].as_array_mut().unwrap().push(second);
+            page.entries.push(second);
             let review = Review::from_page(&page).unwrap();
             assert!(review.hunk_complete("h1"));
             assert!(review.action(&["h1".into()], None).is_ok());
@@ -318,15 +355,10 @@ mod tests {
     #[test]
     fn context_only_tail_does_not_block_earlier_hunks() {
         let mut page = page();
-        page["nextCursor"] = json!("more");
-        page["entries"][0]["hunks"][0]["totalLines"] = json!(1);
-        page["entries"][0]["hunks"][0]["lines"][0]["lineIndex"] = json!(0);
-        page["entries"][0]["hunks"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({
-                "id":"h2","totalLines":5,"lines":[{"lineIndex":0,"origin":" ","lineComplete":true}]
-            }));
+        page.next_cursor = Some("more".into());
+        page.entries[0]
+            .hunks
+            .push(hunk("h2", 5, vec![line(0, None, " ", true)]));
         let review = Review::from_page(&page).unwrap();
         assert!(review.action(&["h1".into()], None).is_ok());
         assert!(!review.contains_hunk("h2"));
@@ -334,31 +366,25 @@ mod tests {
     #[test]
     fn missing_lines_and_eof_notes_do_not_make_a_complete_hunk() {
         let mut page = page();
-        page["entries"][0]["hunks"][0]["totalLines"] = json!(3);
-        page["entries"][0]["hunks"][0]["lines"] = json!([
-            {"lineIndex":0,"id":"l1","origin":"+","lineComplete":true},
-            {"lineIndex":2,"origin":">","lineComplete":true}
-        ]);
+        page.entries[0].hunks[0] = hunk(
+            "h1",
+            3,
+            vec![line(0, Some("l1"), "+", true), line(2, None, ">", true)],
+        );
         assert!(!Review::from_page(&page).unwrap().hunk_complete("h1"));
-        page["nextCursor"] = json!("more");
-        page["entries"][0]["hunks"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("totalLines");
+        page.next_cursor = Some("more".into());
         assert!(!Review::from_page(&page).unwrap().hunk_complete("h1"));
-        for cursor in [json!(false), json!("")] {
-            page["nextCursor"] = cursor;
-            assert!(Review::from_page(&page).is_err());
-        }
+        page.next_cursor = Some(String::new());
+        assert!(Review::from_page(&page).is_err());
     }
     #[test]
     fn preserves_snapshot_context_side_and_opaque_ids() {
         let mut page = page();
         for staged in [false, true] {
-            page["metadata"]["side"] = json!(if staged {
-                "head_to_index"
+            page.metadata.side = Some(if staged {
+                Side::HeadToIndex
             } else {
-                "index_to_worktree"
+                Side::IndexToWorktree
             });
             let review = Review::from_page(&page).unwrap();
             assert!(review.matches("status", "entry", staged, 3));
@@ -399,25 +425,20 @@ mod tests {
     #[test]
     fn rejects_incomplete_unsupported_and_invalid_selections() {
         let original = page();
-        for pointer in [
-            "/metadata/readOnly",
-            "/metadata/totalFiles",
-            "/metadata/side",
-            "/entries/0/oldMode",
-            "/entries/0/oldPath/bytesB64",
-            "/entries/0/hunks/0/id",
-        ] {
+        let edits: [fn(&mut DiffPage); 9] = [
+            |p| p.metadata.read_only = true,
+            |p| p.metadata.total_files = Some(2),
+            |p| p.metadata.side = Some(Side::HeadToWorktree),
+            |p| p.metadata.truncated = Some(true),
+            |p| p.entries[0].old_mode = 0o120000,
+            |p| p.entries[0].old_path = newport_protocol::git::Path::new(b"other"),
+            |p| p.entries[0].hunks[0].id = Some(String::new()),
+            |p| p.entries[0].binary = true,
+            |p| p.entries[0].omission_reason = Some("binary".into()),
+        ];
+        for edit in edits {
             let mut page = original.clone();
-            *page.pointer_mut(pointer).unwrap() = if pointer.ends_with("/id") {
-                json!("")
-            } else {
-                json!("invalid")
-            };
-            assert!(Review::from_page(&page).is_err(), "{pointer}");
-        }
-        for field in ["binary", "omissionReason"] {
-            let mut page = original.clone();
-            page["entries"][0][field] = json!(true);
+            edit(&mut page);
             assert!(Review::from_page(&page).is_err());
         }
         let review = Review::from_page(&original).unwrap();
@@ -439,11 +460,10 @@ mod tests {
     #[test]
     fn selected_lines_resolve_only_their_hunks_and_preserve_unselected_deletions() {
         let mut page = page();
-        page["entries"][0]["hunks"] = json!([
-            {"id":"h1","lines":[{"id":"add","origin":"+","lineComplete":true},
-                {"id":"remove","origin":"-","lineComplete":true}]},
-            {"id":"h2","lines":[{"id":"other","origin":"+","lineComplete":true}]}
-        ]);
+        page.entries[0].hunks = vec![
+            changes("h1", &[("add", "+"), ("remove", "-")]),
+            changes("h2", &[("other", "+")]),
+        ];
         let review = Review::from_page(&page).unwrap();
         assert_eq!(review.hunks_for_lines(&["other".into()]).unwrap(), ["h2"]);
         assert_eq!(
@@ -468,9 +488,10 @@ mod tests {
     #[test]
     fn paginated_fragments_share_hunk_identity() {
         let mut page = page();
-        let mut second = page["entries"][0].clone();
-        second["hunks"][0]["lines"][0]["id"] = json!("l2");
-        page["entries"].as_array_mut().unwrap().push(second);
+        page.entries[0].hunks[0].total_lines = 2;
+        let mut second = page.entries[0].clone();
+        second.hunks[0].lines = vec![line(1, Some("l2"), "+", true)];
+        page.entries.push(second);
         let review = Review::from_page(&page).unwrap();
         assert!(
             review
@@ -481,11 +502,7 @@ mod tests {
     #[test]
     fn toggling_groups_completes_mixed_selection_and_preserves_other_runs() {
         let mut page = page();
-        page["entries"][0]["hunks"][0]["lines"] = json!([
-            {"id":"a","origin":"-","lineComplete":true},
-            {"id":"b","origin":"+","lineComplete":true},
-            {"id":"other","origin":"+","lineComplete":true}
-        ]);
+        page.entries[0].hunks[0] = changes("h1", &[("a", "-"), ("b", "+"), ("other", "+")]);
         let review = Review::from_page(&page).unwrap();
         let mut selection = BTreeSet::from(["a".into(), "other".into()]);
         let group = ["a".into(), "b".into()];

@@ -88,7 +88,7 @@ If you chose **Skip**, open **Integrations** and choose **Set up Needle**.
 
 ## Find your way around
 
-The server name at the top left switches servers, and the connection status at the top right belongs to that server. The sidebar opens the server's pages; **Settings** and your account are at the bottom. To show or hide the page names, choose the sidebar button beside the server name.
+The server name at the top left switches servers, and the connection status at the top right belongs to that server. While it's connected, the status also shows the SSH round trip to the server, such as **24 ms**: yellow when the connection is slow, red when it's very slow. The sidebar opens the server's pages; **Settings** and your account are at the bottom. To show or hide the page names, choose the sidebar button beside the server name.
 
 ![Server picker at the left of the window header and Connected status at the right](assets/server-bar.png)
 

@@ -8,7 +8,7 @@ It opens the UI through `run_with_options_and_ready`.
 
 - Page composition, navigation, dialogs, and keyboard/focus behavior.
 - Query subscriptions and presentation state; remote work runs outside rendering.
-- Bounded table/list rendering, terminal drawing, and text/image/PDF previews.
+- Bounded table/list rendering, terminal drawing, and text and image previews.
 - Theme, icons, and lazy syntax highlighting using per-language grammar libraries.
 
 Shared feature rules belong in [newport-domain](../newport-domain/README.md).
@@ -67,8 +67,6 @@ Run from the repository root with an isolated development profile:
 cargo xtask dev
 cargo test --locked -p newport-gpui --lib
 ```
-
-On Windows, stage PDFium with `cargo xtask pdfium` before preview checks.
 
 For rendering benchmarks:
 

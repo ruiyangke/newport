@@ -196,6 +196,9 @@ pub struct Endpoints {
     pub wayland_socket: String,
 }
 
+#[cfg(all(test, feature = "protobuf"))]
+pub(crate) use protobuf::tables;
+
 #[cfg(feature = "protobuf")]
 mod protobuf {
     use super::*;
@@ -332,6 +335,7 @@ mod protobuf {
     }
 
     #[derive(Clone, Copy)]
+    #[cfg_attr(test, derive(Debug))]
     enum Fields {
         Envelope,
         Attach,
@@ -389,15 +393,53 @@ mod protobuf {
         }
         Ok(())
     }
-    fn scan_reply(body: &[u8]) -> Result<(), codec::FrameError> {
-        let field = codec::fields::single(body)?;
-        let kind = match field.number {
+    /// The case an `EnvelopeReply` holds in field `number`.
+    fn reply(number: u32) -> Option<Fields> {
+        Some(match number {
             1 => Fields::Present,
             2 => Fields::Refused,
             3 => Fields::Identity,
-            _ => return Ok(()),
+            _ => return None,
+        })
+    }
+    fn scan_reply(body: &[u8]) -> Result<(), codec::FrameError> {
+        let field = codec::fields::single(body)?;
+        let Some(kind) = reply(field.number) else {
+            return Ok(());
         };
         scan(field.bytes()?, kind)
+    }
+
+    #[cfg(test)]
+    use crate::desktop::wire::wire_tables::{Row, Table, Wire, numbers};
+
+    #[cfg(test)]
+    pub(crate) fn tables() -> Vec<(Table, &'static str)> {
+        vec![
+            (table(Fields::Envelope), "newport.remote.display.Envelope"),
+            (
+                Table::dispatch("display reply", |number| reply(number).map(table)),
+                "newport.remote.display.EnvelopeReply",
+            ),
+            (table(Fields::Attach), "newport.remote.display.Attach"),
+        ]
+    }
+
+    #[cfg(test)]
+    #[track_caller]
+    fn table(fields: Fields) -> Table {
+        Table::new(format!("display {fields:?}"), move || {
+            numbers()
+                .filter_map(|number| {
+                    let wire = match shape(fields, number)? {
+                        Shape::Integer => Wire::Varint32,
+                        Shape::Bytes => Wire::Len,
+                        Shape::Message(child) => Wire::Message(table(child)),
+                    };
+                    Some(Row::new(number, wire))
+                })
+                .collect()
+        })
     }
 
     macro_rules! message {

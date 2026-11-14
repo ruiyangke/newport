@@ -1,21 +1,19 @@
 //! Explicit, bounded status reads for the loaded checkouts of one repository.
 //! Dropping a batch stops queued reads; resource generations reject late results.
 use crate::resources::Resources;
-use serde_json::Value;
+use newport_protocol::git::{Path, Worktree};
 use std::collections::{HashSet, VecDeque};
 
 pub const PREFIX: &str = "git-checkout-status:";
-pub fn key(entry: &Value) -> Option<String> {
-    let bytes = entry["path"]["bytesB64"]
-        .as_str()
-        .filter(|s| !s.is_empty())?;
-    (entry["state"] == "available" && matches!(entry["kind"].as_str(), Some("main" | "linked")))
+pub fn key(entry: &Worktree) -> Option<String> {
+    let bytes = Some(entry.path.bytes_b64.as_str()).filter(|s| !s.is_empty())?;
+    (entry.state == "available" && matches!(entry.kind.as_str(), "main" | "linked"))
         .then(|| format!("{PREFIX}{bytes}"))
 }
 
 pub struct StatusRead {
     pub key: String,
-    pub path: Value,
+    pub path: Path,
 }
 #[derive(Default)]
 pub struct StatusChecks {
@@ -23,7 +21,7 @@ pub struct StatusChecks {
     active: HashSet<String>,
 }
 impl StatusChecks {
-    pub fn new(entries: &[Value]) -> Self {
+    pub fn new(entries: &[Worktree]) -> Self {
         let mut seen = HashSet::new();
         Self {
             queue: entries
@@ -32,7 +30,7 @@ impl StatusChecks {
                     let key = key(entry)?;
                     seen.insert(key.clone()).then(|| StatusRead {
                         key,
-                        path: entry["path"].clone(),
+                        path: entry.path.clone(),
                     })
                 })
                 .collect(),
@@ -61,16 +59,61 @@ impl StatusChecks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-    fn entry(path: &str) -> Value {
-        json!({"kind":"linked","state":"available","path":{"display":path,"bytesB64":path}})
+    use newport_protocol::git::{GroupCounts, Head, Reply, StatusSummary};
+    fn summary(total_entries: u64) -> Reply {
+        Reply::StatusSummary(Box::new(StatusSummary {
+            head: head(),
+            operation_state: "none".into(),
+            integration: None,
+            ahead: None,
+            behind: None,
+            basis: "none".into(),
+            upstream_ref: None,
+            upstream: None,
+            truncated: false,
+            total_entries,
+            group_counts: GroupCounts {
+                staged: 0,
+                unstaged: 0,
+                untracked: 0,
+                conflicted: 0,
+            },
+            matched_entries: None,
+        }))
+    }
+    fn head() -> Head {
+        Head {
+            oid: None,
+            name: None,
+            detached: false,
+            unborn: false,
+        }
+    }
+    fn entry(path: &str) -> Worktree {
+        Worktree {
+            name: None,
+            kind: "linked".into(),
+            path: Path::new(path.as_bytes()),
+            git_dir: Path::new(format!("{path}/.git").as_bytes()),
+            current: false,
+            state: "available".into(),
+            head: head(),
+            locked: false,
+            lock_reason: None,
+            prunable: false,
+        }
     }
     #[test]
     fn only_loaded_available_checkouts_are_scheduled_once_with_two_in_flight() {
         let mut missing = entry("missing");
-        missing["state"] = json!("missing");
+        missing.state = "missing".into();
         let mut bare = entry("bare");
-        bare["kind"] = json!("bare");
+        bare.kind = "bare".into();
+        let mut unnamed = entry("");
+        unnamed.path = Path {
+            bytes_b64: String::new(),
+            display: String::new(),
+        };
         let mut batch = StatusChecks::new(&[
             entry("a"),
             entry("b"),
@@ -78,7 +121,7 @@ mod tests {
             entry("a"),
             missing,
             bare,
-            json!({}),
+            unnamed,
         ]);
         let mut resources = Resources::default();
         let ready = batch.take_ready(&resources);
@@ -86,15 +129,15 @@ mod tests {
         let a = resources.begin(&ready[0].key).unwrap();
         let b = resources.begin(&ready[1].key).unwrap();
         assert!(batch.take_ready(&resources).is_empty());
-        resources.complete(&ready[0].key, a, Err("unreachable".into()));
+        resources.complete_git(&ready[0].key, a, Err("unreachable".into()));
         let next = batch.take_ready(&resources);
         assert_eq!(next.len(), 1);
-        assert_eq!(next[0].path, entry("c")["path"]);
+        assert_eq!(next[0].path, entry("c").path);
         let c = resources.begin(&next[0].key).unwrap();
-        resources.complete(&ready[1].key, b, Ok(json!({})));
+        resources.complete_git(&ready[1].key, b, Ok(summary(0)));
         assert!(batch.take_ready(&resources).is_empty());
         assert!(batch.is_running());
-        resources.complete(&next[0].key, c, Ok(json!({})));
+        resources.complete_git(&next[0].key, c, Ok(summary(0)));
         assert!(batch.take_ready(&resources).is_empty());
         assert!(!batch.is_running());
     }
@@ -107,9 +150,9 @@ mod tests {
         drop(batch);
         resources.invalidate_prefix(PREFIX);
         let fresh = resources.begin(&ready[0].key).unwrap();
-        assert!(!resources.complete(&ready[0].key, old, Ok(json!({"totalEntries":0}))));
+        assert!(!resources.complete_git(&ready[0].key, old, Ok(summary(0))));
         assert!(resources.get(&ready[0].key).unwrap().pending);
-        assert!(resources.complete(&ready[0].key, fresh, Err("failed".into())));
-        assert!(resources.get(&ready[0].key).unwrap().value.is_null());
+        assert!(resources.complete_git(&ready[0].key, fresh, Err("failed".into())));
+        assert!(!resources.get(&ready[0].key).unwrap().has_value());
     }
 }

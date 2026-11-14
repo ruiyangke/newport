@@ -21,14 +21,12 @@ impl Drop for ListingInvalidation {
 /// Private native-client contract. The UI owns the picker; this process owns
 /// connection validation and the atomic transfer. OsString preserves local paths
 /// which cannot be represented as UTF-8, including download destinations.
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeTransfer {
     pub(crate) id: Uuid,
     pub(crate) operation: Uuid,
     pub(crate) path: String,
     pub(crate) local_path: std::ffi::OsString,
-    pub(crate) expected_connection: Vec<serde_json::Value>,
+    pub(crate) expected_connection: newport_protocol::desktop::configuration::ConnectionScope,
 }
 
 pub async fn native_transfer(
@@ -41,7 +39,7 @@ pub async fn native_transfer(
     if !local.is_absolute() {
         return Err("A selected local path and captured connection are required".into());
     }
-    let expected_connection = serde_json::Value::Array(request.expected_connection);
+    let expected_connection = request.expected_connection;
     operations
         .run_with_connection(
             state,
@@ -131,7 +129,7 @@ pub async fn upload(
     let total = metadata.len();
     let staging = child(&folder, &format!(".newport-upload-{}", Uuid::new_v4()))?;
     let record = operations
-        .track_upload(remote.cleanup_scope()?, staging.clone())
+        .track_upload(remote.cleanup_scope(), staging.clone())
         .await?;
     let mut cleanup = RemoteTemp {
         operations,
@@ -497,44 +495,6 @@ pub async fn download(
         cleanup.discard().await;
     }
     result
-}
-
-#[cfg(test)]
-mod native_contract_tests {
-    use super::NativeTransfer;
-    use serde_json::json;
-
-    #[test]
-    fn native_transfer_requires_picker_path_and_connection() {
-        let args = json!({
-            "id": uuid::Uuid::new_v4(), "operation": uuid::Uuid::new_v4(),
-            "path": "/remote/file.txt", "localPath": std::ffi::OsString::from("/tmp/file.txt"),
-            "expectedConnection": ["captured"]
-        });
-        assert!(serde_json::from_value::<NativeTransfer>(args.clone()).is_ok());
-        for field in ["localPath", "id", "operation", "path", "expectedConnection"] {
-            let mut missing = args.clone();
-            missing.as_object_mut().unwrap().remove(field);
-            assert!(
-                serde_json::from_value::<NativeTransfer>(missing).is_err(),
-                "{field}"
-            );
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn native_path_contract_preserves_non_utf8_directory_names() {
-        use std::os::unix::ffi::OsStringExt;
-        let path = std::ffi::OsString::from_vec(b"/tmp/\xff/file.txt".to_vec());
-        let args = json!({
-            "id": uuid::Uuid::new_v4(), "operation": uuid::Uuid::new_v4(),
-            "path": "/remote/file.txt", "localPath": path,
-            "expectedConnection": ["captured"]
-        });
-        let parsed: NativeTransfer = serde_json::from_value(args).unwrap();
-        assert_eq!(parsed.local_path, path);
-    }
 }
 
 #[cfg(test)]

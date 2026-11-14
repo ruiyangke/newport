@@ -7,7 +7,6 @@ use newport_protocol::{
     desktop::{self, Kind, account as protocol},
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
 use std::{
     sync::{Arc, mpsc},
     thread,
@@ -20,97 +19,18 @@ const IDLE_INTERVAL: Duration = Duration::from_secs(15);
 
 const UNREADABLE_STATUS: &str = "Newport couldn’t read your account status.";
 
-type Outcome = Result<Value, String>;
+/// An account reply: its status, or `None` for an action that answers
+/// nothing about the account.
+type Outcome = Result<Option<protocol::Status>, String>;
 type Dispatch = dyn Fn(protocol::Operation) -> Result<mpsc::Receiver<Outcome>, String>;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Phase {
-    SignedOut,
-    Waiting,
-    SignedIn,
-    /// Also stands in for a phase this version doesn't know, which keeps
-    /// polling instead of guessing.
-    #[default]
-    #[serde(other)]
-    Loading,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct License {
-    #[serde(default)]
-    pub state: String,
-    pub plan: Option<String>,
-    pub valid_until: Option<String>,
-    pub renews_at: Option<String>,
-    pub ends_at: Option<String>,
-    #[serde(default)]
-    pub trial_used: bool,
-    /// This computer already used a free trial, under any account.
-    #[serde(default)]
-    pub trial_used_here: bool,
-    /// `pro`, `trial` or `free`: the seat this computer holds on the account.
-    pub seat: Option<String>,
-    /// Why this computer has no Remote token, from the account site.
-    pub message: Option<String>,
-}
-
-impl License {
-    /// Whether this computer runs Newport Pro: a paid, complimentary or trial
-    /// plan, on a seat that isn't free.
-    pub fn holds_pro(&self) -> bool {
-        matches!(self.state.as_str(), "active" | "grace" | "trial")
-            && self.seat.as_deref() != Some("free")
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Status {
-    #[serde(rename = "status")]
-    pub phase: Phase,
-    pub email: Option<String>,
-    /// From Google, GitHub or Apple; email sign-ins have none.
-    pub name: Option<String>,
-    pub license: Option<License>,
-    #[serde(default)]
-    pub signing_out: bool,
-    notice: Option<RawNotice>,
-    /// Grows whenever the backend saves a different license token.
-    #[serde(default)]
-    pub license_revision: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-struct RawNotice {
-    id: u64,
-    kind: String,
-    message: String,
-    #[serde(default)]
-    action: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NoticeKind {
-    Success,
-    Info,
-    Warning,
-    Error,
-}
-
+/// A toast to show once: a backend notice, or an action's failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Notice {
-    pub kind: NoticeKind,
+    pub kind: protocol::NoticeKind,
     pub message: String,
     /// The toast's button, when the next step is one click away.
-    pub action: Option<NoticeAction>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NoticeAction {
-    TryAgain,
-    ManageComputers,
+    pub action: Option<protocol::NoticeAction>,
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -148,13 +68,11 @@ impl Action {
 }
 
 pub struct Account {
-    status: Status,
+    status: protocol::Status,
     read: Option<mpsc::Receiver<Outcome>>,
     action: Option<(Action, mpsc::Receiver<Outcome>)>,
     read_at: Option<Instant>,
     shown_notice: u64,
-    /// The last status could not be read; the notice is shown once per streak.
-    unreadable: bool,
     dispatch: Box<Dispatch>,
     now: Box<dyn Fn() -> Instant>,
 }
@@ -178,7 +96,7 @@ impl Account {
                                         Duration::from_secs(60),
                                     )
                                     .map_err(|error| error.to_string())
-                                    .and_then(project_reply)
+                                    .and_then(status_reply)
                             }))
                             .unwrap_or_else(|_| Err("The account request stopped.".into()));
                         let _ = sender.send(outcome);
@@ -190,12 +108,15 @@ impl Account {
         )
     }
 
-    /// Answers every request at once from `reply`, for UI fixtures.
-    pub fn with_replies(reply: impl Fn(Kind) -> Outcome + 'static) -> Self {
+    /// Answers every request at once with the status from `reply`, for UI
+    /// fixtures.
+    pub fn with_replies(
+        reply: impl Fn(Kind) -> Result<protocol::Status, String> + 'static,
+    ) -> Self {
         Self::with_dispatch(
             Box::new(move |operation| {
                 let (sender, receiver) = mpsc::sync_channel(1);
-                let _ = sender.send(reply(operation.kind()));
+                let _ = sender.send(reply(operation.kind()).map(Some));
                 Ok(receiver)
             }),
             Box::new(Instant::now),
@@ -204,18 +125,17 @@ impl Account {
 
     fn with_dispatch(dispatch: Box<Dispatch>, now: Box<dyn Fn() -> Instant>) -> Self {
         Self {
-            status: Status::default(),
+            status: protocol::Status::default(),
             read: None,
             action: None,
             read_at: None,
             shown_notice: 0,
-            unreadable: false,
             dispatch,
             now,
         }
     }
 
-    pub fn status(&self) -> &Status {
+    pub fn status(&self) -> &protocol::Status {
         &self.status
     }
 
@@ -228,7 +148,7 @@ impl Account {
     /// active again or a menu that opened. It travels as a status read, so it
     /// never blocks an action, and the backend combines prompt repeats.
     pub fn refresh(&mut self) {
-        if self.status.phase != Phase::SignedIn || self.action.is_some() {
+        if self.status.state != protocol::Phase::SignedIn || self.action.is_some() {
             return;
         }
         if let Ok(receiver) = (self.dispatch)(protocol::Operation::Refresh(Box::new(Present {}))) {
@@ -267,11 +187,13 @@ impl Account {
                 self.action = None;
                 effects.changed = true;
                 match outcome {
-                    Ok(value) if action.returns_status() => self.accept(value, &mut effects),
+                    Ok(Some(status)) if action.returns_status() => {
+                        self.accept(status, &mut effects)
+                    }
                     Ok(_) => {}
                     Err(message) => {
                         effects.notice = Some(Notice {
-                            kind: NoticeKind::Error,
+                            kind: protocol::NoticeKind::Error,
                             message: error_message(action, message),
                             action: None,
                         })
@@ -287,8 +209,8 @@ impl Account {
                     self.read = None;
                     self.read_at = Some((self.now)());
                     // A failed read keeps the last status; the next poll retries.
-                    if let Ok(value) = outcome {
-                        self.accept(value, &mut effects);
+                    if let Ok(Some(status)) = outcome {
+                        self.accept(status, &mut effects);
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
@@ -308,8 +230,8 @@ impl Account {
     }
 
     fn due(&self) -> bool {
-        let interval = match self.status.phase {
-            Phase::Loading | Phase::Waiting => ACTIVE_INTERVAL,
+        let interval = match self.status.state {
+            protocol::Phase::Loading | protocol::Phase::Waiting => ACTIVE_INTERVAL,
             _ if self.status.signing_out => ACTIVE_INTERVAL,
             _ => IDLE_INTERVAL,
         };
@@ -317,35 +239,15 @@ impl Account {
             .is_none_or(|at| (self.now)().saturating_duration_since(at) >= interval)
     }
 
-    fn accept(&mut self, value: Value, effects: &mut Effects) {
-        let Ok(status) = serde_json::from_value::<Status>(value) else {
-            if !std::mem::replace(&mut self.unreadable, true) {
-                effects.notice = Some(Notice {
-                    kind: NoticeKind::Error,
-                    message: UNREADABLE_STATUS.into(),
-                    action: None,
-                });
-            }
-            return;
-        };
-        self.unreadable = false;
+    fn accept(&mut self, status: protocol::Status, effects: &mut Effects) {
         if let Some(notice) = &status.notice
             && notice.id > self.shown_notice
         {
             self.shown_notice = notice.id;
             effects.notice = Some(Notice {
-                kind: match notice.kind.as_str() {
-                    "success" => NoticeKind::Success,
-                    "warning" => NoticeKind::Warning,
-                    "error" => NoticeKind::Error,
-                    _ => NoticeKind::Info,
-                },
+                kind: notice.kind,
                 message: notice.message.clone(),
-                action: match notice.action.as_deref() {
-                    Some("tryAgain") => Some(NoticeAction::TryAgain),
-                    Some("manageComputers") => Some(NoticeAction::ManageComputers),
-                    _ => None,
-                },
+                action: notice.action,
             });
         }
         if status != self.status {
@@ -462,7 +364,7 @@ fn refusal_name(reason: protocol::RefusalReason) -> &'static str {
         protocol::RefusalReason::Offline => "offline",
     }
 }
-pub(crate) fn project_reply(reply: desktop::Reply) -> Outcome {
+fn status_reply(reply: desktop::Reply) -> Outcome {
     let desktop::Reply::Account(reply) = reply else {
         return Err(UNREADABLE_STATUS.into());
     };
@@ -472,40 +374,10 @@ pub(crate) fn project_reply(reply: desktop::Reply) -> Outcome {
         | protocol::Reply::CancelSignIn(value)
         | protocol::Reply::SignOut(value)
         | protocol::Reply::Refresh(value)
-        | protocol::Reply::StartTrial(value) => Ok(project_status(*value)),
-        protocol::Reply::OpenPortal(_) | protocol::Reply::OpenBilling(_) => Ok(Value::Null),
+        | protocol::Reply::StartTrial(value) => Ok(Some(*value)),
+        protocol::Reply::OpenPortal(_) | protocol::Reply::OpenBilling(_) => Ok(None),
         protocol::Reply::RemoteLicense(_) => Err(UNREADABLE_STATUS.into()),
     }
-}
-fn project_status(value: protocol::Status) -> Value {
-    let state = match value.state {
-        protocol::Phase::Loading => "loading",
-        protocol::Phase::SignedOut => "signedOut",
-        protocol::Phase::Waiting => "waiting",
-        protocol::Phase::SignedIn => "signedIn",
-    };
-    let license = value.license.map(|value| {
-        json!({
-            "state":value.state.unwrap_or_default(),"plan":value.plan,"seat":value.seat,
-            "validUntil":value.valid_until,"renewsAt":value.renews_at,"endsAt":value.ends_at,
-            "trialUsed":value.trial_used.unwrap_or(false),"message":value.message,
-            "trialUsedHere":value.trial_used_here.unwrap_or(false),
-        })
-    });
-    let notice = value.notice.map(|value| {
-        let kind = match value.kind {
-            protocol::NoticeKind::Success => "success",
-            protocol::NoticeKind::Info => "info",
-            protocol::NoticeKind::Warning => "warning",
-            protocol::NoticeKind::Error => "error",
-        };
-        let action = value.action.map(|value| match value {
-            protocol::NoticeAction::ManageComputers => "manageComputers",
-            protocol::NoticeAction::TryAgain => "tryAgain",
-        });
-        json!({"id":value.id,"kind":kind,"message":value.message,"action":action})
-    });
-    json!({"status":state,"email":value.email,"name":value.name,"license":license,"signingOut":value.signing_out,"notice":notice,"licenseRevision":value.license_revision})
 }
 
 /// Backend errors are already worded for people; transport failures are not.
@@ -578,33 +450,53 @@ mod tests {
         }
     }
 
-    fn status(phase: &str, notice: Option<(u64, &str)>) -> Value {
-        json!({
-            "status": phase,
-            "email": if phase == "signedIn" { json!("ada@example.com") } else { Value::Null },
-            "license": if phase == "signedIn" { json!({"state":"active","plan":"pro"}) } else { Value::Null },
-            "signingOut": false,
-            "notice": notice.map(|(id, message)| json!({"id":id,"kind":"success","message":message})),
-        })
+    fn status(phase: protocol::Phase, notice: Option<(u64, &str)>) -> protocol::Status {
+        let signed_in = phase == protocol::Phase::SignedIn;
+        protocol::Status {
+            state: phase,
+            email: signed_in.then(|| "ada@example.com".into()),
+            license: signed_in.then(|| protocol::License {
+                state: Some("active".into()),
+                plan: Some("pro".into()),
+                ..Default::default()
+            }),
+            notice: notice.map(|(id, message)| protocol::Notice {
+                id,
+                kind: protocol::NoticeKind::Success,
+                message: message.into(),
+                action: None,
+            }),
+            ..Default::default()
+        }
     }
 
     #[test]
-    fn an_unreadable_status_is_reported_once_and_an_unknown_phase_keeps_loading() {
-        let harness = Harness::default();
-        let mut account = harness.account();
-        account.poll();
-        harness.reply(Kind::AccountStatus, Ok(json!({"status": 7})));
-        let effects = account.poll();
-        assert_eq!(effects.notice.unwrap().message, UNREADABLE_STATUS);
-        harness.advance(Duration::from_secs(2));
-        account.poll();
-        harness.reply(Kind::AccountStatus, Ok(json!({"status": 7})));
-        assert!(account.poll().notice.is_none());
-        harness.advance(Duration::from_secs(2));
-        account.poll();
-        harness.reply(Kind::AccountStatus, Ok(status("someFuturePhase", None)));
-        assert!(account.poll().notice.is_none());
-        assert_eq!(account.status().phase, Phase::Loading);
+    fn only_status_replies_carry_a_status() {
+        let account = |reply| desktop::Reply::Account(Box::new(reply));
+        assert_eq!(
+            status_reply(account(protocol::Reply::OpenBilling(Box::new(Present {})))),
+            Ok(None)
+        );
+        let signed_out = status(protocol::Phase::SignedOut, None);
+        assert_eq!(
+            status_reply(account(protocol::Reply::SignOut(Box::new(
+                signed_out.clone()
+            )))),
+            Ok(Some(signed_out))
+        );
+        assert_eq!(
+            status_reply(account(protocol::Reply::RemoteLicense(Box::new(
+                protocol::RemoteLicense {
+                    token: newport_protocol::common::Secret {
+                        value: Vec::new().into()
+                    },
+                    machine: String::new(),
+                    trusted_time: 0,
+                    expires_at: 0,
+                }
+            )))),
+            Err(UNREADABLE_STATUS.into())
+        );
     }
 
     #[test]
@@ -612,9 +504,12 @@ mod tests {
         let harness = Harness::default();
         let mut account = harness.account();
         account.poll();
-        harness.reply(Kind::AccountStatus, Ok(status("signedOut", None)));
+        harness.reply(
+            Kind::AccountStatus,
+            Ok(Some(status(protocol::Phase::SignedOut, None))),
+        );
         assert!(account.poll().changed);
-        assert_eq!(account.status().phase, Phase::SignedOut);
+        assert_eq!(account.status().state, protocol::Phase::SignedOut);
 
         harness.advance(Duration::from_secs(2));
         account.poll();
@@ -622,10 +517,16 @@ mod tests {
 
         assert!(account.run(Action::SignIn));
         assert!(!account.run(Action::SignIn), "one action at a time");
-        harness.reply(Kind::AccountSignIn, Ok(status("waiting", None)));
+        harness.reply(
+            Kind::AccountSignIn,
+            Ok(Some(status(protocol::Phase::Waiting, None))),
+        );
         assert!(account.poll().changed);
-        assert_eq!(account.status().phase, Phase::Waiting);
-        harness.reply(Kind::AccountStatus, Ok(status("waiting", None)));
+        assert_eq!(account.status().state, protocol::Phase::Waiting);
+        harness.reply(
+            Kind::AccountStatus,
+            Ok(Some(status(protocol::Phase::Waiting, None))),
+        );
         account.poll();
         harness.advance(Duration::from_millis(1100));
         account.poll();
@@ -647,10 +548,10 @@ mod tests {
         account.poll();
         harness.reply(
             Kind::AccountStatus,
-            Ok(status(
-                "signedIn",
+            Ok(Some(status(
+                protocol::Phase::SignedIn,
                 Some((3, "Signed in as ada@example.com.")),
-            )),
+            ))),
         );
         let effects = account.poll();
         assert_eq!(
@@ -662,10 +563,10 @@ mod tests {
         account.poll();
         harness.reply(
             Kind::AccountStatus,
-            Ok(status(
-                "signedIn",
+            Ok(Some(status(
+                protocol::Phase::SignedIn,
                 Some((3, "Signed in as ada@example.com.")),
-            )),
+            ))),
         );
         assert_eq!(account.poll().notice, None);
     }
@@ -684,7 +585,7 @@ mod tests {
                 .borrow_mut()
                 .remove(&Kind::AccountStatus)
                 .unwrap()
-                .send(Ok(status("signedIn", None)))
+                .send(Ok(Some(status(protocol::Phase::SignedIn, None))))
                 .is_err()
         );
         harness.reply(
@@ -695,7 +596,7 @@ mod tests {
         assert_eq!(
             effects.notice,
             Some(Notice {
-                kind: NoticeKind::Error,
+                kind: protocol::NoticeKind::Error,
                 message: "Couldn’t sign out. Try again.".into(),
                 action: None,
             })
@@ -714,7 +615,10 @@ mod tests {
             "nothing to refresh while signed out"
         );
         account.poll();
-        harness.reply(Kind::AccountStatus, Ok(status("signedIn", None)));
+        harness.reply(
+            Kind::AccountStatus,
+            Ok(Some(status(protocol::Phase::SignedIn, None))),
+        );
         account.poll();
 
         account.refresh();
@@ -725,12 +629,16 @@ mod tests {
             "a refresh doesn't hold the action slot"
         );
 
-        let mut denied = status("signedOut", None);
-        denied["notice"] =
-            json!({"id":9,"kind":"error","message":"Couldn’t sign in.","action":"tryAgain"});
-        harness.reply(Kind::AccountSignOut, Ok(denied));
+        let mut denied = status(protocol::Phase::SignedOut, None);
+        denied.notice = Some(protocol::Notice {
+            id: 9,
+            kind: protocol::NoticeKind::Error,
+            message: "Couldn’t sign in.".into(),
+            action: Some(protocol::NoticeAction::TryAgain),
+        });
+        harness.reply(Kind::AccountSignOut, Ok(Some(denied)));
         let notice = account.poll().notice.unwrap();
-        assert_eq!(notice.action, Some(NoticeAction::TryAgain));
+        assert_eq!(notice.action, Some(protocol::NoticeAction::TryAgain));
     }
 
     #[test]

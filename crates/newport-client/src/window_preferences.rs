@@ -4,6 +4,7 @@
 //! it once at startup, before the first frame, and sends changes through
 //! `set_window_preferences`.
 use crate::appearance::Appearance;
+use newport_protocol::desktop::preferences::{self as stored, WindowPatch};
 use serde_json::{Map, Value};
 use std::{fs, io, path::Path};
 
@@ -38,24 +39,22 @@ pub fn load(directory: Option<&Path>) -> (WindowPreferences, Option<String>) {
         Ok(values) => (values.unwrap_or_default(), None),
         Err(e) => (Map::new(), Some(format!("Couldn’t read preferences: {e}"))),
     };
+    // Each key reads on its own, so an object always decodes.
+    let saved: WindowPatch = serde_json::from_value(Value::Object(values)).unwrap_or_default();
+    let defaults = WindowPreferences::default();
     let preferences = WindowPreferences {
-        sidebar_width: values
-            .get("sidebarWidth")
-            .and_then(Value::as_f64)
-            .filter(|width| (176.0..=300.0).contains(width))
-            .map(|width| width as f32),
-        sidebar_compact: values
-            .get("sidebarCompact")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        appearance: values
-            .get("appearance")
-            .and_then(|value| serde_json::from_value(value.clone()).ok())
-            .unwrap_or_default(),
-        terminal_option_as_meta: values
-            .get("terminalOptionAsMeta")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
+        sidebar_width: saved.sidebar_width,
+        sidebar_compact: saved.sidebar_compact.unwrap_or(defaults.sidebar_compact),
+        appearance: saved
+            .appearance
+            .map_or(defaults.appearance, |appearance| match appearance {
+                stored::Appearance::System => Appearance::System,
+                stored::Appearance::Light => Appearance::Light,
+                stored::Appearance::Dark => Appearance::Dark,
+            }),
+        terminal_option_as_meta: saved
+            .terminal_option_as_meta
+            .unwrap_or(defaults.terminal_option_as_meta),
     };
     (preferences, error)
 }
@@ -125,6 +124,27 @@ mod tests {
         assert!(preferences.sidebar_compact);
         assert_eq!(preferences.appearance, Appearance::Dark);
         assert!(!preferences.terminal_option_as_meta);
+    }
+
+    #[test]
+    fn an_invalid_value_falls_back_to_its_default_alone() {
+        let directory = tempdir();
+        fs::write(
+            directory.path().join(FILE),
+            json!({"sidebarWidth": 301, "sidebarCompact": "yes", "appearance": "light",
+                "terminalOptionAsMeta": 0})
+            .to_string(),
+        )
+        .unwrap();
+        let (preferences, error) = load(Some(directory.path()));
+        assert_eq!(error, None);
+        assert_eq!(
+            preferences,
+            WindowPreferences {
+                appearance: Appearance::Light,
+                ..Default::default()
+            }
+        );
     }
 
     #[test]

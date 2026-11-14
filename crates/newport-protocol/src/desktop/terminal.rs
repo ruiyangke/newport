@@ -4,6 +4,7 @@ pub struct HeldShell {
     pub terminal: uuid::Uuid,
     pub name: Option<String>,
     pub title: Option<String>,
+    pub agent: Option<String>,
     pub creator: crate::terminal::Computer,
     pub attached: Vec<crate::terminal::Attached>,
     pub started: u64,

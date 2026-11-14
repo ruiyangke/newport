@@ -9,7 +9,7 @@ impl Newport {
             .and_then(|row| row.error_code.as_deref());
         if !matches!(key, "git-list" | "git-sync-status")
             || self.page != Page::Projects
-            || !self.git.repo["repoId"].is_string()
+            || self.git.repo.is_none()
             || self.git_write_pending()
             || self.git.switching_path.is_some()
             || self.project_dialog_open
@@ -24,15 +24,22 @@ impl Newport {
             code,
             &self.server,
             project,
-            &self.git.opening_path,
+            self.git.opening_path.as_ref(),
         ) else {
             self.git.error = Some(format!(
                 "This project’s folder is unavailable on the server: {}",
-                text(&self.git.repo["root"], "display")
+                self.git
+                    .root()
+                    .map(|root| root.display.as_str())
+                    .unwrap_or_default()
             ));
             return true;
         };
-        let missing = text(&self.git.repo["root"], "display");
+        let missing = self
+            .git
+            .root()
+            .map(|root| root.display.clone())
+            .unwrap_or_default();
         self.git_release();
         // Retire every old checkout generation, including duplicate missing
         // replies. A failed open of the bookmark stops on the normal Retry UI.
@@ -44,51 +51,42 @@ impl Newport {
         true
     }
     pub(super) fn git_open_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.page != Page::Projects || !self.git.repo["repoId"].is_string() {
+        if self.page != Page::Projects || self.git.repo.is_none() {
             return;
         }
         // repo.open resolves subdirectories and symlinks. Use the returned
         // checkout root, not the bookmark or the originally entered path.
-        let destination = json!({"serverId":self.server,"path":self.git.repo["root"]});
-        self.project_open_files(&destination, window, cx);
+        let root = self.git.root().cloned();
+        self.open_checkout_files(root.as_ref(), window, cx);
     }
-    pub(super) fn git_request_open(&mut self, path: Value) {
+    pub(super) fn git_request_open(&mut self, path: newport_protocol::git::Path) {
         self.git_open_with_retry(path, false);
     }
-    fn git_open_with_retry(&mut self, path: Value, retry: bool) {
+    fn git_open_with_retry(&mut self, path: newport_protocol::git::Path, retry: bool) {
         self.project_checks = None;
         if let Some(project) = self.selection.as_ref() {
             self.resources
                 .invalidate(&project_library::status_key(project));
         }
-        self.git.opening_path = path.clone();
+        self.git.opening_path = Some(path.clone());
         self.resources.invalidate("repository");
-        let (Ok(server), Some(bytes_b64)) = (
-            uuid::Uuid::parse_str(&self.server),
-            path["bytesB64"].as_str(),
-        ) else {
+        let Ok(server) = uuid::Uuid::parse_str(&self.server) else {
             return;
         };
-        let path = newport_protocol::git::Path {
-            bytes_b64: bytes_b64.into(),
-            display: text(&path, "display"),
-        };
-        self.request(
+        let generation = self.resources.begin("repository");
+        self.dispatch_request(
             "repository",
-            newport_protocol::desktop::Operation::Git(Box::new(
-                newport_protocol::desktop::git::Operation::Request(Box::new(
-                    newport_protocol::desktop::git::RequestArgs {
-                        server,
-                        request: GitRequest::Open { path },
-                        retry_connection: retry,
-                    },
-                )),
-            )),
+            request_dispatch::Request::Git(Box::new(newport_protocol::desktop::git::RequestArgs {
+                server,
+                request: GitRequest::Open { path },
+                retry_connection: retry,
+            })),
+            generation,
         );
     }
     pub(super) fn git_all_projects(&mut self, cx: &mut Context<Self>) {
         self.git_release();
-        let library = self.resources.take_cached(&["page"]);
+        let library = self.resources.take_cached(&["projects"]);
         self.resources.clear();
         self.resources.restore(library);
         self.selection = None;
@@ -112,13 +110,10 @@ impl Newport {
                 cx,
             );
         }
-        let root = self
-            .selection
-            .as_ref()
-            .map(|p| p["path"].clone())
-            .unwrap_or_default();
-        let different_root =
-            root["bytesB64"].is_string() && root["bytesB64"] != self.git.opening_path["bytesB64"];
+        let root = self.selection.as_ref().map(|p| p.path.clone());
+        let different_root = root.as_ref().is_some_and(|root| {
+            Some(&root.bytes_b64) != self.git.opening_path.as_ref().map(|path| &path.bytes_b64)
+        });
         div()
             .flex()
             .flex_col()
@@ -137,7 +132,11 @@ impl Newport {
                 empty::pane(
                     IconName::FolderGit2,
                     "Newport couldn’t open this checkout",
-                    text(&self.git.opening_path, "display"),
+                    self.git
+                        .opening_path
+                        .as_ref()
+                        .map(|path| path.display.clone())
+                        .unwrap_or_default(),
                     cx,
                 )
                 .when_some(error, |view, error| {
@@ -166,9 +165,11 @@ impl Newport {
                             crate::controls::button("retry-open-repository")
                                 .label("Try again")
                                 .accessibility_label("Try opening this checkout again")
-                                .disabled(!self.git.opening_path["bytesB64"].is_string())
+                                .disabled(self.git.opening_path.is_none())
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.git_open_with_retry(this.git.opening_path.clone(), true);
+                                    if let Some(path) = this.git.opening_path.clone() {
+                                        this.git_open_with_retry(path, true);
+                                    }
                                     cx.notify();
                                 })),
                         )
@@ -177,7 +178,9 @@ impl Newport {
                                 crate::controls::button("open-saved-project")
                                     .label("Open saved project")
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.git_open_with_retry(root.clone(), true);
+                                        if let Some(root) = root.clone() {
+                                            this.git_open_with_retry(root, true);
+                                        }
                                         cx.notify();
                                     })),
                             )
@@ -191,16 +194,9 @@ impl Newport {
 #[cfg(test)]
 mod tests {
     use gpui_kit as gpui;
-    use serde_json::json;
 
     fn request_args(work: &crate::Work) -> &newport_protocol::desktop::git::RequestArgs {
-        let crate::request_dispatch::Request::Desktop(operation) = &work.request else {
-            panic!("expected desktop operation");
-        };
-        let newport_protocol::desktop::Operation::Git(operation) = operation.as_ref() else {
-            panic!("expected Git operation");
-        };
-        let newport_protocol::desktop::git::Operation::Request(args) = operation.as_ref() else {
+        let crate::request_dispatch::Request::Git(args) = &work.request else {
             panic!("expected Git request");
         };
         args
@@ -218,7 +214,7 @@ mod tests {
             let (work, requests) = std::sync::mpsc::sync_channel(8);
             this.work = work.into();
             this.server = "00000000-0000-4000-8000-000000000001".into();
-            let path = json!({"bytesB64":"L3Nydi9hcHA=","display":"/srv/app"});
+            let path = newport_protocol::git::Path::new(b"/srv/app");
             this.git_request_open(path.clone());
             let initial = requests.try_recv().unwrap();
             assert!(!request_args(&initial).retry_connection);
@@ -230,7 +226,7 @@ mod tests {
             this.git_open_with_retry(path.clone(), true);
             let retry = requests.try_recv().unwrap();
             assert!(request_args(&retry).retry_connection);
-            assert!(matches!(&request_args(&retry).request, newport_protocol::git::Request::Open { path: value } if serde_json::to_value(value).unwrap() == path));
+            assert!(matches!(&request_args(&retry).request, newport_protocol::git::Request::Open { path: value } if *value == path));
             assert!(retry.generation > initial.generation);
             assert!(this.resources.get("repository").unwrap().pending);
             assert!(requests.try_recv().is_err());

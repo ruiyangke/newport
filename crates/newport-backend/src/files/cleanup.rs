@@ -2,10 +2,58 @@
 //! publication/removal. Never scans remote directories or deletes by prefix.
 //! Recovery uses authorized SFTP connections, never background authentication.
 use anyhow::{Context, Result, bail};
+use newport_protocol::desktop::configuration::{AuthMethod, ConnectionSettings, Proxy};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{collections::HashMap, path::PathBuf};
 use uuid::Uuid;
+
+/// The connection a staging path was created over: its settings without the
+/// connection revision, so cleanup may retry after a reconnect but never on a
+/// different endpoint, user, authentication profile or server record.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Scope(pub(crate) ConnectionSettings);
+impl Scope {
+    pub(super) fn server(&self) -> Uuid {
+        self.0.server_id
+    }
+    /// The form the journal holds. Journals outlive the build that wrote
+    /// them, so this list keeps its shape: the settings, a zero revision and
+    /// an empty backend instance.
+    fn journal(&self) -> Value {
+        let ConnectionSettings {
+            server_id,
+            ssh_host,
+            ssh_user,
+            ssh_port,
+            auth_method,
+            identity_file,
+            agent_source,
+            agent_key_fingerprint,
+            proxy,
+        } = &self.0;
+        json!([
+            server_id.to_string(),
+            ssh_host,
+            ssh_user,
+            ssh_port,
+            match auth_method {
+                AuthMethod::PublicKey => "publicKey",
+                AuthMethod::Password => "password",
+            },
+            identity_file,
+            agent_source,
+            agent_key_fingerprint,
+            match proxy {
+                None => Value::Null,
+                Some(Proxy::Command(command)) => json!({"command": command.as_str()}),
+                Some(Proxy::Jump(id)) => json!({"jump": id.to_string()}),
+            },
+            0,
+            "",
+        ])
+    }
+}
 
 #[derive(Default)]
 pub(super) struct UploadCleanup {
@@ -99,7 +147,7 @@ impl UploadCleanup {
 
     /// Journal before issuing remote OPEN. Active entries cannot be cleaned by
     /// another file connection. Restart restores them as abandoned entries.
-    pub fn register(&mut self, scope: Value, path: String) -> Result<Uuid> {
+    pub fn register(&mut self, scope: &Scope, path: String) -> Result<Uuid> {
         let id = staging_id(&path)?;
         if self.entries.contains_key(&id) {
             bail!("Upload recovery identity already exists");
@@ -107,7 +155,7 @@ impl UploadCleanup {
         self.entries.insert(
             id,
             Entry {
-                scope,
+                scope: scope.journal(),
                 path,
                 active: true,
                 running: false,
@@ -126,10 +174,11 @@ impl UploadCleanup {
         }
     }
 
-    pub fn take(&mut self, scope: &Value) -> Vec<(Uuid, String)> {
+    pub fn take(&mut self, scope: &Scope) -> Vec<(Uuid, String)> {
+        let scope = scope.journal();
         self.entries
             .iter_mut()
-            .filter(|(_, entry)| !entry.active && !entry.running && entry.scope == *scope)
+            .filter(|(_, entry)| !entry.active && !entry.running && entry.scope == scope)
             .take(8)
             .map(|(id, entry)| {
                 entry.running = true;
@@ -173,35 +222,92 @@ fn staging_id(path: &str) -> Result<Uuid> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::files) mod tests {
     use super::*;
-    use serde_json::json;
 
     fn path() -> String {
         format!("/work/.newport-upload-{}", Uuid::new_v4())
+    }
+
+    pub(in crate::files) fn scope(server: Uuid) -> Scope {
+        scope_at(server, "host")
+    }
+
+    fn scope_at(server: Uuid, host: &str) -> Scope {
+        Scope(ConnectionSettings {
+            server_id: server,
+            ssh_host: host.into(),
+            ssh_user: "user".into(),
+            ssh_port: 22,
+            auth_method: AuthMethod::PublicKey,
+            identity_file: None,
+            agent_source: None,
+            agent_key_fingerprint: None,
+            proxy: None,
+        })
+    }
+
+    /// Journals written before this build must keep matching their scopes.
+    #[test]
+    fn the_journal_keeps_the_scope_list_it_has_always_held() {
+        let server = Uuid::parse_str("7a9c1d4e-0000-4000-8000-000000000001").unwrap();
+        let jump = Uuid::parse_str("7a9c1d4e-0000-4000-8000-000000000002").unwrap();
+        let mut scope = scope(server);
+        assert_eq!(
+            scope.journal(),
+            json!([
+                server.to_string(),
+                "host",
+                "user",
+                22,
+                "publicKey",
+                null,
+                null,
+                null,
+                null,
+                0,
+                ""
+            ])
+        );
+        scope.0.auth_method = AuthMethod::Password;
+        scope.0.identity_file = Some("~/.ssh/id".into());
+        scope.0.agent_source = Some("onePassword".into());
+        scope.0.agent_key_fingerprint = Some("SHA256:key".into());
+        scope.0.proxy = Some(Proxy::Jump(Box::new(jump)));
+        assert_eq!(
+            scope.journal(),
+            json!([server.to_string(), "host", "user", 22, "password", "~/.ssh/id",
+                "onePassword", "SHA256:key", {"jump": jump.to_string()}, 0, ""])
+        );
+        scope.0.proxy = Some(Proxy::Command(Box::new("nc %h %p".into())));
+        assert_eq!(scope.journal()[8], json!({"command": "nc %h %p"}));
     }
 
     #[test]
     fn crash_recovery_restores_active_and_inflight_entries_but_never_finished_uploads() {
         let temp = tempfile::tempdir().unwrap();
         let journal = temp.path().join("upload-recovery.json");
-        let scope = json!(["server", "host", "user", 22]);
+        let scope = scope(Uuid::new_v4());
         let mut queue = UploadCleanup::open(journal.clone());
         let active_path = path();
-        let active = queue.register(scope.clone(), active_path.clone()).unwrap();
+        let active = queue.register(&scope, active_path.clone()).unwrap();
         assert!(
             queue.take(&scope).is_empty(),
             "new connections must not remove live uploads"
         );
         let failed_path = path();
-        let failed = queue.register(scope.clone(), failed_path.clone()).unwrap();
+        let failed = queue.register(&scope, failed_path.clone()).unwrap();
         queue.release(failed);
         assert_eq!(queue.take(&scope), vec![(failed, failed_path.clone())]);
-        let completed = queue.register(scope.clone(), path()).unwrap();
+        let completed = queue.register(&scope, path()).unwrap();
         queue.finish(completed, true);
         drop(queue);
         let mut recovered = UploadCleanup::open(journal.clone());
-        assert!(recovered.take(&json!(["other-server"])).is_empty());
+        assert!(
+            recovered
+                .take(&super::tests::scope(Uuid::new_v4()))
+                .is_empty()
+        );
         let mut pending = recovered.take(&scope);
         pending.sort();
         let mut expected = vec![(active, active_path), (failed, failed_path)];
@@ -220,12 +326,13 @@ mod tests {
         for contents in [b"invalid".as_slice(), br#"{"version":2,"entries":{}}"#] {
             std::fs::write(&journal, contents).unwrap();
             let mut queue = UploadCleanup::open(journal.clone());
-            assert!(queue.register(json!(["scope"]), path()).is_err());
-            assert!(queue.take(&json!(["scope"])).is_empty());
+            let scope = scope(Uuid::new_v4());
+            assert!(queue.register(&scope, path()).is_err());
+            assert!(queue.take(&scope).is_empty());
             assert_eq!(std::fs::read(&journal).unwrap(), contents);
         }
         let mut queue = UploadCleanup::open(temp.path().join("missing/recovery.json"));
-        assert!(queue.register(json!(["scope"]), path()).is_err());
+        assert!(queue.register(&scope(Uuid::new_v4()), path()).is_err());
         assert!(queue.entries.is_empty());
     }
 
@@ -233,6 +340,7 @@ mod tests {
     fn recovery_rejects_destination_paths_and_mismatched_identities() {
         let temp = tempfile::tempdir().unwrap();
         let journal = temp.path().join("upload-recovery.json");
+        let server = Uuid::new_v4();
         for bad in [
             "/work/payload.bin".to_owned(),
             format!("/work/../.newport-upload-{}", Uuid::new_v4()),
@@ -242,14 +350,14 @@ mod tests {
             std::fs::write(
                 &journal,
                 serde_json::to_vec(
-                    &json!({"version":1,"entries":{id.to_string():{"scope":["s"],"path":bad}}}),
+                    &json!({"version":1,"entries":{id.to_string():{"scope":scope(server).journal(),"path":bad}}}),
                 )
                 .unwrap(),
             )
             .unwrap();
             let mut queue = UploadCleanup::open(journal.clone());
-            assert!(queue.take(&json!(["s"])).is_empty());
-            assert!(queue.register(json!(["s"]), path()).is_err());
+            assert!(queue.take(&scope(server)).is_empty());
+            assert!(queue.register(&scope(server), path()).is_err());
         }
     }
 
@@ -258,9 +366,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let journal = temp.path().join("upload-recovery.json");
         let mut queue = UploadCleanup::open(journal.clone());
-        let scope = json!(["scope"]);
+        let scope = scope(Uuid::new_v4());
         let path = path();
-        let id = queue.register(scope.clone(), path.clone()).unwrap();
+        let id = queue.register(&scope, path.clone()).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -283,10 +391,11 @@ mod tests {
     #[test]
     fn cleanup_is_scoped_exact_and_retries_only_failures() {
         let mut queue = UploadCleanup::default();
-        let original = json!(["original", "host", "user", 22, "key"]);
-        let other = json!(["original", "different-host", "user", 22, "key"]);
+        let server = Uuid::new_v4();
+        let original = scope_at(server, "host");
+        let other = scope_at(server, "different-host");
         let path = path();
-        let id = queue.register(original.clone(), path.clone()).unwrap();
+        let id = queue.register(&original, path.clone()).unwrap();
         queue.release(id);
         assert!(queue.take(&other).is_empty());
         let attempt = queue.take(&original);
@@ -310,10 +419,11 @@ mod tests {
     #[test]
     fn retries_have_bounded_batches() {
         let mut queue = UploadCleanup::default();
+        let scope = scope(Uuid::new_v4());
         for _ in 0..30 {
-            let id = queue.register(json!(["scope"]), path()).unwrap();
+            let id = queue.register(&scope, path()).unwrap();
             queue.release(id);
         }
-        assert_eq!(queue.take(&json!(["scope"])).len(), 8);
+        assert_eq!(queue.take(&scope).len(), 8);
     }
 }

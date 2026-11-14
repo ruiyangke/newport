@@ -1,4 +1,5 @@
 //! Desktop recovery receipts. Written before dispatch; never automatically replay writes.
+use newport_protocol::git::code;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -52,7 +53,10 @@ impl ReceiptState {
 pub(super) fn rejected_before_mutation(code: &str) -> bool {
     matches!(
         code,
-        "STALE_SNAPSHOT" | "INVALID_REQUEST" | "REPO_NOT_FOUND" | "UNSUPPORTED_METHOD"
+        code::STALE_SNAPSHOT
+            | code::INVALID_REQUEST
+            | code::REPO_NOT_FOUND
+            | code::UNSUPPORTED_METHOD
     )
 }
 /// Init/clone return these top-level errors only before journal.begin.
@@ -61,12 +65,12 @@ pub(super) fn rejected_before_mutation(code: &str) -> bool {
 pub(super) fn bootstrap_rejected_before_mutation(code: &str) -> bool {
     matches!(
         code,
-        "INVALID_REQUEST"
-            | "UNSUPPORTED_METHOD"
-            | "DIRECTORY_REQUIRED"
-            | "ALREADY_REPOSITORY"
-            | "PATH_EXISTS"
-            | "PATH_CHANGED"
+        code::INVALID_REQUEST
+            | code::UNSUPPORTED_METHOD
+            | code::DIRECTORY_REQUIRED
+            | code::ALREADY_REPOSITORY
+            | code::PATH_EXISTS
+            | code::PATH_CHANGED
     )
 }
 pub(super) fn remote_outcome(
@@ -201,6 +205,59 @@ impl PendingOperations {
         }
         Ok(())
     }
+    /// Records that a write failed before it was sent. A write that was
+    /// recorded may have been sent, so its receipt is left alone.
+    pub fn reject_unrecorded(
+        &self,
+        server_id: Uuid,
+        operation_id: Uuid,
+        action: String,
+    ) -> Result<(), String> {
+        self.reject(server_id, operation_id, action, false)
+    }
+    /// Records that the agent has no journal entry for an operation, which
+    /// proves it never began, whether or not this desktop recorded it.
+    pub fn reject_missing(&self, server_id: Uuid, operation_id: Uuid) -> Result<(), String> {
+        self.reject(server_id, operation_id, "unknown".into(), true)
+    }
+    fn reject(
+        &self,
+        server_id: Uuid,
+        operation_id: Uuid,
+        action: String,
+        recorded_too: bool,
+    ) -> Result<(), String> {
+        let recorded = {
+            let _guard = self
+                .access
+                .lock()
+                .map_err(|_| "Git recovery log is unavailable.")?;
+            let mut rows = self.read()?;
+            let recorded = rows.iter().any(|row| row.operation_id == operation_id);
+            if !recorded {
+                // A rejected receipt holds nothing to recover, so it never
+                // counts against the limit: older ones make room for it, and
+                // a log full of others goes without it.
+                if rows.len() >= MAX_RECORDS {
+                    rows.retain(|row| row.state != ReceiptState::Rejected);
+                }
+                if rows.len() < MAX_RECORDS {
+                    rows.push(Receipt {
+                        operation_id,
+                        server_id,
+                        action,
+                        state: ReceiptState::Rejected,
+                    });
+                    self.save(&rows)?;
+                }
+            }
+            recorded
+        };
+        if recorded && recorded_too {
+            self.observe(server_id, operation_id, ReceiptState::Rejected)?;
+        }
+        Ok(())
+    }
     fn review_ready(&self, server_id: Uuid, operation_id: Uuid) -> Result<(), String> {
         let _guard = self
             .access
@@ -311,7 +368,7 @@ where
                 "Git recovery log is unavailable.",
             )
         })?
-        .map_err(|message| super::protocol::Error::new("OPERATION_NOT_REVIEWABLE", message))?;
+        .map_err(|message| super::protocol::Error::new(code::OPERATION_NOT_REVIEWABLE, message))?;
     let id = operation_id.to_string();
     // Review is idempotent and never executes the original Git action.
     let result = lookup(super::protocol::Request::Review {
@@ -322,7 +379,7 @@ where
         remote_outcome(&result, &id) == Ok(ReceiptState::ReviewedUnknown);
     if !confirmed_reviewed_unknown {
         return Err(super::protocol::Error::new(
-            "OPERATION_NOT_REVIEWABLE",
+            code::OPERATION_NOT_REVIEWABLE,
             "The server did not confirm the operation review.",
         ));
     }
@@ -336,7 +393,7 @@ where
             "Git recovery log is unavailable.",
         )
     })?
-    .map_err(|message| super::protocol::Error::new("OPERATION_NOT_REVIEWABLE", message))
+    .map_err(|message| super::protocol::Error::new(code::OPERATION_NOT_REVIEWABLE, message))
 }
 
 pub async fn git_review_operation(
@@ -642,6 +699,44 @@ mod tests {
         );
     }
     #[test]
+    fn a_write_rejected_while_the_log_is_full_keeps_it_readable() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = PendingOperations::new(temp.path().join("operations.json"));
+        let server = Uuid::new_v4();
+        let rejected: Vec<_> = (0..MAX_RECORDS)
+            .map(|_| Receipt {
+                operation_id: Uuid::new_v4(),
+                server_id: server,
+                action: "commit".into(),
+                state: ReceiptState::Rejected,
+            })
+            .collect();
+        store.save(&rejected).unwrap();
+        let refused = Uuid::new_v4();
+        store
+            .reject_unrecorded(server, refused, "push".into())
+            .unwrap();
+        let rows = store.read().unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.operation_id).collect::<Vec<_>>(),
+            [refused]
+        );
+        let unknown: Vec<_> = (0..MAX_RECORDS)
+            .map(|_| Receipt {
+                operation_id: Uuid::new_v4(),
+                server_id: server,
+                action: "push".into(),
+                state: ReceiptState::OutcomeUnknown,
+            })
+            .collect();
+        store.save(&unknown).unwrap();
+        store
+            .reject_unrecorded(server, Uuid::new_v4(), "push".into())
+            .unwrap();
+        let ids = |rows: &[Receipt]| rows.iter().map(|row| row.operation_id).collect::<Vec<_>>();
+        assert_eq!(ids(&store.read().unwrap()), ids(&unknown));
+    }
+    #[test]
     fn concurrent_writers_preserve_each_receipt() {
         let temp = tempfile::tempdir().unwrap();
         let store = PendingOperations::new(temp.path().join("operations.json"));
@@ -944,6 +1039,55 @@ mod tests {
             .unwrap();
         assert!(store.read().unwrap()[0].state.complete());
         store.acknowledge(server, operation).unwrap();
+        assert!(store.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_write_that_failed_before_it_was_recorded_never_blocks_later_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = PendingOperations::new(temp.path().join("operations.json"));
+        let server = Uuid::new_v4();
+        let (unsent, sent) = (Uuid::new_v4(), Uuid::new_v4());
+
+        store
+            .reject_unrecorded(server, unsent, "clone".into())
+            .unwrap();
+        // A recorded write may have reached the agent, so it stays pending.
+        store.begin(server, sent, "commit".into()).unwrap();
+        store
+            .reject_unrecorded(server, sent, "commit".into())
+            .unwrap();
+        let rows = store.read().unwrap();
+        let state = |id| {
+            rows.iter()
+                .find(|row| row.operation_id == id)
+                .unwrap()
+                .state
+        };
+        assert_eq!(state(unsent), ReceiptState::Rejected);
+        assert_eq!(state(sent), ReceiptState::Pending);
+        store.acknowledge(server, unsent).unwrap();
+    }
+
+    #[test]
+    fn the_agent_having_no_record_rejects_an_operation_this_desktop_never_recorded() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = PendingOperations::new(temp.path().join("operations.json"));
+        let server = Uuid::new_v4();
+        let (unrecorded, recorded) = (Uuid::new_v4(), Uuid::new_v4());
+        store.begin(server, recorded, "commit".into()).unwrap();
+
+        store.reject_missing(server, unrecorded).unwrap();
+        store.reject_missing(server, recorded).unwrap();
+        assert!(
+            store
+                .read()
+                .unwrap()
+                .iter()
+                .all(|row| row.state == ReceiptState::Rejected)
+        );
+        store.acknowledge(server, unrecorded).unwrap();
+        store.acknowledge(server, recorded).unwrap();
         assert!(store.read().unwrap().is_empty());
     }
 

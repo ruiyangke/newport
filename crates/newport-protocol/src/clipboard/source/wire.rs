@@ -11,6 +11,8 @@ use std::io::{self, Read, Write};
 mod scan;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use scan::tables;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]

@@ -41,8 +41,7 @@ impl Newport {
                 .get(&self.server)
                 .and_then(|browser| browser.home.as_deref()),
             self.selected_server()
-                .and_then(|server| server["sshUser"].as_str())
-                .unwrap_or_default(),
+                .map_or("", |server| server.ssh_user.as_str()),
         );
         let example = if clone_repo {
             clone_destination(&home, "")

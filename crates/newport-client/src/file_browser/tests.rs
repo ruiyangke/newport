@@ -1,6 +1,7 @@
 use super::*;
 use crate::file_ipc_fixture::{self as rpc, Observation as Request, Peer as Stream};
 use newport_platform::ipc::Listener;
+use serde_json::{Value, json};
 type FixtureReply = Result<Value, String>;
 use std::{path::PathBuf, time::Instant};
 
@@ -20,7 +21,7 @@ impl Host {
         Browser::new(
             Backend::at_path(self.path.clone()),
             rpc::SERVER.into(),
-            rpc::connection(),
+            Some(rpc::connection()),
         )
     }
     fn receive(&self) -> (Stream, Request) {
@@ -68,31 +69,39 @@ fn reply(mut stream: Stream, result: FixtureReply) {
 fn listing(path: &str) -> Value {
     json!({"path":path,"entries":[]})
 }
+fn preview_reply(kind: files::PreviewKind, mime: &str) -> files::Reply {
+    files::Reply::Preview(Box::new(files::Preview {
+        kind,
+        mime: mime.into(),
+        content: match kind {
+            files::PreviewKind::Text => files::Content::Text(Box::default()),
+            files::PreviewKind::Image => files::Content::Binary(Box::default()),
+        },
+        truncated: false,
+    }))
+}
 #[test]
 fn preview_contract_accepts_text_and_supported_images() {
     for mime in ["image/png", "image/jpeg", "image/gif", "image/webp"] {
-        assert!(
-            valid_preview(serde_json::json!({"kind":"image","content":"data","mime":mime})).is_ok()
-        );
+        assert!(valid_preview(preview_reply(files::PreviewKind::Image, mime)).is_ok());
     }
-    for kind in ["image", "pdf", "binary"] {
-        assert!(
-            valid_preview(
-                serde_json::json!({"kind":kind,"content":"data","mime":"application/octet-stream"})
-            )
-            .is_err()
-        );
+    for kind in [files::PreviewKind::Image, files::PreviewKind::Text] {
+        assert!(valid_preview(preview_reply(kind, "application/octet-stream")).is_err());
     }
-    assert!(
-        valid_preview(
-            serde_json::json!({"kind":"text","content":"","mime":"text/plain","truncated":false})
-        )
-        .is_ok()
-    );
+    assert!(valid_preview(preview_reply(files::PreviewKind::Text, "text/plain")).is_ok());
 }
 
 fn preview(content: &str) -> Value {
     json!({"kind":"text","content":content,"mime":"text/plain","truncated":false})
+}
+/// The preview a [`preview`] reply delivers.
+fn text_preview(content: &str) -> files::Preview {
+    files::Preview {
+        kind: files::PreviewKind::Text,
+        mime: "text/plain".into(),
+        content: files::Content::Text(Box::new(content.into())),
+        truncated: false,
+    }
 }
 fn until(browser: &mut Browser, done: impl Fn(&Browser) -> bool) -> Vec<Update> {
     let mut updates = vec![];
@@ -130,7 +139,10 @@ fn construction_is_idle_and_reads_capture_backend_server_connection_and_exact_pa
     let (stream, request) = host.next("files_list");
     assert!(uuid::Uuid::parse_str(request.args["operation"].as_str().unwrap()).is_ok());
     assert_eq!(request.args["id"], browser.server());
-    assert_eq!(&request.args["expectedConnection"], browser.connection());
+    assert_eq!(
+        request.args["expectedConnection"],
+        rpc::scope(browser.connection().unwrap())
+    );
     assert_eq!(request.args["path"], "/資料/it's here");
     reply(stream, Ok(listing("/canonical")));
     let updates = until(&mut browser, |browser| !browser.has_pending());
@@ -266,7 +278,7 @@ fn preview_a_b_a_gets_fresh_identity_and_stale_a_cannot_fill_the_new_a() {
     let (old, request) = host.next("files_preview");
     assert_eq!(
         request.args["expectedConnection"],
-        browser.connection().clone()
+        rpc::scope(browser.connection().unwrap())
     );
     let middle = browser.open_preview("/b".into()).unwrap();
     let latest = browser.open_preview("/a".into()).unwrap();
@@ -299,7 +311,10 @@ fn preview_a_b_a_gets_fresh_identity_and_stale_a_cannot_fill_the_new_a() {
     let updates = until(&mut browser, |browser| !browser.has_pending());
     assert_eq!(updates.iter().filter(|u| u.preview_changed).count(), 1);
     assert!(browser.take_preview_data(first).is_none());
-    assert_eq!(browser.take_preview_data(latest), Some(preview("new a")));
+    assert_eq!(
+        browser.take_preview_data(latest),
+        Some(text_preview("new a"))
+    );
     assert!(browser.take_preview_data(latest).is_none());
     let retained = browser.preview().unwrap();
     assert_eq!(retained.token, latest);
@@ -340,7 +355,7 @@ fn preview_error_retry_clears_data_and_changes_token_without_replaying_automatic
     assert_eq!(request.args["path"], "/text");
     reply(read, Ok(preview("")));
     until(&mut browser, |browser| !browser.has_pending());
-    assert_eq!(browser.take_preview_data(second), Some(preview("")));
+    assert_eq!(browser.take_preview_data(second), Some(text_preview("")));
 }
 #[test]
 fn authoritative_error_is_immediate_while_held_cancellation_still_bounds_retries() {
@@ -546,19 +561,38 @@ fn interrupted_read_is_cancelled_and_never_replayed_without_an_explicit_retry() 
     until(&mut browser, |browser| !browser.has_pending());
 }
 #[test]
-fn malformed_listing_and_preview_projections_are_rejected() {
-    for value in [
-        json!({"entries":[]}),
-        json!({"path":"","entries":[]}),
-        json!({"path":"/wrong","entries":null}),
+fn malformed_listing_and_preview_replies_are_rejected() {
+    let listing = |path: &str, entries: usize| {
+        files::Reply::List(Box::new(files::Listing {
+            path: path.into(),
+            entries: vec![
+                files::Entry {
+                    name: "a".into(),
+                    path: "/a".into(),
+                    kind: files::EntryKind::File,
+                    size: None,
+                    modified: None,
+                    permissions: None,
+                };
+                entries
+            ],
+        }))
+    };
+    for reply in [
+        listing("", 0),
+        listing("/wrong\0", 0),
+        listing(&"a".repeat(16_385), 0),
+        listing("/wrong", 20_001),
+        files::Reply::Cancel(Box::new(newport_protocol::common::Present {})),
     ] {
         assert_eq!(
-            valid_listing(value).unwrap_err(),
+            valid_listing(reply).unwrap_err(),
             "Invalid folder listing from the backend.",
         );
     }
+    assert!(valid_listing(listing("/right", 20_000)).is_ok());
     assert_eq!(
-        valid_preview(json!({"kind":"text","mime":"text/plain"})).unwrap_err(),
+        valid_preview(listing("/wrong", 0)).unwrap_err(),
         "Invalid file preview from the backend.",
     );
 }

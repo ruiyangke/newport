@@ -1,13 +1,14 @@
 //! Local display time is independent of cached remote data. Only labels used by
 //! the last rendered view are compared; virtualized rows outside it add no work.
-use newport_domain::services::{self, TimerUnit};
+use newport_domain::services;
+use newport_protocol::monitor::services::Timer;
 use std::cell::RefCell;
 
 #[derive(Clone, PartialEq, Eq)]
 enum Label {
     Elapsed(i64),
     Until(i64),
-    Timer(TimerUnit),
+    Timer(Timer),
 }
 impl Label {
     fn text(&self, now: i64) -> String {
@@ -60,9 +61,9 @@ impl Clock {
         self.label(Label::Until(at))
     }
 
-    pub fn timer(&self, timer: &TimerUnit) -> String {
+    pub fn timer(&self, timer: &Timer) -> String {
         // Names, descriptions and unit links don't participate in the clock.
-        self.label(Label::Timer(TimerUnit {
+        self.label(Label::Timer(Timer {
             active: timer.active.clone(),
             next: timer.next,
             last: timer.last,
@@ -124,7 +125,7 @@ mod tests {
     #[test]
     fn timer_labels_reuse_domain_semantics_and_duplicate_sources() {
         let clock = Clock::default();
-        let timer = TimerUnit {
+        let timer = Timer {
             active: "active".into(),
             next: Some(3_000),
             ..Default::default()

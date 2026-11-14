@@ -8,12 +8,10 @@ pub mod container_ports;
 pub mod containers;
 pub mod containers_stats;
 pub mod desktop_inputs;
-pub mod desktop_result;
 pub mod discovery;
 pub mod file_browser;
 #[cfg(test)]
 mod file_ipc_fixture;
-pub mod file_result;
 pub mod file_transfer;
 pub mod git_blob;
 pub mod git_branch;

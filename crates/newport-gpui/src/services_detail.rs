@@ -101,7 +101,7 @@ impl ServicesPanel {
             .child(self.log_view("Journal", cx))
             .into_any_element()
     }
-    fn service(&self, unit: &ServiceUnit, cx: &mut Context<Self>) -> AnyElement {
+    fn service(&self, unit: &Service, cx: &mut Context<Self>) -> AnyElement {
         let state = domain::state_of(unit);
         let pending = self
             .client
@@ -169,7 +169,9 @@ impl ServicesPanel {
                 ))
                 .child(fact(
                     "Memory",
-                    unit.memory.map(|n| bytes(&json!(n))).unwrap_or("—".into()),
+                    unit.memory
+                        .map(|n| byte_size(n as f64))
+                        .unwrap_or("—".into()),
                     None,
                     cx,
                 ))
@@ -337,7 +339,7 @@ impl ServicesPanel {
             ))
             .into_any_element()
     }
-    fn timer(&self, timer: &TimerUnit, cx: &mut Context<Self>) -> AnyElement {
+    fn timer(&self, timer: &Timer, cx: &mut Context<Self>) -> AnyElement {
         let target = self.client.snapshot().and_then(|s| {
             s.services
                 .iter()
@@ -424,7 +426,7 @@ impl ServicesPanel {
             .child(self.unit_tabs(&timer.name, timer.unit.is_some(), None, 0, cx))
             .into_any_element()
     }
-    fn service_actions(&self, unit: &ServiceUnit, cx: &mut Context<Self>) -> AnyElement {
+    fn service_actions(&self, unit: &Service, cx: &mut Context<Self>) -> AnyElement {
         let verbs = domain::available_verbs(unit);
         let running = !verbs.start;
         let blocked = self
@@ -440,48 +442,42 @@ impl ServicesPanel {
             .and_then(|s| s.result.as_ref())
             .filter(|r| r.needs_password == Some(true))
             .and_then(|r| r.command.clone());
-        let action = |verb: ServiceVerb,
-                      id: &'static str,
-                      primary: bool,
-                      this: &Self,
-                      cx: &mut Context<Self>| {
-            let name = unit.name.clone();
-            let scope = unit.scope;
-            let busy = status.is_some_and(|s| s.pending && s.verb == verb);
-            crate::controls::button(id)
-                .label(verb.label())
-                .when(
-                    matches!(
-                        verb,
-                        ServiceVerb::Start | ServiceVerb::Stop | ServiceVerb::Restart
-                    ),
-                    |b| {
-                        b.icon(match verb {
-                            ServiceVerb::Start => IconName::Play,
-                            ServiceVerb::Stop => IconName::Square,
-                            _ => IconName::RotateCw,
-                        })
-                    },
-                )
-                .when(primary, |b| b.primary())
-                .disabled(!this.client.can_action(&name, scope, verb))
-                .loading(busy)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if matches!(verb, ServiceVerb::Stop | ServiceVerb::Disable) {
-                        this.open_review(
-                            Review {
-                                unit: name.clone(),
-                                scope,
-                                verb,
-                            },
-                            window,
-                            cx,
-                        );
-                    } else {
-                        this.start_action(name.clone(), scope, verb, cx);
-                    }
-                }))
-        };
+        let action =
+            |verb: Verb, id: &'static str, primary: bool, this: &Self, cx: &mut Context<Self>| {
+                let name = unit.name.clone();
+                let scope = unit.scope;
+                let busy = status.is_some_and(|s| s.pending && s.verb == verb);
+                crate::controls::button(id)
+                    .label(verb_label(verb))
+                    .when(
+                        matches!(verb, Verb::Start | Verb::Stop | Verb::Restart),
+                        |b| {
+                            b.icon(match verb {
+                                Verb::Start => IconName::Play,
+                                Verb::Stop => IconName::Square,
+                                _ => IconName::RotateCw,
+                            })
+                        },
+                    )
+                    .when(primary, |b| b.primary())
+                    .disabled(!this.client.can_action(&name, scope, verb))
+                    .loading(busy)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if matches!(verb, Verb::Stop | Verb::Disable) {
+                            this.open_review(
+                                Review {
+                                    unit: name.clone(),
+                                    scope,
+                                    verb,
+                                },
+                                window,
+                                cx,
+                            );
+                        } else {
+                            this.start_action(name.clone(), scope, verb, cx);
+                        }
+                    }))
+            };
         div()
             .flex()
             .flex_col()
@@ -493,36 +489,26 @@ impl ServicesPanel {
                     .items_center()
                     .gap(px(6.))
                     .child(action(
-                        if running {
-                            ServiceVerb::Restart
-                        } else {
-                            ServiceVerb::Start
-                        },
+                        if running { Verb::Restart } else { Verb::Start },
                         "service-primary",
                         !running,
                         self,
                         cx,
                     ))
                     .when(verbs.stop, |v| {
-                        v.child(action(ServiceVerb::Stop, "service-stop", false, self, cx))
+                        v.child(action(Verb::Stop, "service-stop", false, self, cx))
                     })
                     .when(!running && verbs.restart && unit.active == "failed", |v| {
-                        v.child(action(
-                            ServiceVerb::Restart,
-                            "service-restart",
-                            false,
-                            self,
-                            cx,
-                        ))
+                        v.child(action(Verb::Restart, "service-restart", false, self, cx))
                     })
                     .when(verbs.reload, |v| v.child(self.more_actions(unit, cx)))
                     .when(verbs.enable || verbs.disable, |v| {
                         let name = unit.name.clone();
                         let scope = unit.scope;
                         let next = if unit.enabled.as_deref() == Some("enabled") {
-                            ServiceVerb::Disable
+                            Verb::Disable
                         } else {
-                            ServiceVerb::Enable
+                            Verb::Enable
                         };
                         v.child(
                             div().ml_auto().child(
@@ -532,11 +518,11 @@ impl ServicesPanel {
                                     .disabled(!self.client.can_action(&name, scope, next))
                                     .on_click(cx.listener(move |this, checked, window, cx| {
                                         let verb = if *checked {
-                                            ServiceVerb::Enable
+                                            Verb::Enable
                                         } else {
-                                            ServiceVerb::Disable
+                                            Verb::Disable
                                         };
-                                        if verb == ServiceVerb::Disable {
+                                        if verb == Verb::Disable {
                                             this.open_review(
                                                 Review {
                                                     unit: name.clone(),
@@ -729,12 +715,12 @@ impl ServicesPanel {
                 false,
             );
         };
-        let title = if verb == ServiceVerb::Stop {
+        let title = if verb == Verb::Stop {
             format!("Stop {}?", domain::short_name(&name))
         } else {
             format!("Don’t start at boot {}?", domain::short_name(&name))
         };
-        let description = if verb == ServiceVerb::Stop {
+        let description = if verb == Verb::Stop {
             format!(
                 "This stops {name}{}. Anything relying on it stops working until it is started again.",
                 if scope == Scope::User {
@@ -789,7 +775,7 @@ impl ServicesPanel {
                 crate::controls::form_button("service-review-confirm")
                     .min_w(px(76.))
                     .track_focus(&self.review_confirm_focus)
-                    .label(verb.label())
+                    .label(verb_label(verb))
                     .accessibility_label(format!("Confirm {}", verb.as_str()))
                     .danger()
                     .disabled(!allowed)
@@ -800,7 +786,7 @@ impl ServicesPanel {
         (title, body, footer, pending)
     }
     /// Rare verbs live behind "…": today only Reload.
-    fn more_actions(&self, unit: &ServiceUnit, cx: &mut Context<Self>) -> AnyElement {
+    fn more_actions(&self, unit: &Service, cx: &mut Context<Self>) -> AnyElement {
         let (name, scope) = (unit.name.clone(), unit.scope);
         let weak = cx.weak_entity();
         crate::controls::icon_button("service-more")
@@ -812,10 +798,7 @@ impl ServicesPanel {
             ))
             .dropdown_menu(move |menu, _, cx| {
                 let enabled = weak.upgrade().is_some_and(|panel| {
-                    panel
-                        .read(cx)
-                        .client
-                        .can_action(&name, scope, ServiceVerb::Reload)
+                    panel.read(cx).client.can_action(&name, scope, Verb::Reload)
                 });
                 let (weak, name) = (weak.clone(), name.clone());
                 menu.item(
@@ -824,7 +807,7 @@ impl ServicesPanel {
                         .disabled(!enabled)
                         .on_click(move |_, _, cx| {
                             let _ = weak.update(cx, |this, cx| {
-                                this.start_action(name.clone(), scope, ServiceVerb::Reload, cx)
+                                this.start_action(name.clone(), scope, Verb::Reload, cx)
                             });
                         }),
                 )
@@ -1070,14 +1053,14 @@ fn fact(label: &str, value: String, detail: Option<String>, cx: &App) -> Statefu
 fn date(at: i64) -> String {
     crate::localized_time::detail_date(at)
 }
-fn progress(verb: ServiceVerb) -> &'static str {
+fn progress(verb: Verb) -> &'static str {
     match verb {
-        ServiceVerb::Start => "Starting…",
-        ServiceVerb::Stop => "Stopping…",
-        ServiceVerb::Restart => "Restarting…",
-        ServiceVerb::Reload => "Reloading…",
-        ServiceVerb::Enable => "Enabling at boot…",
-        ServiceVerb::Disable => "Disabling at boot…",
+        Verb::Start => "Starting…",
+        Verb::Stop => "Stopping…",
+        Verb::Restart => "Restarting…",
+        Verb::Reload => "Reloading…",
+        Verb::Enable => "Enabling at boot…",
+        Verb::Disable => "Disabling at boot…",
     }
 }
 fn detail_skeleton() -> AnyElement {
@@ -1132,4 +1115,17 @@ fn detail_skeleton() -> AnyElement {
                 })),
         )
         .into_any_element()
+}
+
+/// The button text for a systemd verb.
+fn verb_label(verb: newport_protocol::monitor::services::Verb) -> &'static str {
+    use newport_protocol::monitor::services::Verb;
+    match verb {
+        Verb::Start => "Start",
+        Verb::Stop => "Stop",
+        Verb::Restart => "Restart",
+        Verb::Reload => "Reload",
+        Verb::Enable => "Enable",
+        Verb::Disable => "Disable",
+    }
 }

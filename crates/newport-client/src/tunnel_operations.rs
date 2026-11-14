@@ -9,9 +9,6 @@ use newport_domain::{
     model::{Direction, Tunnel},
 };
 use newport_protocol::desktop::{self, configuration as protocol};
-use serde_json::Value;
-#[cfg(test)]
-use serde_json::json;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -55,7 +52,7 @@ pub enum Action {
         address: String,
         port: u16,
         name: String,
-        connection: Value,
+        connection: Option<protocol::ConnectionScope>,
     },
     Delete(Tunnel),
     /// Delete one server's forwards together; any changed since being shown keeps all.
@@ -236,12 +233,12 @@ impl Action {
         use protocol::Operation as O;
         let operation = match self {
             Self::Save(tunnel) => O::SaveTunnel(Box::new(protocol::SaveTunnelArgs {
-                tunnel: desktop_inputs::tunnel(tunnel),
+                tunnel: protocol::Tunnel::from(tunnel),
             })),
             Self::Update { tunnel, expected } => {
                 O::UpdateTunnel(Box::new(protocol::UpdateTunnelArgs {
-                    tunnel: desktop_inputs::tunnel(tunnel),
-                    expected: desktop_inputs::tunnel(expected),
+                    tunnel: protocol::Tunnel::from(tunnel),
+                    expected: protocol::Tunnel::from(expected),
                 }))
             }
             Self::ForwardBatch {
@@ -250,8 +247,8 @@ impl Action {
                 connect,
             } => O::ForwardTunnelBatch(Box::new(protocol::ForwardTunnelBatchArgs {
                 server: *server,
-                create: create.iter().map(desktop_inputs::tunnel).collect(),
-                connect: connect.iter().map(desktop_inputs::tunnel).collect(),
+                create: create.iter().map(protocol::Tunnel::from).collect(),
+                connect: connect.iter().map(protocol::Tunnel::from).collect(),
                 expected: None,
             })),
             Self::Forward {
@@ -269,13 +266,22 @@ impl Action {
                 port,
                 name,
                 connection,
-            } => return forward_open::execute(*server, address, *port, name, connection, call),
+            } => {
+                return forward_open::execute(
+                    *server,
+                    address,
+                    *port,
+                    name,
+                    connection.as_ref(),
+                    call,
+                );
+            }
             Self::Delete(tunnel) => {
                 O::DeleteTunnel(Box::new(protocol::DeleteTunnelArgs { tunnel: tunnel.id }))
             }
             Self::DeleteMany { tunnels, .. } => {
                 O::DeleteTunnels(Box::new(protocol::DeleteTunnelsArgs {
-                    expected: tunnels.iter().map(desktop_inputs::tunnel).collect(),
+                    expected: tunnels.iter().map(protocol::Tunnel::from).collect(),
                 }))
             }
             Self::Open(tunnel) => O::OpenTunnel(Box::new(protocol::OpenTunnelArgs {
@@ -431,17 +437,6 @@ impl Operations {
         }
     }
 
-    #[cfg(test)]
-    fn with_fixture(
-        call: impl Fn(protocol::Operation) -> Result<Value, String> + Send + Sync + 'static,
-    ) -> Self {
-        Self::with_transport(move |operation| {
-            let kind = operation.kind();
-            let value = call(operation)?;
-            fixture_reply(kind, value)
-        })
-    }
-
     pub fn busy_tunnel(&self, tunnel: &Tunnel) -> bool {
         self.busy(&[Target::tunnel(tunnel)])
     }
@@ -532,170 +527,6 @@ impl Operations {
 }
 
 #[cfg(test)]
-fn observe_operation(operation: protocol::Operation) -> (&'static str, Value) {
-    use protocol::Operation as O;
-    let tunnel = crate::desktop_result::configuration::tunnel;
-    match operation {
-        O::Snapshot(_) => ("snapshot", json!({})),
-        O::SaveTunnel(args) => ("save_tunnel", json!({"tunnel":tunnel(args.tunnel)})),
-        O::UpdateTunnel(args) => (
-            "update_tunnel",
-            json!({"tunnel":tunnel(args.tunnel),"expected":tunnel(args.expected)}),
-        ),
-        O::ForwardTunnelBatch(args) => {
-            let mut value = json!({"serverId":args.server,"create":args.create.into_iter().map(tunnel).collect::<Vec<_>>(),"connect":args.connect.into_iter().map(tunnel).collect::<Vec<_>>()});
-            if let Some(expected) = args.expected {
-                value["expectedConnection"] = observe_scope(expected);
-            }
-            ("forward_tunnel_batch", value)
-        }
-        O::ForwardDiscoveredPort(args) => (
-            "forward_discovered_port",
-            json!({"serverId":args.server,"address":args.address,"port":args.port}),
-        ),
-        O::DeleteTunnel(args) => ("delete_tunnel", json!({"id":args.tunnel})),
-        O::DeleteTunnels(args) => (
-            "delete_tunnels",
-            json!({"tunnels":args.expected.into_iter().map(tunnel).collect::<Vec<_>>()}),
-        ),
-        O::SetTunnelConnected(args) => (
-            "set_tunnel_connected",
-            json!({"id":args.tunnel,"connected":args.connected}),
-        ),
-        O::OpenTunnel(args) => {
-            let mut value = json!({"id":args.tunnel});
-            if let Some(port) = args.remote_port {
-                value["remotePort"] = json!(port);
-            }
-            if let Some(expected) = args.expected {
-                value["expected"] = tunnel(expected);
-            }
-            if let Some(expected) = args.expected_connection {
-                value["expectedConnection"] = observe_scope(expected);
-            }
-            ("open_tunnel", value)
-        }
-        _ => panic!("unexpected forwarding operation"),
-    }
-}
-#[cfg(test)]
-fn observe_scope(value: protocol::ConnectionScope) -> Value {
-    let value_settings = value.settings;
-    let proxy = value_settings.proxy.map(|value| match value {
-        protocol::Proxy::Command(value) => json!({"command":*value}),
-        protocol::Proxy::Jump(value) => json!({"jump":*value}),
-    });
-    json!([
-        value_settings.server_id,
-        value_settings.ssh_host,
-        value_settings.ssh_user,
-        value_settings.ssh_port,
-        match value_settings.auth_method {
-            protocol::AuthMethod::PublicKey => "publicKey",
-            protocol::AuthMethod::Password => "password",
-        },
-        value_settings.identity_file,
-        value_settings.agent_source,
-        value_settings.agent_key_fingerprint,
-        proxy,
-        value.connection_revision,
-        value.backend_instance
-    ])
-}
-
-#[cfg(test)]
-fn fixture_reply(kind: desktop::Kind, value: Value) -> Result<protocol::Reply, String> {
-    use desktop::Kind;
-    let present = Box::new(newport_protocol::common::Present {});
-    Ok(match kind {
-        Kind::ConfigurationSaveTunnel => protocol::Reply::SaveTunnel(present),
-        Kind::ConfigurationUpdateTunnel => protocol::Reply::UpdateTunnel(present),
-        Kind::ConfigurationSetTunnelConnected => protocol::Reply::SetTunnelConnected(present),
-        Kind::ConfigurationForwardDiscoveredPort => protocol::Reply::ForwardDiscoveredPort(present),
-        Kind::ConfigurationDeleteTunnel => protocol::Reply::DeleteTunnel(present),
-        Kind::ConfigurationDeleteTunnels => protocol::Reply::DeleteTunnels(present),
-        Kind::ConfigurationOpenTunnel => protocol::Reply::OpenTunnel(present),
-        Kind::ConfigurationForwardTunnelBatch => {
-            let tunnels: Vec<Tunnel> =
-                serde_json::from_value(value).map_err(|error| error.to_string())?;
-            protocol::Reply::ForwardTunnelBatch(Box::new(protocol::Tunnels {
-                tunnels: tunnels.iter().map(desktop_inputs::tunnel).collect(),
-            }))
-        }
-        Kind::ConfigurationSnapshot => {
-            let servers = value["config"]["servers"]
-                .as_array()
-                .ok_or("missing fixture servers")?
-                .iter()
-                .map(|server| {
-                    desktop_inputs::server_record(server).map_err(|error| error.to_string())
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let tunnels: Vec<Tunnel> = serde_json::from_value(value["config"]["tunnels"].clone())
-                .map_err(|error| error.to_string())?;
-            let mut states = Vec::new();
-            for (id, state) in value["runtime"]["tunnels"]
-                .as_object()
-                .ok_or("missing fixture states")?
-            {
-                states.push(protocol::ConnectionRow {
-                    id: Uuid::parse_str(id).map_err(|error| error.to_string())?,
-                    value: protocol::ConnectionState {
-                        status: match state["status"].as_str().ok_or("missing fixture status")? {
-                            "connected" => protocol::ConnectionStatus::Connected,
-                            "connecting" => protocol::ConnectionStatus::Connecting,
-                            "reconnecting" => protocol::ConnectionStatus::Reconnecting,
-                            "error" => protocol::ConnectionStatus::Error,
-                            "disconnected" => protocol::ConnectionStatus::Disconnected,
-                            _ => return Err("invalid fixture status".into()),
-                        },
-                        error_message: state["errorMessage"].as_str().map(str::to_owned),
-                        reconnect_attempt: 0,
-                    },
-                });
-            }
-            let mut revisions = Vec::new();
-            if let Some(values) = value["runtime"]["connectionRevisions"].as_object() {
-                for (id, revision) in values {
-                    revisions.push(protocol::RevisionRow {
-                        id: Uuid::parse_str(id).map_err(|error| error.to_string())?,
-                        value: revision.as_u64().ok_or("missing fixture revision")?,
-                    });
-                }
-            }
-            protocol::Reply::Snapshot(Box::new(protocol::Snapshot {
-                instance_id: Uuid::parse_str(
-                    value["instanceId"]
-                        .as_str()
-                        .ok_or("missing fixture instance")?,
-                )
-                .map_err(|error| error.to_string())?,
-                revision: 0,
-                load_error: value["loadError"].as_str().map(str::to_owned),
-                config: protocol::Config {
-                    servers,
-                    tunnels: tunnels.iter().map(desktop_inputs::tunnel).collect(),
-                },
-                runtime: protocol::Runtime {
-                    agent_transport: vec![],
-                    agent_runtime: vec![],
-                    agent_permissions: vec![],
-                    agent_status: vec![],
-                    agent_installation: vec![],
-                    tunnels: states,
-                    tunnel_health: vec![],
-                    clipboard: vec![],
-                    clipboard_messages: vec![],
-                    connection_revisions: revisions,
-                    awaiting_agent: vec![],
-                },
-            }))
-        }
-        _ => return Err("unexpected forwarding fixture response".into()),
-    })
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use std::{sync::mpsc, time::Duration};
@@ -715,6 +546,22 @@ mod tests {
             project: None,
         }
     }
+    /// The backend's acknowledgement of a forwarding write.
+    pub(super) fn acknowledged(operation: &protocol::Operation) -> protocol::Reply {
+        use protocol::{Operation as O, Reply as R};
+        let present = Box::new(newport_protocol::common::Present {});
+        match operation {
+            O::SaveTunnel(_) => R::SaveTunnel(present),
+            O::UpdateTunnel(_) => R::UpdateTunnel(present),
+            O::SetTunnelConnected(_) => R::SetTunnelConnected(present),
+            O::ForwardDiscoveredPort(_) => R::ForwardDiscoveredPort(present),
+            O::DeleteTunnel(_) => R::DeleteTunnel(present),
+            O::DeleteTunnels(_) => R::DeleteTunnels(present),
+            O::OpenTunnel(_) => R::OpenTunnel(present),
+            _ => panic!("no acknowledgement for {operation:?}"),
+        }
+    }
+    type Calls = Arc<Mutex<Vec<protocol::Operation>>>;
     fn wait(ticket: &Ticket) -> Result<(), String> {
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         loop {
@@ -732,10 +579,10 @@ mod tests {
     fn open_preserves_default_endpoint_and_sends_selected_destination_once() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let seen = calls.clone();
-        let mut owner = Operations::with_fixture(move |operation| {
-            let (method, args) = observe_operation(operation);
-            seen.lock().unwrap().push((method.to_owned(), args));
-            Ok(Value::Null)
+        let mut owner = Operations::with_transport(move |operation| {
+            let reply = acknowledged(&operation);
+            seen.lock().unwrap().push(operation);
+            Ok(reply)
         });
         let mut t = tunnel(Uuid::new_v4(), 3000);
         t.remote_port_end = Some(3005);
@@ -752,20 +599,24 @@ mod tests {
             .unwrap();
         wait(&ticket).unwrap();
         assert_eq!(owner.poll()[0].kind, Kind::Open);
-        assert_eq!(
-            *calls.lock().unwrap(),
-            vec![
-                ("open_tunnel".to_owned(), json!({"id":t.id})),
-                (
-                    "open_tunnel".to_owned(),
-                    json!({"id":t.id,"remotePort":3003})
+        let opened: Vec<_> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|operation| match operation {
+                protocol::Operation::OpenTunnel(args) => (
+                    args.tunnel,
+                    args.remote_port,
+                    args.expected.is_none() && args.expected_connection.is_none(),
                 ),
-            ]
-        );
+                _ => panic!("expected an open: {operation:?}"),
+            })
+            .collect();
+        assert_eq!(opened, [(t.id, None, true), (t.id, Some(3003), true)]);
     }
     #[test]
     fn open_rejects_reverse_out_of_range_and_invalid_ranges_before_dispatch() {
-        let mut owner = Operations::with_fixture(|_| panic!("Invalid endpoint dispatched"));
+        let mut owner = Operations::with_transport(|_| panic!("Invalid endpoint dispatched"));
         let mut t = tunnel(Uuid::new_v4(), 3000);
         for remote_port in [0, 2999, 3001] {
             assert!(matches!(
@@ -800,9 +651,8 @@ mod tests {
     fn stale_edit_failure_never_falls_back_to_save_or_replays() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let seen = calls.clone();
-        let mut owner = Operations::with_fixture(move |operation| {
-            let (method, args) = observe_operation(operation);
-            seen.lock().unwrap().push((method.to_owned(), args));
+        let mut owner = Operations::with_transport(move |operation| {
+            seen.lock().unwrap().push(operation);
             Err("This forward was deleted while the editor was open.".into())
         });
         let original = tunnel(Uuid::new_v4(), 3000);
@@ -824,18 +674,17 @@ mod tests {
         assert_eq!(outcomes[0].kind, Kind::Save);
         assert!(owner.poll().is_empty());
         assert!(!owner.busy_tunnel(&original));
-        assert_eq!(
-            *calls.lock().unwrap(),
-            vec![(
-                "update_tunnel".into(),
-                json!({"tunnel":edited,"expected":original}),
-            )]
-        );
+        let calls = calls.lock().unwrap();
+        let [protocol::Operation::UpdateTunnel(args)] = calls.as_slice() else {
+            panic!("expected one update: {calls:?}");
+        };
+        assert_eq!(args.tunnel, protocol::Tunnel::from(&edited));
+        assert_eq!(args.expected, protocol::Tunnel::from(&original));
     }
 
     #[test]
     fn editing_a_different_identity_is_rejected_before_dispatch() {
-        let mut owner = Operations::with_fixture(|_| panic!("invalid edit dispatched"));
+        let mut owner = Operations::with_transport(|_| panic!("invalid edit dispatched"));
         let original = tunnel(Uuid::new_v4(), 3000);
         let mut edited = original.clone();
         edited.id = Uuid::new_v4();
@@ -854,11 +703,10 @@ mod tests {
         let (started_tx, started) = mpsc::channel();
         let (release, blocked) = mpsc::channel();
         let blocked = Mutex::new(blocked);
-        let mut owner = Operations::with_fixture(move |operation| {
-            let (method, _) = observe_operation(operation);
-            started_tx.send(method.to_owned()).unwrap();
+        let mut owner = Operations::with_transport(move |operation| {
+            started_tx.send(()).unwrap();
             blocked.lock().unwrap().recv().unwrap();
-            Ok(Value::Null)
+            Ok(acknowledged(&operation))
         });
         let server = Uuid::new_v4();
         let t = tunnel(server, 3000);
@@ -907,9 +755,9 @@ mod tests {
     fn ranges_conflict_but_other_destinations_and_servers_can_progress() {
         let (release, blocked) = mpsc::channel();
         let blocked = Mutex::new(blocked);
-        let mut owner = Operations::with_fixture(move |_| {
+        let mut owner = Operations::with_transport(move |operation| {
             blocked.lock().unwrap().recv().unwrap();
-            Ok(Value::Null)
+            Ok(acknowledged(&operation))
         });
         let server = Uuid::new_v4();
         let mut t = tunnel(server, 3000);
@@ -944,9 +792,8 @@ mod tests {
     fn errors_are_delivered_once_without_replaying_or_continuing_a_batch() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let seen = calls.clone();
-        let mut owner = Operations::with_fixture(move |operation| {
-            let (method, args) = observe_operation(operation);
-            seen.lock().unwrap().push((method.to_owned(), args));
+        let mut owner = Operations::with_transport(move |operation| {
+            seen.lock().unwrap().push(operation);
             Err("connection interrupted".into())
         });
         let server = Uuid::new_v4();
@@ -971,10 +818,10 @@ mod tests {
     fn batch_deduplicates_ids_and_rejects_cross_server_selection_before_dispatch() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let seen = calls.clone();
-        let mut owner = Operations::with_fixture(move |operation| {
-            let (method, args) = observe_operation(operation);
-            seen.lock().unwrap().push((method.to_owned(), args));
-            Ok(Value::Null)
+        let mut owner = Operations::with_transport(move |operation| {
+            let reply = acknowledged(&operation);
+            seen.lock().unwrap().push(operation);
+            Ok(reply)
         });
         let server = Uuid::new_v4();
         let a = tunnel(server, 3000);
@@ -995,7 +842,10 @@ mod tests {
             .unwrap();
         wait(&ticket).unwrap();
         assert_eq!(calls.lock().unwrap().len(), 1);
-        assert_eq!(calls.lock().unwrap()[0].1["connected"], false);
+        assert!(matches!(
+            &calls.lock().unwrap()[0],
+            protocol::Operation::SetTunnelConnected(args) if !args.connected
+        ));
     }
 
     #[test]
@@ -1009,12 +859,11 @@ mod tests {
         let resolved = protocol::Tunnels {
             tunnels: [&a, &b, &existing]
                 .into_iter()
-                .map(desktop_inputs::tunnel)
+                .map(protocol::Tunnel::from)
                 .collect(),
         };
         let mut owner = Operations::with_transport(move |operation| {
-            let (method, args) = observe_operation(operation);
-            seen.lock().unwrap().push((method.to_owned(), args));
+            seen.lock().unwrap().push(operation);
             Ok(protocol::Reply::ForwardTunnelBatch(Box::new(
                 resolved.clone(),
             )))
@@ -1027,12 +876,11 @@ mod tests {
             })
             .unwrap();
         wait(&ticket).unwrap();
-        assert_eq!(
-            *calls.lock().unwrap(),
-            vec![(
-                "forward_tunnel_batch".to_owned(),
-                json!({"serverId":server,"create":[a,b,a],"connect":[existing,existing]})
-            )]
+        assert_batch(
+            &calls,
+            server,
+            &[a.clone(), b.clone(), a.clone()],
+            &[existing.clone(), existing],
         );
         assert_eq!(owner.reserved_creations(), vec![a, b]);
         let outcomes = owner.poll();
@@ -1042,6 +890,20 @@ mod tests {
         assert_eq!(outcomes[0].server, server);
         assert_eq!(outcomes[0].result, Ok(()));
         assert!(owner.reserved_creations().is_empty());
+    }
+
+    /// Checks the one call sent was this batch, without a captured connection.
+    fn assert_batch(calls: &Calls, server: Uuid, create: &[Tunnel], connect: &[Tunnel]) {
+        let calls = calls.lock().unwrap();
+        let [protocol::Operation::ForwardTunnelBatch(args)] = calls.as_slice() else {
+            panic!("expected one batch: {calls:?}");
+        };
+        assert_eq!(args.server, server);
+        let tunnels =
+            |tunnels: &[Tunnel]| -> Vec<_> { tunnels.iter().map(protocol::Tunnel::from).collect() };
+        assert_eq!(args.create, tunnels(create));
+        assert_eq!(args.connect, tunnels(connect));
+        assert!(args.expected.is_none());
     }
 
     #[test]
@@ -1056,10 +918,8 @@ mod tests {
         ] {
             let calls = Arc::new(Mutex::new(Vec::new()));
             let seen = calls.clone();
-            let mut owner = Operations::with_fixture(move |operation| {
-                let (method, args) = observe_operation(operation);
-                let mut calls = seen.lock().unwrap();
-                calls.push((method.to_owned(), args));
+            let mut owner = Operations::with_transport(move |operation| {
+                seen.lock().unwrap().push(operation);
                 Err(error.into())
             });
             let ticket = owner
@@ -1078,12 +938,11 @@ mod tests {
             assert!(owner.poll().is_empty());
             assert!(owner.reserved_creations().is_empty());
             assert!(!owner.busy_tunnel(&existing));
-            assert_eq!(
-                *calls.lock().unwrap(),
-                vec![(
-                    "forward_tunnel_batch".to_owned(),
-                    json!({"serverId":server,"create":[a,b],"connect":[existing]})
-                )]
+            assert_batch(
+                &calls,
+                server,
+                &[a.clone(), b.clone()],
+                std::slice::from_ref(&existing),
             );
         }
     }
@@ -1092,10 +951,10 @@ mod tests {
     fn forward_batch_rejects_invalid_or_ambiguous_definitions_before_dispatch() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let seen = calls.clone();
-        let mut owner = Operations::with_fixture(move |operation| {
-            let (method, _) = observe_operation(operation);
-            seen.lock().unwrap().push(method.to_owned());
-            Ok(Value::Null)
+        let mut owner = Operations::with_transport(move |operation| {
+            let reply = acknowledged(&operation);
+            seen.lock().unwrap().push(operation);
+            Ok(reply)
         });
         let server = Uuid::new_v4();
         let a = tunnel(server, 3000);
@@ -1190,12 +1049,14 @@ mod tests {
         let resolved = protocol::Tunnels {
             tunnels: [&a, &existing]
                 .into_iter()
-                .map(desktop_inputs::tunnel)
+                .map(protocol::Tunnel::from)
                 .collect(),
         };
         let mut owner = Operations::with_transport(move |operation| {
-            let (method, _) = observe_operation(operation);
-            assert_eq!(method, "forward_tunnel_batch");
+            assert!(matches!(
+                operation,
+                protocol::Operation::ForwardTunnelBatch(_)
+            ));
             started_tx.send(()).unwrap();
             blocked.lock().unwrap().recv().unwrap();
             Ok(protocol::Reply::ForwardTunnelBatch(Box::new(
@@ -1240,7 +1101,7 @@ mod tests {
 
     #[test]
     fn saved_tunnels_are_also_reserved_for_parallel_port_planning() {
-        let mut owner = Operations::with_fixture(|_| Ok(Value::Null));
+        let mut owner = Operations::with_transport(|operation| Ok(acknowledged(&operation)));
         let t = tunnel(Uuid::new_v4(), 3000);
         let ticket = owner.start(Action::Save(t.clone())).unwrap();
         wait(&ticket).unwrap();

@@ -79,7 +79,7 @@ impl Registry {
         &self,
         id: Uuid,
         instance: Uuid,
-        expected: &serde_json::Value,
+        expected: &newport_protocol::desktop::configuration::ConnectionScope,
         browser: bool,
         enabled: bool,
     ) -> Result<
@@ -96,14 +96,9 @@ impl Registry {
         let owner = entries
             .get(&id)
             .ok_or("The server connection changed. Review its integrations and try again.")?;
-        let server = serde_json::to_value(owner.server()).map_err(|e| e.to_string())?;
-        let scope = newport_domain::connection_scope::connection(
-            &server,
-            &serde_json::json!({
-                "instanceId": instance, "runtime":{"connectionRevisions":{id.to_string():owner.revision}}
-            }),
-        );
-        if owner.is_revoked() || scope != *expected {
+        if owner.is_revoked()
+            || owner.server().connection_scope(owner.revision, instance) != *expected
+        {
             return Err(
                 "The server connection changed. Review its integrations and try again.".into(),
             );
@@ -1339,6 +1334,18 @@ struct Follower {
 /// Mirrors the link's status, publishes it to the app, and counts each time
 /// the link becomes ready.
 fn follow(link: &newport_ssh::Link, to: Follower) {
+    if let Some(publication) = to.publication.clone() {
+        let mut latency = link.latency();
+        tokio::spawn(async move {
+            loop {
+                publication.latency(*latency.borrow_and_update());
+                if latency.changed().await.is_err() {
+                    publication.latency(None);
+                    return;
+                }
+            }
+        });
+    }
     let mut status = link.status();
     tokio::spawn(async move {
         let mut was_ready = false;
@@ -1387,7 +1394,7 @@ const VIEWER_ANSWER: std::time::Duration = std::time::Duration::from_secs(30);
 /// its viewers learn which computer took it over by the name holders get.
 fn relay_arguments(hello: &newport_protocol::runtime::Hello) -> Result<Vec<String>, String> {
     hello
-        .require("remote-apps", 1)
+        .require(newport_protocol::runtime::service::REMOTE_APPS, 1)
         .map_err(|_| "Update Remote apps on this server to show its apps here.".to_owned())?;
     Ok(vec![
         "--attach".into(),
@@ -2258,7 +2265,7 @@ mod tests {
                     Err(error)
                         if error == busy
                             || matches!(&error, crate::agent_runtime::Error::Remote(remote)
-                                if remote.code == "busy"
+                                if remote.code == newport_protocol::common::BUSY
                                     && remote.retry == newport_protocol::common::Retry::Yes) =>
                     {
                         tokio::time::sleep(std::time::Duration::from_millis(10)).await;

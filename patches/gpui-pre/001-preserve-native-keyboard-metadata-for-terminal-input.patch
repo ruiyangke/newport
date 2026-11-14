@@ -1,0 +1,354 @@
+gpui: Preserve native keyboard metadata for terminal input
+
+Key events carry the physical key and the original layout and modifier
+metadata, without changing shortcut matching. macOS and Windows supply
+layout metadata; Linux and web keep optional fallbacks. Window::numlock()
+reads the current lock state, implemented on Windows. Synthetic events carry
+no native metadata.
+
+Newport needs it for terminal key encoding. KeyDownEvent and KeyUpEvent gain
+optional fields, so struct literals downstream must set them.
+
+Remove when GPUI exposes physical keys and layout metadata on key events.
+
+diff --git a/src/app/test_context.rs b/src/app/test_context.rs
+index 54b72a6..97f4b9f 100644
+--- a/src/app/test_context.rs
++++ b/src/app/test_context.rs
+@@ -1001,6 +1001,11 @@ impl VisualTestContext {
+         })
+     }
+ 
++    /// Set the current Num Lock state reported by the test platform.
++    pub fn simulate_numlock_change(&mut self, on: bool) {
++        self.test_window(self.window).simulate_numlock_change(on);
++    }
++
+     /// Simulate a capslock changed event
+     pub fn simulate_capslock_change(&mut self, on: bool) {
+         self.simulate_event(ModifiersChangedEvent {
+diff --git a/src/elements/div.rs b/src/elements/div.rs
+index 11f0b72..48fcf21 100644
+--- a/src/elements/div.rs
++++ b/src/elements/div.rs
+@@ -5510,6 +5510,8 @@ mod tests {
+         cx.update_window(window, |_, window, cx| {
+             window.dispatch_event(
+                 KeyDownEvent {
++                    physical_key: None,
++                    key_metadata: None,
+                     keystroke,
+                     is_held: false,
+                     prefer_character_input: false,
+@@ -5525,7 +5527,15 @@ mod tests {
+         let os = cx.read(|cx| cx.platform_info().os);
+         let keystroke = Keystroke::parse_with_os(key, os).unwrap();
+         cx.update_window(window, |_, window, cx| {
+-            window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
++            window.dispatch_event(
++                KeyUpEvent {
++                    physical_key: None,
++                    key_metadata: None,
++                    keystroke,
++                }
++                .to_platform_input(),
++                cx,
++            );
+         })
+         .unwrap();
+     }
+diff --git a/src/interactive.rs b/src/interactive.rs
+index cfb1410..521869f 100644
+--- a/src/interactive.rs
++++ b/src/interactive.rs
+@@ -20,12 +20,44 @@ pub trait MouseEvent: InputEvent {}
+ /// A gesture event from the platform.
+ pub trait GestureEvent: InputEvent {}
+ 
++/// An opaque physical key identity, independent of layout and modifiers.
++///
++/// Compare identities only within the current platform/backend. These values
++/// are not portable key bindings and must not be used to infer typed text.
++#[derive(Clone, Debug, Eq, PartialEq, Hash)]
++pub enum PhysicalKey {
++    /// The native backend's key/scancode, including extended-key information.
++    Native(u32),
++    /// A browser KeyboardEvent.code value identifying a physical key position.
++    Web(crate::SharedString),
++}
++
++/// Event-time native key information, independent of shortcut normalization.
++/// Synthetic events and backends without native metadata leave this absent.
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct KeyEventMetadata {
++    /// Text produced by this physical key in the current layout with no modifiers.
++    pub unmodified_text: Option<crate::SharedString>,
++    /// Modifier state before layout-dependent shortcut normalization.
++    pub modifiers: Modifiers,
++    /// Whether Caps Lock is enabled at the time of the event.
++    pub caps_lock: bool,
++    /// Whether Num Lock is enabled at the time of the event.
++    pub num_lock: bool,
++}
++
+ /// The key down event equivalent for the platform.
+ #[derive(Clone, Debug, Eq, PartialEq)]
+ pub struct KeyDownEvent {
+     /// The keystroke that was generated.
+     pub keystroke: Keystroke,
+ 
++    /// Physical identity when available; absent for synthetic text-only events.
++    pub physical_key: Option<PhysicalKey>,
++
++    /// Native layout and modifier state before shortcut normalization.
++    pub key_metadata: Option<KeyEventMetadata>,
++
+     /// Whether the key is currently held down.
+     pub is_held: bool,
+ 
+@@ -47,6 +79,12 @@ impl KeyEvent for KeyDownEvent {}
+ pub struct KeyUpEvent {
+     /// The keystroke that was released.
+     pub keystroke: Keystroke,
++
++    /// Physical identity when available; absent for synthetic text-only events.
++    pub physical_key: Option<PhysicalKey>,
++
++    /// Native layout and modifier state before shortcut normalization.
++    pub key_metadata: Option<KeyEventMetadata>,
+ }
+ 
+ impl Sealed for KeyUpEvent {}
+diff --git a/src/key_dispatch.rs b/src/key_dispatch.rs
+index 1e7a424..bb14bd4 100644
+--- a/src/key_dispatch.rs
++++ b/src/key_dispatch.rs
+@@ -947,6 +947,8 @@ mod tests {
+         cx.update(|window, cx| {
+             window.dispatch_event(
+                 PlatformInput::KeyDown(KeyDownEvent {
++                    physical_key: None,
++                    key_metadata: None,
+                     keystroke: Keystroke {
+                         key_char: Some("ą".into()),
+                         ..Keystroke::parse("ctrl-alt-a").expect("valid keystroke")
+diff --git a/src/platform.rs b/src/platform.rs
+index 90b3bc3..453a6cf 100644
+--- a/src/platform.rs
++++ b/src/platform.rs
+@@ -1253,6 +1253,10 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+     fn mouse_position(&self) -> Point<Pixels>;
+     fn modifiers(&self) -> Modifiers;
+     fn capslock(&self) -> Capslock;
++    /// Current Num Lock state, or None when this backend cannot report it.
++    fn numlock(&self) -> Option<bool> {
++        None
++    }
+     fn set_input_handler(&mut self, input_handler: PlatformInputHandler);
+     fn take_input_handler(&mut self) -> Option<PlatformInputHandler>;
+     /// Apply the focused text region's [`TextInputConfiguration`] to the
+diff --git a/src/platform/test/window.rs b/src/platform/test/window.rs
+index 5692b1e..3907129 100644
+--- a/src/platform/test/window.rs
++++ b/src/platform/test/window.rs
+@@ -54,6 +54,7 @@ pub(crate) struct TestWindowState {
+     text_input_configurations: Vec<TextInputConfiguration>,
+     text_input_state_changes: Vec<TextInputStateChange>,
+     is_fullscreen: bool,
++    numlock: Option<bool>,
+     scale_factor: f32,
+     appearance: WindowAppearance,
+     external_drag_files: Vec<(PathBuf, bool)>,
+@@ -101,6 +102,7 @@ impl TestWindow {
+             sprite_atlas,
+             renderer,
+             title: Default::default(),
++            numlock: None,
+             edited: false,
+             document_path: None,
+             should_close_handler: None,
+@@ -158,6 +160,11 @@ impl TestWindow {
+         self.0.lock().frame_scheduled
+     }
+ 
++    /// Set the current Num Lock state reported by this test backend.
++    pub fn simulate_numlock_change(&self, on: bool) {
++        self.0.lock().numlock = Some(on);
++    }
++
+     pub fn simulate_visibility_change(&self, visibility: WindowVisibility) {
+         let callback = {
+             let mut state = self.0.lock();
+@@ -378,6 +385,10 @@ impl PlatformWindow for TestWindow {
+         crate::Capslock::default()
+     }
+ 
++    fn numlock(&self) -> Option<bool> {
++        self.0.lock().numlock
++    }
++
+     fn set_input_handler(&mut self, input_handler: PlatformInputHandler) {
+         self.0.lock().input_handler = Some(input_handler);
+     }
+diff --git a/src/window.rs b/src/window.rs
+index c559412..18fb7f3 100644
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -3435,6 +3435,12 @@ impl Window {
+         self.capslock
+     }
+ 
++    /// Current Num Lock state, or None when the platform cannot report it.
++    /// Query the backend so focus-loss releases do not reuse a previous key event.
++    pub fn numlock(&self) -> Option<bool> {
++        self.platform_window.numlock()
++    }
++
+     /// Produces a new frame and assigns it to `rendered_frame`. To actually show
+     /// the contents of the new [`Scene`], use [`Self::present`].
+     #[profiling::function]
+@@ -5592,6 +5598,8 @@ impl Window {
+         let keystroke = keystroke.with_simulated_ime();
+         let result = self.dispatch_event(
+             PlatformInput::KeyDown(KeyDownEvent {
++                physical_key: None,
++                key_metadata: None,
+                 keystroke: keystroke.clone(),
+                 is_held: false,
+                 prefer_character_input: false,
+@@ -6471,6 +6479,8 @@ impl Window {
+ 
+         'replay: for replay in replays {
+             let event = KeyDownEvent {
++                physical_key: None,
++                key_metadata: None,
+                 keystroke: replay.keystroke.clone(),
+                 is_held: false,
+                 prefer_character_input: true,
+@@ -8978,6 +8988,8 @@ mod tests {
+             window.draw(cx).clear(cx);
+             window.dispatch_event(
+                 PlatformInput::KeyDown(KeyDownEvent {
++                    physical_key: None,
++                    key_metadata: None,
+                     keystroke: Keystroke::parse("down").expect("valid keystroke"),
+                     is_held: false,
+                     prefer_character_input: false,
+diff --git a/tests/physical_key.rs b/tests/physical_key.rs
+new file mode 100644
+index 0000000..b4da820
+--- /dev/null
++++ b/tests/physical_key.rs
+@@ -0,0 +1,112 @@
++use gpui::prelude::*;
++use std::{cell::RefCell, rc::Rc};
++
++struct KeyObserver {
++    focus: gpui::FocusHandle,
++    seen: Rc<
++        RefCell<
++            Vec<(
++                Option<gpui::PhysicalKey>,
++                Option<gpui::KeyEventMetadata>,
++                String,
++                bool,
++            )>,
++        >,
++    >,
++}
++
++impl Render for KeyObserver {
++    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
++        let down = self.seen.clone();
++        let up = self.seen.clone();
++        gpui::div()
++            .track_focus(&self.focus)
++            .on_key_down(move |event, _, _| {
++                down.borrow_mut().push((
++                    event.physical_key.clone(),
++                    event.key_metadata.clone(),
++                    event.keystroke.key.clone(),
++                    event.is_held,
++                ));
++            })
++            .on_key_up(move |event, _, _| {
++                up.borrow_mut().push((
++                    event.physical_key.clone(),
++                    event.key_metadata.clone(),
++                    event.keystroke.key.clone(),
++                    false,
++                ));
++            })
++    }
++}
++
++#[gpui::test]
++fn physical_key_identity_survives_dispatch_modifier_changes_and_repeat(
++    cx: &mut gpui::TestAppContext,
++) {
++    let seen = Rc::new(RefCell::new(Vec::new()));
++    let (view, cx) = cx.add_window_view(|_, cx| KeyObserver {
++        focus: cx.focus_handle(),
++        seen: seen.clone(),
++    });
++    cx.update(|window, cx| {
++        let focus = view.read(cx).focus.clone();
++        focus.focus(window, cx);
++        window.activate_window();
++        window.draw(cx).clear(cx);
++    });
++    let physical = Some(gpui::PhysicalKey::Native(18));
++    let metadata = Some(gpui::KeyEventMetadata {
++        unmodified_text: Some("1".into()),
++        modifiers: gpui::Modifiers {
++            shift: true,
++            ..Default::default()
++        },
++        caps_lock: true,
++        num_lock: false,
++    });
++    for is_held in [false, true] {
++        cx.simulate_event(gpui::KeyDownEvent {
++            physical_key: physical.clone(),
++            key_metadata: metadata.clone(),
++            keystroke: gpui::Keystroke::parse("!").unwrap(),
++            is_held,
++            prefer_character_input: false,
++        });
++    }
++    cx.simulate_event(gpui::KeyUpEvent {
++        physical_key: physical.clone(),
++        key_metadata: None,
++        keystroke: gpui::Keystroke::parse("1").unwrap(),
++    });
++    // Synthetic text has no claimed hardware origin.
++    cx.simulate_event(gpui::KeyDownEvent {
++        physical_key: None,
++        key_metadata: None,
++        keystroke: gpui::Keystroke::parse("x").unwrap(),
++        is_held: false,
++        prefer_character_input: false,
++    });
++    assert_eq!(
++        *seen.borrow(),
++        vec![
++            (physical.clone(), metadata.clone(), "!".into(), false),
++            (physical.clone(), metadata, "!".into(), true),
++            (physical, None, "1".into(), false),
++            (None, None, "x".into(), false),
++        ]
++    );
++}
++
++#[gpui::test]
++fn numlock_query_reports_unknown_then_current_backend_state(cx: &mut gpui::TestAppContext) {
++    let (_, cx) = cx.add_window_view(|_, cx| KeyObserver {
++        focus: cx.focus_handle(),
++        seen: Rc::new(RefCell::new(Vec::new())),
++    });
++    assert_eq!(cx.update(|window, _| window.numlock()), None);
++    cx.simulate_numlock_change(true);
++    assert_eq!(cx.update(|window, _| window.numlock()), Some(true));
++    cx.simulate_numlock_change(false);
++    assert_eq!(cx.update(|window, _| window.numlock()), Some(false));
++}

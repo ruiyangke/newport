@@ -114,7 +114,7 @@ pub enum Operation {
     ComposeJobs(Box<crate::desktop::containers::ComposeJobsArgs>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Reply {
     Snapshot(Box<crate::monitor::containers::ContainersSnapshot>),
     Inspect(Box<crate::monitor::containers::ContainerInspect>),

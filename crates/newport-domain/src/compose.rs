@@ -1,54 +1,15 @@
-//! Compose read contracts and Activity presentation rules shared by clients.
-//! Field names and order match the shared backend Compose contract; job offsets are
-//! cumulative UTF-8 byte positions in the agent's cleaned command output.
+//! Compose Activity and service rules over the protocol's Compose types,
+//! shared by clients. Job offsets are cumulative UTF-8 byte positions in the
+//! agent's cleaned command output.
 use crate::{
-    containers::{Container, ProjectGroup, Tone, is_running},
+    containers::{ProjectGroup, Tone, is_running},
     containers_log::{Severity, severity},
     services::duration,
 };
-use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ComposeCliKind {
-    #[default]
-    Plugin,
-    Standalone,
-    Podman,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct ComposeCli {
-    pub kind: ComposeCliKind,
-    pub version: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct ComposeFile {
-    pub path: String,
-    pub text: Option<String>,
-    pub error: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct ComposeService {
-    pub name: String,
-    pub image: Option<String>,
-    pub build: bool,
-    pub profiles: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ComposeProject {
-    pub cli: Option<ComposeCli>,
-    pub cli_error: Option<String>,
-    pub working_dir: Option<String>,
-    pub config_files: Vec<String>,
-    pub files: Vec<ComposeFile>,
-    pub services: Option<Vec<ComposeService>>,
-    pub config_error: Option<String>,
-}
+use newport_protocol::monitor::{
+    compose::{Job, Project, State},
+    containers::Container,
+};
 
 /// A defined service (including one not created yet) or an existing replica
 /// whose service is no longer in the Compose configuration.
@@ -69,7 +30,7 @@ pub struct ServiceRow<'a> {
 /// undeclared existing services last; one-off jobs never supply a service row.
 pub fn service_rows<'a>(
     group: &ProjectGroup<'a>,
-    project: Option<&'a ComposeProject>,
+    project: Option<&'a Project>,
 ) -> Vec<ServiceRow<'a>> {
     let defined = project.and_then(|project| project.services.as_deref());
     let mut rows = Vec::new();
@@ -152,74 +113,19 @@ pub fn service_replicas(group: &ProjectGroup<'_>, service: &str) -> usize {
         .count()
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum JobState {
-    #[default]
-    Running,
-    Succeeded,
-    Failed,
-    Cancelled,
-}
-
-impl JobState {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-
-    pub const fn is_running(self) -> bool {
-        matches!(self, Self::Running)
-    }
-
-    pub const fn tone(self) -> Tone {
-        match self {
-            Self::Running => Tone::Muted,
-            Self::Succeeded => Tone::Success,
-            Self::Failed | Self::Cancelled => Tone::Danger,
-        }
+pub const fn job_tone(state: State) -> Tone {
+    match state {
+        State::Running => Tone::Muted,
+        State::Succeeded => Tone::Success,
+        State::Failed | State::Cancelled => Tone::Danger,
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ComposeJob {
-    pub job: String,
-    pub project: String,
-    pub command: String,
-    pub state: JobState,
-    pub exit_code: Option<i64>,
-    /// Epoch milliseconds.
-    pub started_at: i64,
-    /// Epoch milliseconds.
-    pub finished_at: Option<i64>,
-    /// The returned output suffix, or the retained contiguous suffix after
-    /// client accumulation. Job listings carry an empty string here.
-    pub output: String,
-    /// Cumulative byte position immediately after `output`. Listings use zero.
-    pub offset: u64,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct ComposeJobs {
-    /// Agent insertion order, newest first. Preserve this order when filtering:
-    /// wall-clock timestamps may tie or move backwards.
-    pub jobs: Vec<ComposeJob>,
-}
-
-pub fn project_jobs<'a>(jobs: &'a [ComposeJob], project: &str) -> Vec<&'a ComposeJob> {
+pub fn project_jobs<'a>(jobs: &'a [Job], project: &str) -> Vec<&'a Job> {
     jobs.iter().filter(|job| job.project == project).collect()
 }
 
-pub fn selected_job<'a>(
-    jobs: &'a [ComposeJob],
-    project: &str,
-    chosen: Option<&str>,
-) -> Option<&'a ComposeJob> {
+pub fn selected_job<'a>(jobs: &'a [Job], project: &str, chosen: Option<&str>) -> Option<&'a Job> {
     chosen
         .and_then(|chosen| {
             jobs.iter()
@@ -228,12 +134,12 @@ pub fn selected_job<'a>(
         .or_else(|| jobs.iter().find(|job| job.project == project))
 }
 
-pub fn running_job<'a>(jobs: &'a [ComposeJob], project: &str) -> Option<&'a ComposeJob> {
+pub fn running_job<'a>(jobs: &'a [Job], project: &str) -> Option<&'a Job> {
     jobs.iter()
         .find(|job| job.project == project && job.state.is_running())
 }
 
-pub fn job_duration(job: &ComposeJob, now: i64) -> String {
+pub fn job_duration(job: &Job, now: i64) -> String {
     duration(
         job.finished_at
             .unwrap_or(now)
@@ -249,22 +155,22 @@ pub struct JobStatus {
 
 /// The recorded state remains authoritative, including cancellation with no
 /// exit code. Completed durations stop at `finished_at` instead of ticking.
-pub fn job_status(job: &ComposeJob, now: i64) -> JobStatus {
+pub fn job_status(job: &Job, now: i64) -> JobStatus {
     let elapsed = job_duration(job, now);
     let label = match job.state {
-        JobState::Running => format!("Running · {elapsed}"),
-        JobState::Succeeded => format!("Succeeded in {elapsed}"),
-        JobState::Failed => format!(
+        State::Running => format!("Running · {elapsed}"),
+        State::Succeeded => format!("Succeeded in {elapsed}"),
+        State::Failed => format!(
             "Failed (exit {}) after {elapsed}",
             job.exit_code
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "?".into())
         ),
-        JobState::Cancelled => format!("Cancelled after {elapsed}"),
+        State::Cancelled => format!("Cancelled after {elapsed}"),
     };
     JobStatus {
         label,
-        tone: job.state.tone(),
+        tone: job_tone(job.state),
     }
 }
 
@@ -303,85 +209,26 @@ pub fn output_lines(output: &str, end_offset: u64) -> Result<Vec<OutputLine<'_>>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::containers::{ComposeLabels, ContainerState, group_containers};
-    use serde_json::json;
+    use crate::containers::group_containers;
+    use newport_protocol::monitor::containers::{ComposeLabels, ContainerState};
 
-    fn job(id: &str, project: &str, state: JobState) -> ComposeJob {
-        ComposeJob {
+    fn job(id: &str, project: &str, state: State) -> Job {
+        Job {
             job: id.into(),
             project: project.into(),
             command: "docker compose up -d".into(),
             state,
             started_at: 1000,
-            ..ComposeJob::default()
+            ..Job::default()
         }
-    }
-
-    #[test]
-    fn job_projection_preserves_names_and_states() {
-        let value = json!({"job":"j1", "project":"app", "command":"docker compose up -d", "state":"failed", "exitCode":17, "startedAt":1000, "finishedAt":2500, "output":"failed\n", "offset":7});
-        let typed: ComposeJob = serde_json::from_value(value.clone()).unwrap();
-        assert_eq!(serde_json::to_value(&typed).unwrap(), value);
-        for state in [
-            JobState::Running,
-            JobState::Succeeded,
-            JobState::Failed,
-            JobState::Cancelled,
-        ] {
-            assert_eq!(serde_json::to_value(state).unwrap(), json!(state.as_str()));
-        }
-        let mut additive = value.clone();
-        additive["newAgentField"] = json!({"allowed":true});
-        assert_eq!(
-            serde_json::from_value::<ComposeJob>(additive).unwrap(),
-            typed
-        );
-        for required in [
-            "job",
-            "project",
-            "command",
-            "state",
-            "startedAt",
-            "output",
-            "offset",
-        ] {
-            let mut invalid = value.clone();
-            invalid.as_object_mut().unwrap().remove(required);
-            assert!(
-                serde_json::from_value::<ComposeJob>(invalid).is_err(),
-                "{required}"
-            );
-        }
-        let mut invalid = value;
-        invalid["state"] = json!("unknown");
-        assert!(serde_json::from_value::<ComposeJob>(invalid).is_err());
-        assert!(serde_json::from_value::<ComposeJobs>(json!({})).is_err());
-        assert_eq!(
-            serde_json::from_value::<ComposeJobs>(json!({"jobs":[],"more":true}))
-                .unwrap()
-                .jobs,
-            []
-        );
-    }
-
-    #[test]
-    fn project_contract_keeps_nullable_configuration_and_nested_fields() {
-        let value = json!({"cli":{"kind":"podman","version":"1.2"},"cliError":null,"workingDir":"/srv/app","configFiles":["compose.yml"],"files":[{"path":"/srv/app/compose.yml","text":"services: {}\n","error":null}],"services":[{"name":"web","image":null,"build":true,"profiles":["dev"]}],"configError":null});
-        let project: ComposeProject = serde_json::from_value(value.clone()).unwrap();
-        assert_eq!(serde_json::to_value(&project).unwrap(), value);
-        let unavailable: ComposeProject = serde_json::from_value(json!({"cli":null,"cliError":"not installed","workingDir":null,"configFiles":[],"files":[],"services":null,"configError":"cannot read"})).unwrap();
-        assert!(unavailable.cli.is_none());
-        assert!(unavailable.services.is_none());
-        assert_eq!(unavailable.config_error.as_deref(), Some("cannot read"));
-        assert!(serde_json::from_value::<ComposeProject>(json!({})).is_err());
     }
 
     #[test]
     fn project_selection_preserves_agent_order_and_rejects_another_projects_choice() {
         let mut jobs = vec![
-            job("other", "db", JobState::Running),
-            job("new", "app", JobState::Succeeded),
-            job("old", "app", JobState::Running),
+            job("other", "db", State::Running),
+            job("new", "app", State::Succeeded),
+            job("old", "app", State::Running),
         ];
         jobs[1].started_at = 1;
         jobs[2].started_at = 9000;
@@ -404,7 +251,7 @@ mod tests {
 
     #[test]
     fn status_uses_recorded_outcome_exit_code_and_finished_time() {
-        let mut row = job("j1", "app", JobState::Running);
+        let mut row = job("j1", "app", State::Running);
         assert_eq!(
             job_status(&row, 2499),
             JobStatus {
@@ -416,38 +263,28 @@ mod tests {
         assert_eq!(job_duration(&row, 0), "0s");
         row.finished_at = Some(2500);
         for (state, code, label, tone) in [
+            (State::Succeeded, Some(0), "Succeeded in 2s", Tone::Success),
             (
-                JobState::Succeeded,
-                Some(0),
-                "Succeeded in 2s",
-                Tone::Success,
-            ),
-            (
-                JobState::Failed,
+                State::Failed,
                 Some(17),
                 "Failed (exit 17) after 2s",
                 Tone::Danger,
             ),
             (
-                JobState::Failed,
+                State::Failed,
                 None,
                 "Failed (exit ?) after 2s",
                 Tone::Danger,
             ),
             (
-                JobState::Cancelled,
+                State::Cancelled,
                 Some(130),
                 "Cancelled after 2s",
                 Tone::Danger,
             ),
+            (State::Cancelled, None, "Cancelled after 2s", Tone::Danger),
             (
-                JobState::Cancelled,
-                None,
-                "Cancelled after 2s",
-                Tone::Danger,
-            ),
-            (
-                JobState::Failed,
+                State::Failed,
                 Some(0),
                 "Failed (exit 0) after 2s",
                 Tone::Danger,
@@ -545,24 +382,24 @@ mod tests {
         ];
         let groups = group_containers(&containers);
         let group = &groups.projects[0];
-        let project = ComposeProject {
+        let project = Project {
             services: Some(vec![
-                ComposeService {
+                newport_protocol::monitor::compose::Service {
                     name: "db".into(),
-                    ..ComposeService::default()
+                    ..newport_protocol::monitor::compose::Service::default()
                 },
-                ComposeService {
+                newport_protocol::monitor::compose::Service {
                     name: "worker".into(),
                     profiles: vec!["background".into(), "dev".into()],
-                    ..ComposeService::default()
+                    ..newport_protocol::monitor::compose::Service::default()
                 },
-                ComposeService {
+                newport_protocol::monitor::compose::Service {
                     name: "web".into(),
                     build: true,
-                    ..ComposeService::default()
+                    ..newport_protocol::monitor::compose::Service::default()
                 },
             ]),
-            ..ComposeProject::default()
+            ..Project::default()
         };
         let rows = service_rows(group, Some(&project));
         assert_eq!(
@@ -596,19 +433,19 @@ mod tests {
         ];
         let groups = group_containers(&containers);
         let group = &groups.projects[0];
-        let project = ComposeProject {
+        let project = Project {
             services: Some(vec![
-                ComposeService {
+                newport_protocol::monitor::compose::Service {
                     name: "web".into(),
-                    ..ComposeService::default()
+                    ..newport_protocol::monitor::compose::Service::default()
                 },
-                ComposeService {
+                newport_protocol::monitor::compose::Service {
                     name: "migrate".into(),
                     profiles: vec!["tools".into()],
-                    ..ComposeService::default()
+                    ..newport_protocol::monitor::compose::Service::default()
                 },
             ]),
-            ..ComposeProject::default()
+            ..Project::default()
         };
         let rows = service_rows(group, Some(&project));
         assert_eq!(rows.len(), 6);
@@ -629,7 +466,7 @@ mod tests {
         let containers = vec![container("web", 1, ContainerState::Running, false)];
         let groups = group_containers(&containers);
         let group = &groups.projects[0];
-        for project in [None, Some(&ComposeProject::default())] {
+        for project in [None, Some(&Project::default())] {
             let rows = service_rows(group, project);
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].service, "web");
@@ -637,9 +474,9 @@ mod tests {
             assert!(!rows[0].orphaned);
             assert_eq!(rows[0].running_replicas, 1);
         }
-        let empty = ComposeProject {
+        let empty = Project {
             services: Some(vec![]),
-            ..ComposeProject::default()
+            ..Project::default()
         };
         assert!(service_rows(group, Some(&empty))[0].orphaned);
     }

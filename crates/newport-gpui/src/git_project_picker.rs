@@ -1,21 +1,19 @@
 //! Repository navigation uses saved bookmarks, never discovered worktrees.
 use super::*;
+use desktop::preferences::Project;
 
 /// Resolve at activation time: a menu can outlive a rename, removal or server
 /// change. Keep byte paths intact and never dispatch its captured stale row.
-fn destination(projects: &Value, server: &str, captured: &Value) -> Option<Value> {
-    let id = captured["id"].as_str()?;
-    let path = captured["path"]["bytesB64"].as_str()?;
-    if captured["serverId"].as_str() != Some(server) {
+fn destination(projects: &[Project], server: &str, captured: &Project) -> Option<Project> {
+    if captured.server.to_string() != server {
         return None;
     }
     projects
-        .as_array()?
         .iter()
         .find(|project| {
-            project["id"].as_str() == Some(id)
-                && project["serverId"].as_str() == Some(server)
-                && project["path"]["bytesB64"].as_str() == Some(path)
+            project.id == captured.id
+                && project.server == captured.server
+                && project.path.bytes_b64 == captured.path.bytes_b64
         })
         .cloned()
 }
@@ -23,21 +21,25 @@ fn destination(projects: &Value, server: &str, captured: &Value) -> Option<Value
 /// Bookmarks belong to the server; every other read belongs to the checkout.
 /// Removing the old generations also rejects late open/diff/preflight replies.
 pub(super) fn clear_checkout(resources: &mut newport_client::resources::Resources) {
-    let _ = resources.take_prefix_except("", &["page"]);
+    let _ = resources.take_prefix_except("", &["projects"]);
 }
 
 impl Newport {
-    pub(super) fn open_saved_project(&mut self, captured: &Value, cx: &mut Context<Self>) {
+    pub(super) fn open_saved_project(&mut self, captured: &Project, cx: &mut Context<Self>) {
         if self.page != Page::Projects || self.git_write_pending() || self.project_dialog_open {
             return;
         }
-        let Some(project) = destination(&self.value("page"), &self.server, captured) else {
+        let Some(project) = destination(
+            self.library_projects().unwrap_or_default(),
+            &self.server,
+            captured,
+        ) else {
             return;
         };
         if self
             .selection
             .as_ref()
-            .is_some_and(|current| current["id"] == project["id"])
+            .is_some_and(|current| current.id == project.id)
         {
             return;
         }
@@ -45,8 +47,9 @@ impl Newport {
         clear_checkout(&mut self.resources);
         self.restore_git = None;
         self.git = git::Workspace::default();
-        self.selection = Some(project.clone());
-        self.git_request_open(project["path"].clone());
+        let path = project.path.clone();
+        self.selection = Some(project);
+        self.git_request_open(path);
         self.save_workspace_selection();
         cx.notify();
     }
@@ -55,7 +58,7 @@ impl Newport {
         let name = self
             .selection
             .as_ref()
-            .map(|project| text(project, "name"))
+            .map(|project| project.name.clone())
             .unwrap_or_default();
         let busy = self.git_write_pending() || self.project_dialog_open;
         let owner = cx.weak_entity();
@@ -70,8 +73,8 @@ impl Newport {
                 let this = entity.read(cx);
                 let server = this.server.clone();
                 let busy = this.git_write_pending() || this.project_dialog_open;
-                let current = this.selection.as_ref().map(|project| project["id"].clone());
-                let projects = rows(&this.value("page"));
+                let current = this.selection.as_ref().map(|project| project.id);
+                let projects = this.library_projects().unwrap_or_default().to_vec();
                 let back = owner.clone();
                 let back_server = server.clone();
                 menu = menu
@@ -98,12 +101,12 @@ impl Newport {
                     .separator();
                 for project in projects
                     .into_iter()
-                    .filter(|project| project["serverId"].as_str() == Some(&server))
+                    .filter(|project| project.server.to_string() == server)
                 {
                     let open = owner.clone();
-                    let selected = current.as_ref() == Some(&project["id"]);
+                    let selected = current == Some(project.id);
                     menu = menu.item(
-                        PopupMenuItem::new(text(&project, "name"))
+                        PopupMenuItem::new(project.name.clone())
                             .icon(IconName::FolderGit2)
                             .checked(selected)
                             .disabled(busy || selected)
@@ -122,42 +125,42 @@ impl Newport {
 #[cfg(test)]
 mod tests {
     use super::{clear_checkout, destination};
+    use crate::project_library_state::typed_fixture::{TYPED_SECOND, TYPED_SERVER, bookmark};
     use newport_client::resources::Resources;
-    use serde_json::{Value, json};
 
     #[test]
     fn stale_picker_cannot_open_removed_moved_or_other_server_bookmarks() {
-        let captured =
-            json!({"id":"project", "serverId":"a", "path":{"bytesB64":"L3JlcG8="}, "name":"Old"});
+        let captured = bookmark(1, TYPED_SERVER, "Old", "/repo");
         let mut renamed = captured.clone();
-        renamed["name"] = json!("New");
+        renamed.name = "New".into();
         assert_eq!(
-            destination(&json!([renamed]), "a", &captured),
+            destination(std::slice::from_ref(&renamed), TYPED_SERVER, &captured),
             Some(renamed)
         );
-        assert!(destination(&json!([captured]), "b", &captured).is_none());
-        assert!(destination(&json!([]), "a", &captured).is_none());
+        assert!(destination(std::slice::from_ref(&captured), TYPED_SECOND, &captured).is_none());
+        assert!(destination(&[], TYPED_SERVER, &captured).is_none());
         let mut moved = captured.clone();
-        moved["path"]["bytesB64"] = json!("L290aGVy");
-        assert!(destination(&json!([moved]), "a", &captured).is_none());
-        assert!(destination(&json!([]), "a", &Value::Null).is_none());
+        moved.path = newport_protocol::git::Path::new(b"/other");
+        assert!(destination(&[moved], TYPED_SERVER, &captured).is_none());
+        let mut foreign = captured.clone();
+        foreign.server = uuid::Uuid::parse_str(TYPED_SECOND).unwrap();
+        assert!(destination(std::slice::from_ref(&captured), TYPED_SERVER, &foreign).is_none());
     }
 
     #[test]
     fn switching_preserves_bookmarks_and_rejects_late_checkout_responses() {
         let mut resources = Resources::default();
-        let bookmarks = resources.begin("page").unwrap();
-        let rows = json!([{"id":"project", "serverId":"a"}]);
-        resources.complete("page", bookmarks, Ok(rows.clone()));
+        let bookmarks = resources.begin("projects").unwrap();
+        resources.complete_owned("projects", bookmarks, Ok(true));
         let old_open = resources.begin("repository").unwrap();
         let old_review = resources.begin("git-sync-review-status").unwrap();
         let old_diff = resources.begin("git-diff").unwrap();
         clear_checkout(&mut resources);
-        assert_eq!(resources.get("page").unwrap().value, rows);
+        assert_eq!(resources.get("projects").unwrap().data_revision, bookmarks);
         let new_open = resources.begin("repository").unwrap();
-        assert!(!resources.complete("repository", old_open, Ok(json!({"repoId":"old"}))));
-        assert!(!resources.complete("git-sync-review-status", old_review, Ok(json!({}))));
-        assert!(!resources.complete("git-diff", old_diff, Ok(json!({}))));
-        assert!(resources.complete("repository", new_open, Ok(json!({"repoId":"new"}))));
+        assert!(!resources.complete_owned("repository", old_open, Ok(true)));
+        assert!(!resources.complete_owned("git-sync-review-status", old_review, Ok(true)));
+        assert!(!resources.complete_owned("git-diff", old_diff, Ok(true)));
+        assert!(resources.complete_owned("repository", new_open, Ok(true)));
     }
 }

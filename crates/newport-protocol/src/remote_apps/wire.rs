@@ -8,6 +8,9 @@ use crate::remote_apps::v1::{ClientMessage, ServerMessage};
 use prost::Message;
 use std::io::{self, Read, Write};
 
+#[cfg(test)]
+pub(crate) use super::convert::enum_maps;
+
 /// Why a message could not be read, including whether its entire frame was consumed.
 #[derive(Debug, thiserror::Error)]
 pub enum ReadError {

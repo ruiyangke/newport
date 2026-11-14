@@ -28,7 +28,7 @@ pub fn install(remote_apps: RemoteApps) -> Result<(), String> {
     let profile = newport_backend::profile::directory()?;
     let service_name = stubs::service_name(&host_bundle_id, &profile)?;
     let writer = launchers::Writer {
-        root: profile.join("Remote Apps"),
+        root: profile.join(newport_backend::profile::LAUNCHERS),
         stub_binary,
         host_bundle_id,
         service_name,

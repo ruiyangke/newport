@@ -2,7 +2,8 @@
 //! this module owns their table presentation and scoped navigation/controls.
 use super::*;
 use gpui_kit::base::ObservedElement;
-use newport_domain::compose::{ComposeProject, ServiceRow, service_rows};
+use newport_domain::compose::{ServiceRow, service_rows};
+use newport_protocol::monitor::compose;
 use newport_protocol::monitor::compose::Action as ComposeAction;
 
 #[cfg(test)]
@@ -12,7 +13,7 @@ mod tests;
 /// Count missing definitions without constructing and sorting all replica rows.
 pub(super) fn missing_count(
     group: &domain::ProjectGroup<'_>,
-    project: Option<&ComposeProject>,
+    project: Option<&compose::Project>,
 ) -> usize {
     let Some(services) = project.and_then(|project| project.services.as_ref()) else {
         return 0;
@@ -38,7 +39,7 @@ const PAGE_SIZE: usize = 40;
 // Retain row data and focus handles across refreshes; mount only the current page.
 struct OwnedRow {
     service: String,
-    container: Option<domain::Container>,
+    container: Option<Container>,
     profiles: Vec<String>,
     build: bool,
     defined: bool,
@@ -58,8 +59,16 @@ impl OwnedRow {
         }
     }
 }
+/// What the service table was measured and built from.
+#[derive(PartialEq)]
+struct ServiceTableKey {
+    group: String,
+    revision: u64,
+    project: Option<compose::Project>,
+    font_family: String,
+}
 pub(super) struct TableCache {
-    key: Value,
+    key: Option<ServiceTableKey>,
     rows: Rc<Vec<OwnedRow>>,
     columns: Rc<ServiceColumns>,
     page: usize,
@@ -68,7 +77,7 @@ pub(super) struct TableCache {
 impl Default for TableCache {
     fn default() -> Self {
         Self {
-            key: Value::Null,
+            key: None,
             rows: Rc::new(vec![]),
             columns: Rc::new(ServiceColumns([0.; 6])),
             page: 0,
@@ -81,21 +90,22 @@ impl ContainersPanel {
     pub(super) fn compose_services_table(
         &self,
         group: &domain::ProjectGroup<'_>,
-        project: Option<&ComposeProject>,
+        project: Option<&compose::Project>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let actions = project.is_some_and(|project| project.cli.is_some());
-        let key = json!([
-            group.name,
-            self.client
+        let key = ServiceTableKey {
+            group: group.name.to_owned(),
+            revision: self
+                .client
                 .resource("snapshot")
                 .map_or(0, |r| r.data_revision),
-            project,
-            cx.theme().font_family.to_string()
-        ]);
+            project: project.cloned(),
+            font_family: cx.theme().font_family.to_string(),
+        };
         let mut cache = self.service_table.borrow_mut();
-        if cache.key != key {
+        if cache.key.as_ref() != Some(&key) {
             let rows = service_rows(group, project);
             cache.columns = Rc::new(ServiceColumns::measure(&rows, actions, window, cx));
             let keys = |row: &OwnedRow| {
@@ -110,7 +120,7 @@ impl ContainersPanel {
                 .zip(cache.focus.iter().cloned())
                 .collect();
             let anchor = cache.rows.get(cache.page * PAGE_SIZE).map(keys);
-            let same_project = cache.key[0] == key[0];
+            let same_project = cache.key.as_ref().is_some_and(|k| k.group == key.group);
             let rows: Vec<_> = rows
                 .into_iter()
                 .map(|row| OwnedRow {
@@ -143,7 +153,7 @@ impl ContainersPanel {
             };
             cache.rows = Rc::new(rows);
             cache.focus = focus;
-            cache.key = key;
+            cache.key = Some(key);
         }
         let rows = cache.rows.clone();
         let columns = cache.columns.clone();
@@ -569,7 +579,7 @@ fn service_values(container: &Container) -> [String; 3] {
             .unwrap_or_else(|| "—".into()),
         container
             .memory
-            .map(|value| bytes(&json!(value)))
+            .map(|value| byte_size(value as f64))
             .unwrap_or_else(|| "—".into()),
         if ports.is_empty() {
             "—".into()
@@ -590,7 +600,7 @@ impl ServiceColumns {
         let sans = font(cx.theme().font_family.clone());
         let mono = font(cx.theme().mono_font_family.clone());
         let mut numeric = sans.clone();
-        numeric.features = tabular_figures();
+        numeric.features = crate::ui::tabular_figures();
         let measure = |text: &str, size: f32, font: &Font| {
             f32::from(
                 window
@@ -685,14 +695,14 @@ impl ServiceColumns {
             .flex()
             .justify_end()
             .text_right()
-            .font_features(tabular_figures())
+            .font_features(crate::ui::tabular_figures())
     }
     fn memory(&self, id: impl Into<SharedString>) -> ObservedElement<Stateful<Div>> {
         self.column(id, 3)
             .flex()
             .justify_end()
             .text_right()
-            .font_features(tabular_figures())
+            .font_features(crate::ui::tabular_figures())
     }
     fn ports(&self, id: impl Into<SharedString>) -> ObservedElement<Stateful<Div>> {
         self.column(id, 4).pl(px(14.))
@@ -710,9 +720,6 @@ impl ServiceColumns {
             .pr(px(10.))
             .whitespace_nowrap()
     }
-}
-fn tabular_figures() -> FontFeatures {
-    FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]))
 }
 fn cell(id: impl Into<SharedString>) -> ObservedElement<Stateful<Div>> {
     div()

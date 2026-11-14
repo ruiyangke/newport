@@ -44,17 +44,24 @@ impl fmt::Display for LaunchExit {
 }
 impl std::error::Error for LaunchExit {}
 
+/// A held terminal's scope. One of its processes killed for memory must not
+/// stop the rest, as systemd's default for a scope does, and shells, which
+/// ignore SIGTERM, are hung up when it stops.
+pub const TERMINAL_SCOPE: &[&str] = &["OOMPolicy=continue", "SendSIGHUP=yes"];
+
 /// Starts this build with `args`, outside the caller's process tree. Through
-/// a systemd user scope named `unit` when there is a user manager, so
-/// logind's `KillUserProcesses` doesn't end it with the SSH session, and with
-/// the account lingering while it runs (see `crate::linger`), so it outlives
-/// the account's last logout; otherwise directly. Either way the process must
-/// `detach` itself; this returns once it has.
-pub fn launch(unit: &str, args: &[String]) -> io::Result<()> {
+/// a systemd user scope named `unit` with `properties` when there is a user
+/// manager, so logind's `KillUserProcesses` doesn't end it with the SSH
+/// session, and with the account lingering while it runs (see
+/// `crate::linger`), so it outlives the account's last logout; otherwise
+/// directly. Either way the process must `detach` itself; this returns once
+/// it has.
+pub fn launch(unit: &str, properties: &[&str], args: &[String]) -> io::Result<()> {
     launch_with(
         &crate::linger::Linger::system(),
         OsStr::new("systemd-run"),
         unit,
+        properties,
         args,
     )
 }
@@ -113,6 +120,7 @@ fn launch_with(
     linger: &crate::linger::Linger,
     systemd_run: &OsStr,
     unit: &str,
+    properties: &[&str],
     args: &[String],
 ) -> io::Result<()> {
     let executable = std::fs::read_link("/proc/self/exe").or_else(|_| std::env::current_exe())?;
@@ -126,16 +134,36 @@ fn launch_with(
     // Held until the scope runs, so a reconcile can't turn lingering off
     // before the scope counts.
     let _held = linger.hold_for(unit);
-    let scoped = quiet(
-        Command::new(systemd_run)
-            .args(["--user", "--scope", "--quiet", "--collect"])
-            .arg(format!("--unit={unit}"))
-            .arg("--")
-            .arg(&executable)
-            .args(args),
-    );
-    if scoped.is_ok_and(|status| status.success()) {
-        return Ok(());
+    // Older systemd refuses OOMPolicy on a scope.
+    let older: Vec<&str> = properties
+        .iter()
+        .copied()
+        .filter(|property| !property.starts_with("OOMPolicy="))
+        .collect();
+    let mut attempts = vec![properties];
+    if older.len() != properties.len() {
+        attempts.push(&older);
+    }
+    for properties in attempts {
+        let scoped = quiet(
+            Command::new(systemd_run)
+                .args(["--user", "--scope", "--quiet", "--collect"])
+                .arg(format!("--unit={unit}"))
+                .args(
+                    properties
+                        .iter()
+                        .map(|property| format!("--property={property}")),
+                )
+                .arg("--")
+                .arg(&executable)
+                .args(args),
+        );
+        match scoped {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(_) => {}
+            // No systemd-run at all.
+            Err(_) => break,
+        }
     }
     let status = quiet(Command::new(&executable).args(args))?;
     if status.success() {

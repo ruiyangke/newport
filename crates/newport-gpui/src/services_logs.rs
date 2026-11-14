@@ -2,7 +2,7 @@ use super::*;
 use crate::log_line::{LogLine, RowBounds, Tone as LogTone, day_strip};
 use crate::selectable_log::SelectableLog;
 use gpui_kit::component::input::{EditorState, InputEvent};
-use newport_domain::services::JournalEntry;
+use newport_protocol::monitor::services::Entry;
 use std::cell::RefCell;
 
 #[derive(Clone, PartialEq)]
@@ -11,7 +11,7 @@ enum LogRow {
     // Keep the visible timestamp and selectable document in the same locale
     // snapshot. A locale change must never invalidate a text run's byte ranges.
     // The entry's message has its escapes stripped; colours ride alongside.
-    Line(JournalEntry, String, crate::log_line::Styles),
+    Line(Entry, String, crate::log_line::Styles),
 }
 pub(super) struct Logs {
     pub(super) live: bool,
@@ -24,7 +24,7 @@ pub(super) struct Logs {
     focus: FocusHandle,
     selection: SelectableLog,
     rows: Rc<Vec<LogRow>>,
-    source: Vec<JournalEntry>,
+    source: Vec<Entry>,
     ansi: crate::log_line::Ansi,
     dataset: Option<(LogTarget, Option<String>)>,
     unseen: usize,
@@ -319,8 +319,8 @@ impl ServicesPanel {
     pub(super) fn log_view(&self, label: &str, cx: &mut Context<Self>) -> AnyElement {
         let resource = self.client.resource("logs");
         let pending = self.client.logs().is_none() && resource.is_none_or(|r| r.error.is_none());
-        let placeholder = resource.is_some_and(|r| r.value.is_null() && r.pending)
-            && self.client.logs().is_some();
+        let placeholder =
+            resource.is_some_and(|r| !r.has_value() && r.pending) && self.client.logs().is_some();
         let rows = self.logs.rows.clone();
         let query = self.logs.find.read(cx).value().to_string();
         let count = rows
@@ -538,14 +538,10 @@ impl ServicesPanel {
     }
 }
 #[cfg(test)]
-fn log_rows(lines: &[JournalEntry], query: &str) -> Vec<LogRow> {
+fn log_rows(lines: &[Entry], query: &str) -> Vec<LogRow> {
     styled_rows(lines, query, &mut Default::default())
 }
-fn styled_rows(
-    lines: &[JournalEntry],
-    query: &str,
-    ansi: &mut crate::log_line::Ansi,
-) -> Vec<LogRow> {
+fn styled_rows(lines: &[Entry], query: &str, ansi: &mut crate::log_line::Ansi) -> Vec<LogRow> {
     let needle = query.trim().to_lowercase();
     let stamped: Vec<_> = lines
         .iter()
@@ -593,7 +589,7 @@ fn timestamp(at: Option<i64>) -> String {
     at.map(crate::localized_time::journal_time)
         .unwrap_or("—".into())
 }
-fn source(line: &JournalEntry) -> String {
+fn source(line: &Entry) -> String {
     line.identifier
         .as_ref()
         .map(|id| {
@@ -654,10 +650,10 @@ mod tests {
     use super::{LogRow, log_rows};
     use gpui::{ListOffset, ScrollDelta, ScrollEvent, TestAppContext, point, px};
     use gpui_kit as gpui;
-    use newport_domain::services::JournalEntry;
-    fn lines() -> Vec<JournalEntry> {
+    use newport_protocol::monitor::services::Entry;
+    fn lines() -> Vec<Entry> {
         (0..24)
-            .map(|i| JournalEntry {
+            .map(|i| Entry {
                 at: Some(1_700_000_000_000 + i / 12 * 86_400_000),
                 priority: Some(6),
                 pid: Some(31),
@@ -698,11 +694,11 @@ mod tests {
             "one-day journals need no date dividers"
         );
         let undated = vec![
-            JournalEntry {
+            Entry {
                 at: None,
                 ..Default::default()
             },
-            JournalEntry {
+            Entry {
                 at: Some(i64::MAX),
                 ..Default::default()
             },
@@ -740,7 +736,7 @@ mod tests {
         let (panel, cx, _backend) = fixture(cx);
         panel.update_in(cx, |panel, window, cx| {
             panel.logs.source = (0..240)
-                .map(|index| JournalEntry {
+                .map(|index| Entry {
                     message: format!("entry {index}"),
                     ..Default::default()
                 })
@@ -839,7 +835,7 @@ mod tests {
         use crate::services::tests::{draw, fixture};
         let (panel, cx, _backend) = fixture(cx);
         let mut entries = lines();
-        entries.extend((24..160).map(|i| JournalEntry {
+        entries.extend((24..160).map(|i| Entry {
             at: Some(1_700_000_000_000 + i / 80 * 86_400_000),
             message: format!("entry {i}"),
             ..Default::default()
@@ -954,14 +950,14 @@ mod tests {
         use gpui::{Modifiers, MouseButton};
         let (panel, cx, _backend) = fixture(cx);
         let entries = vec![
-            JournalEntry {
+            Entry {
                 at: Some(1_700_000_000_000),
                 identifier: Some("api".into()),
                 pid: Some(31),
                 message: "Café **literal** <tag> 🦀".into(),
                 ..Default::default()
             },
-            JournalEntry {
+            Entry {
                 at: Some(1_700_000_001_000),
                 identifier: Some("服务".into()),
                 pid: Some(2),

@@ -2,7 +2,13 @@
 use super::*;
 use gpui_kit::component::{input::InputEvent, skeleton::Skeleton};
 use newport_client::containers::{Action, ActionTarget, Containers};
-use newport_domain::containers::{self as domain, Container, ContainerVerb, ProjectVerb};
+use newport_domain::containers::{self as domain};
+use newport_protocol::monitor::{
+    compose,
+    containers::{
+        Container, ContainerHealth, ContainerPort, ContainerState, ContainerVerb, ProjectVerb,
+    },
+};
 use std::{collections::HashSet, rc::Rc};
 
 #[path = "containers_actions.rs"]
@@ -42,7 +48,7 @@ pub(super) enum ContainersEvent {
     OpenShell { command: String, title: String },
     OpenPort(PortTarget),
     Notification { message: String },
-    ComposeCompleted(newport_domain::compose::ComposeJob),
+    ComposeCompleted(compose::Job),
 }
 /// Project tabs keep their historical indices (0 Logs, 1 Activity, 2 Compose
 /// files); the services table was added last but is shown first.
@@ -53,7 +59,7 @@ const SECTION: &str = "section:";
 pub(super) struct PortTarget {
     pub container: String,
     pub name: String,
-    pub port: domain::ContainerPort,
+    pub port: ContainerPort,
 }
 /// Session-only choices, keyed by stable server ID by the host. Never include
 /// inspection reveals or action drafts.
@@ -145,7 +151,7 @@ struct ListCache {
     fallback: Option<String>,
 }
 pub(super) struct ContainersPanel {
-    connection: Value,
+    connection: Option<configuration::ConnectionScope>,
     pub(super) client: Containers,
     compose_state: compose_jobs::ComposeState,
     activity: activity::Activity,
@@ -199,7 +205,7 @@ impl ContainersPanel {
     }
     pub(super) fn new(
         server: String,
-        connection: Value,
+        connection: Option<configuration::ConnectionScope>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -221,7 +227,7 @@ impl ContainersPanel {
             |this: &Self| this.client.server_id(),
             |this, cx| {
                 if !this.retired
-                    && crate::connectivity::for_scope(&this.connection, cx)
+                    && crate::connectivity::for_scope(this.connection.as_ref(), cx)
                         .is_some_and(|state| state.phase == crate::connectivity::Phase::Connected)
                 {
                     this.client.refresh();
@@ -241,7 +247,7 @@ impl ContainersPanel {
         });
         client.refresh();
         Self {
-            connection: Value::Null,
+            connection: None,
             client,
             compose_state: compose_jobs::ComposeState::new(window, cx),
             activity: activity::Activity::new(window, cx),
@@ -443,23 +449,15 @@ impl ContainersPanel {
                 Action::Remove { names, .. } => names.join(", "),
                 Action::Prune { .. } => "Docker cleanup".into(),
             };
-            cx.emit(ContainersEvent::Notification {
-                message: match receipt.result {
-                    Ok(value) => match receipt.action {
-                        Action::Prune { .. } => serde_json::from_value::<domain::Pruned>(value)
-                            .map(|result| {
-                                if result.reclaimed > 0 {
-                                    format!("Freed {}", bytes(&json!(result.reclaimed)))
-                                } else {
-                                    "Nothing to remove".into()
-                                }
-                            })
-                            .unwrap_or_else(|_| "Docker cleanup completed.".into()),
-                        _ => format!("{subject}: operation completed."),
-                    },
-                    Err(error) => format!("{subject}: {error}"),
-                },
-            });
+            let message = match (&receipt.result, receipt.pruned()) {
+                (Err(error), _) => format!("{subject}: {error}"),
+                (Ok(_), Some(result)) if result.reclaimed > 0 => {
+                    format!("Freed {}", byte_size(result.reclaimed as f64))
+                }
+                (Ok(_), Some(_)) => "Nothing to remove".into(),
+                (Ok(_), None) => format!("{subject}: operation completed."),
+            };
+            cx.emit(ContainersEvent::Notification { message });
         }
         for job in self.client.take_compose_completions() {
             if !self.retired {
@@ -470,10 +468,7 @@ impl ContainersPanel {
             if !self.client.compose_run_pending()
                 && let Some(project) = self.compose_state.show_activity_for.take()
                 && self.active_selection.as_deref() == Some(domain::project_key(&project).as_str())
-                && self
-                    .client
-                    .resource("compose-start")
-                    .is_some_and(|r| r.error.is_none() && r.value["job"].is_string())
+                && self.client.compose_started().is_some()
             {
                 self.tab = 1;
             }
@@ -514,12 +509,6 @@ impl ContainersPanel {
         self.error(key)
             .map(|error| alert(format!("containers-error-{key}"), error, cx).into_any_element())
             .unwrap_or_else(|| div().into_any_element())
-    }
-    pub(super) fn compose_value(&self) -> Value {
-        self.client
-            .compose_project()
-            .cloned()
-            .unwrap_or(Value::Null)
     }
     fn prepared_list(&self, cx: &App) -> (Rc<Vec<Row>>, Option<String>) {
         let key = ListKey {
@@ -806,7 +795,7 @@ impl ContainersPanel {
         let running = snapshot
             .containers
             .iter()
-            .filter(|c| c.state == domain::ContainerState::Running)
+            .filter(|c| c.state == ContainerState::Running)
             .count();
         let stopped = snapshot.containers.len() - running;
         let projects = domain::group_containers(&snapshot.containers)
@@ -1247,9 +1236,7 @@ fn podman_socket_command(error: &str) -> Option<String> {
 fn active(c: &Container) -> bool {
     matches!(
         c.state,
-        domain::ContainerState::Running
-            | domain::ContainerState::Paused
-            | domain::ContainerState::Restarting
+        ContainerState::Running | ContainerState::Paused | ContainerState::Restarting
     ) || domain::is_problem(c)
 }
 
@@ -1425,12 +1412,12 @@ fn container_row(c: &Container, depth: u8, now: i64) -> Row {
         name: domain::display_name(c).into(),
         note: domain::list_note(c, now),
         clock: match c.state {
-            domain::ContainerState::Running
-                if c.cpu.is_none() && c.health != Some(domain::ContainerHealth::Unhealthy) =>
+            ContainerState::Running
+                if c.cpu.is_none() && c.health != Some(ContainerHealth::Unhealthy) =>
             {
                 c.started_at.map(|at| (at, false))
             }
-            domain::ContainerState::Exited if !c.oom_killed && !domain::is_problem(c) => {
+            ContainerState::Exited if !c.oom_killed && !domain::is_problem(c) => {
                 c.finished_at.map(|at| (at, true))
             }
             _ => None,

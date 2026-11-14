@@ -1,11 +1,11 @@
 //! Typed desktop host contracts.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Startup {
     pub enabled: bool,
     pub available: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuildStamp {
     pub commit: Option<String>,
     pub local: bool,
@@ -23,7 +23,7 @@ pub enum UpdatePhase {
     Error,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateStatus {
     pub enabled: bool,
     pub current_version: String,

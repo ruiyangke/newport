@@ -2,17 +2,15 @@
 use super::{Operations, path_valid};
 use crate::manager::Shared;
 use anyhow::{Result, ensure};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
     pub(crate) id: Uuid,
     pub(crate) operation: Uuid,
     pub(crate) root: String,
-    pub(crate) expected_connection: Vec<serde_json::Value>,
+    pub(crate) expected_connection: newport_protocol::desktop::configuration::ConnectionScope,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,7 +83,7 @@ pub async fn dispatch(
     request: Request,
 ) -> Result<Index, String> {
     let command = command(&request.root).map_err(|e| e.to_string())?;
-    let expected = serde_json::Value::Array(request.expected_connection);
+    let expected = request.expected_connection;
     operations
         .run_with_connection(
             state,

@@ -1,7 +1,8 @@
 //! Display byte-oriented diff pieces without splitting UTF-8 at page boundaries.
 use super::*;
 use gpui_kit::component::tab::Tab;
-use newport_client::resources::Resource;
+use newport_client::{git_diff_page::DiffPage, resources::Resource};
+use newport_protocol::git::{DiffMetadata, Side};
 use std::{
     cell::{OnceCell, RefCell},
     rc::Rc,
@@ -53,14 +54,14 @@ impl Presentation {
     }
 }
 #[derive(Default)]
-pub(super) struct Cache(RefCell<Option<(Value, Rc<Presentation>)>>);
+pub(super) struct Cache(RefCell<Option<(Option<PageKey>, Rc<Presentation>)>>);
 impl Cache {
-    fn get(&self, page: &Value) -> Rc<Presentation> {
+    fn get(&self, page: Option<&DiffPage>) -> Rc<Presentation> {
         // The agent fingerprint includes the full diff and comparison. The
         // continuation token distinguishes loaded prefixes of that snapshot.
-        let key = page_key(page);
+        let key = page.map(PageKey::of);
         let mut cache = self.0.borrow_mut();
-        if page["snapshot"].is_string()
+        if key.is_some()
             && let Some((previous, view)) = cache.as_ref()
             && *previous == key
         {
@@ -68,21 +69,28 @@ impl Cache {
         }
         let decoded = decode(page);
         let error = decoded.as_ref().err().cloned();
-        let review = newport_client::git_selection::Review::from_page(page).map(Rc::new);
+        let review = page
+            .ok_or_else(|| {
+                "Individual hunks are unavailable for this comparison. Use the file actions."
+                    .to_owned()
+            })
+            .and_then(newport_client::git_selection::Review::from_page)
+            .map(Rc::new);
         let continued = cache.as_ref().filter(|(previous, view)| {
             error.is_none()
                 && view.error.is_none()
                 && review.is_ok()
                 && view.review.is_ok()
-                && key[0].is_string()
-                && previous[0] == key[0]
-                && previous[1] == key[1]
-                && previous[2].is_string()
-                && previous[2] != key[2]
-                && previous[3]
-                    .as_u64()
-                    .zip(key[3].as_u64())
-                    .is_some_and(|(old, new)| new > old)
+                && previous
+                    .as_ref()
+                    .zip(key.as_ref())
+                    .is_some_and(|(previous, key)| {
+                        previous.snapshot == key.snapshot
+                            && previous.metadata == key.metadata
+                            && previous.next_cursor.is_some()
+                            && previous.next_cursor != key.next_cursor
+                            && key.units > previous.units
+                    })
         });
         let (selection, range_selection) = if let Some((_, previous)) = continued {
             previous.range_selection.borrow_mut().page_extended();
@@ -108,37 +116,54 @@ impl Cache {
 /// A page is loaded only in response to scrolling its rendered comparison.
 /// Consuming the gesture prevents stale viewport geometry draining later pages.
 #[derive(Default)]
-pub(super) struct ScrollDemand(Option<Value>, git_page_demand::Demand, Option<String>);
+pub(super) struct ScrollDemand(
+    Option<Option<PageKey>>,
+    git_page_demand::Demand<()>,
+    Option<String>,
+);
 impl ScrollDemand {
-    fn arm(&mut self, key: Value) {
+    fn arm(&mut self, key: Option<PageKey>) {
         self.0 = Some(key);
     }
-    fn take_ready(&mut self, page: &Value, footer: Footer, visible: bool, at_end: bool) -> bool {
-        self.0
-            .take()
-            .is_some_and(|key| visible && at_end && footer == Footer::More && key == page_key(page))
+    fn take_ready(
+        &mut self,
+        page: Option<&DiffPage>,
+        footer: Footer,
+        visible: bool,
+        at_end: bool,
+    ) -> bool {
+        self.0.take().is_some_and(|key| {
+            visible && at_end && footer == Footer::More && key == page.map(PageKey::of)
+        })
     }
 }
-fn page_key(page: &Value) -> Value {
-    json!([
-        page["snapshot"],
-        page["metadata"],
-        page["nextCursor"],
-        page["entries"].as_array().map(|files| files
-            .iter()
-            .map(|file| {
-                file["hunks"]
-                    .as_array()
-                    .filter(|hunks| !hunks.is_empty())
-                    .map_or(1, |hunks| {
-                        hunks
-                            .iter()
-                            .map(|hunk| hunk["lines"].as_array().map_or(0, Vec::len))
-                            .sum::<usize>()
-                    })
-            })
-            .sum::<usize>())
-    ])
+/// Which loaded prefix of which comparison a page is.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct PageKey {
+    snapshot: String,
+    metadata: DiffMetadata,
+    next_cursor: Option<String>,
+    units: usize,
+}
+impl PageKey {
+    fn of(page: &DiffPage) -> Self {
+        Self {
+            snapshot: page.snapshot.clone(),
+            metadata: page.metadata.clone(),
+            next_cursor: page.next_cursor.clone(),
+            units: page
+                .entries
+                .iter()
+                .map(|file| {
+                    if file.hunks.is_empty() {
+                        1
+                    } else {
+                        file.hunks.iter().map(|hunk| hunk.lines.len()).sum()
+                    }
+                })
+                .sum(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -153,14 +178,14 @@ impl ContextLines {
     pub(super) fn value(self) -> u8 {
         self.0
     }
-    pub(super) fn matches(self, page: &Value, staged: bool) -> bool {
-        page["metadata"]["contextLines"] == self.0
-            && page["metadata"]["side"]
-                == if staged {
-                    "head_to_index"
+    pub(super) fn matches(self, metadata: &DiffMetadata, staged: bool) -> bool {
+        metadata.context_lines == Some(u32::from(self.0))
+            && metadata.side
+                == Some(if staged {
+                    Side::HeadToIndex
                 } else {
-                    "index_to_worktree"
-                }
+                    Side::IndexToWorktree
+                })
     }
     pub(super) fn set(&mut self, value: u8) -> bool {
         if value == self.0 || !Self::CHOICES.contains(&value) {
@@ -184,7 +209,7 @@ enum Footer {
 }
 impl Footer {
     fn for_page(
-        page: &Value,
+        page: Option<&DiffPage>,
         first: Option<&Resource>,
         more: Option<&Resource>,
         invalid: bool,
@@ -200,9 +225,9 @@ impl Footer {
             Self::Loading
         } else if more.is_some_and(|r| r.pending) {
             Self::LoadingMore
-        } else if page.is_null() {
+        } else if page.is_none() {
             Self::Unavailable
-        } else if page["nextCursor"].is_string() {
+        } else if page.is_some_and(|page| page.next_cursor.is_some()) {
             Self::More
         } else {
             Self::Complete
@@ -257,53 +282,43 @@ impl From<newport_client::git_diff::Line> for Row {
         }
     }
 }
-fn decode(page: &Value) -> Result<Vec<Row>, String> {
+fn decode(page: Option<&DiffPage>) -> Result<Vec<Row>, String> {
     let mut result = Vec::new();
+    let Some(page) = page else {
+        return Ok(result);
+    };
     let mut lines = newport_client::git_diff::Lines::default();
     let mut files_seen = std::collections::HashSet::new();
     let mut hunks_seen = std::collections::HashSet::new();
-    for file in rows(&page["entries"]) {
-        let first_file = files_seen.insert(file["fileIndex"].as_u64());
-        let old = &file["oldPath"];
-        let new = &file["newPath"];
+    for file in &page.entries {
+        let first_file = files_seen.insert(file.file_index);
+        let old = &file.old_path;
+        let new = &file.new_path;
         let file_start = result.len();
-        let path = new["display"].as_str().or_else(|| old["display"].as_str());
-        if first_file
-            && page["metadata"]["totalFiles"]
-                .as_u64()
-                .is_some_and(|n| n > 1)
-            && let Some(path) = path
-        {
+        let path = new.display.as_str();
+        if first_file && page.metadata.total_files.is_some_and(|n| n > 1) {
             result.push(Row {
                 heading: true,
                 bytes: path.as_bytes().to_vec(),
                 ..Default::default()
             });
         }
-        if first_file
-            && old["bytesB64"].is_string()
-            && new["bytesB64"].is_string()
-            && old["bytesB64"] != new["bytesB64"]
-        {
+        if first_file && old.bytes_b64 != new.bytes_b64 {
             result.push(Row {
                 heading: true,
-                bytes: format!("Renamed from {}", text(old, "display")).into_bytes(),
+                bytes: format!("Renamed from {}", old.display).into_bytes(),
                 ..Default::default()
             });
         }
-        if let (Some(old), Some(new)) = (file["oldMode"].as_u64(), file["newMode"].as_u64())
-            && first_file
-            && old != 0
-            && new != 0
-            && old != new
-        {
+        let (old_mode, new_mode) = (file.old_mode, file.new_mode);
+        if first_file && old_mode != 0 && new_mode != 0 && old_mode != new_mode {
             result.push(Row {
                 heading: true,
-                bytes: format!("Mode {old:o} → {new:o}").into_bytes(),
+                bytes: format!("Mode {old_mode:o} → {new_mode:o}").into_bytes(),
                 ..Default::default()
             });
         }
-        if let Some(reason) = file["omissionReason"].as_str()
+        if let Some(reason) = &file.omission_reason
             && first_file
         {
             result.push(Row {
@@ -317,37 +332,34 @@ fn decode(page: &Value) -> Result<Vec<Row>, String> {
                 ..Default::default()
             });
         }
-        for hunk in rows(&file["hunks"]) {
-            if let (Some(os), Some(ol), Some(ns), Some(nl)) = (
-                hunk["oldStart"].as_u64(),
-                hunk["oldLines"].as_u64(),
-                hunk["newStart"].as_u64(),
-                hunk["newLines"].as_u64(),
-            ) && hunks_seen.insert((file["fileIndex"].as_u64(), hunk["index"].as_u64()))
-            {
+        for hunk in &file.hunks {
+            if hunks_seen.insert((file.file_index, hunk.index)) {
                 result.push(Row {
                     heading: true,
-                    bytes: format!("@@ −{os},{ol} +{ns},{nl} @@").into_bytes(),
-                    hunk: hunk["id"].as_str().map(str::to_owned),
-                    old: os.to_string(),
-                    new: ns.to_string(),
+                    bytes: format!(
+                        "@@ −{},{} +{},{} @@",
+                        hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
+                    )
+                    .into_bytes(),
+                    hunk: hunk.id.clone(),
+                    old: hunk.old_start.to_string(),
+                    new: hunk.new_start.to_string(),
                     ..Default::default()
                 });
             }
-            for piece in rows(&hunk["lines"]) {
-                let invalid = || "The agent returned an invalid diff piece.".to_owned();
-                let file_id = file["fileIndex"].as_u64().ok_or_else(invalid)?;
-                let hunk_id = hunk["index"].as_u64().ok_or_else(invalid)?;
-                if let Some(line) = lines.push(file_id, hunk_id, hunk["id"].as_str(), &piece)? {
+            for piece in &hunk.lines {
+                if let Some(line) =
+                    lines.push(file.file_index, hunk.index, hunk.id.as_deref(), piece)?
+                {
                     result.push(line.into());
                 }
             }
         }
         if first_file && let Some(row) = result.get_mut(file_start) {
-            row.file_path = path.map(str::to_owned);
+            row.file_path = Some(path.to_owned());
         }
     }
-    if let Some(line) = lines.finish(page["nextCursor"].as_str().is_some())? {
+    if let Some(line) = lines.finish(page.next_cursor.is_some())? {
         let row = Row::from(line);
         result.push(Row {
             bytes: format!(
@@ -382,8 +394,8 @@ impl Newport {
             && (!git_layout::compact(self.content_width, self.git.tab) || self.git.detail_open)
             && self.git.remote_refs.is_none()
             && !self.project_dialog_open
-            && self.git.repo["repoId"].is_string()
-            && self.git.selected["conflicted"] != true;
+            && self.git.repo.is_some()
+            && !self.git.entry().is_some_and(|entry| entry.conflicted);
         if !visible {
             if let Some((_, presentation)) = self.git.diff_presentation.0.borrow().as_ref() {
                 presentation.range_selection.borrow_mut().reset();
@@ -429,9 +441,9 @@ impl Newport {
             visible && footer == Footer::More,
         );
         let page = if inspection {
-            &self.git.history.diff
+            self.git.history.diff.as_ref()
         } else {
-            &self.git.diff
+            self.git.diff.as_ref()
         };
         if !self
             .git
@@ -446,9 +458,8 @@ impl Newport {
     }
     fn git_diff_toolbar(&self, title: String, cx: &mut Context<Self>) -> AnyElement {
         let working = !self.git_is_inspection();
-        let mixed = working
-            && self.git.selected["staged"] == true
-            && (self.git.selected["unstaged"] == true || self.git.selected["untracked"] == true);
+        let entry = self.git.entry().filter(|_| working);
+        let mixed = entry.is_some_and(|entry| entry.staged && (entry.unstaged || entry.untracked));
         let stats = diff_totals(self.diff_page());
         div()
             .flex()
@@ -461,7 +472,9 @@ impl Newport {
             .border_color(cx.theme().border)
             .when(working, |view| {
                 view.child(git_file_row::badge(
-                    git_changes::selected_mark(&self.git.selected, self.git.diff_staged),
+                    entry.map_or("M", |entry| {
+                        git_changes::selected_mark(entry, self.git.diff_staged)
+                    }),
                     cx,
                 ))
             })
@@ -524,7 +537,8 @@ impl Newport {
                     .then(|| self.code_workspace())
                     .flatten()
                     .and_then(|editor| {
-                        project_editor::root_path(&self.git.selected["path"])
+                        entry
+                            .and_then(|entry| project_editor::path_text(&entry.path.bytes_b64))
                             .filter(|path| !path.ends_with('/'))
                             .map(|path| (editor, path))
                     }),
@@ -541,9 +555,7 @@ impl Newport {
                 },
             )
             .when(
-                working
-                    && (self.git.selected["unstaged"] == true
-                        || self.git.selected["untracked"] == true),
+                entry.is_some_and(|entry| entry.unstaged || entry.untracked),
                 |view| {
                     view.child(
                         crate::controls::compact_button("git-stage-file")
@@ -555,7 +567,7 @@ impl Newport {
                     )
                 },
             )
-            .when(working && self.git.selected["staged"] == true, |view| {
+            .when(entry.is_some_and(|entry| entry.staged), |view| {
                 view.child(
                     crate::controls::compact_button("git-unstage-file")
                         .label(git_changes::index_action_label(false))
@@ -614,21 +626,21 @@ impl Newport {
     }
 
     pub(super) fn git_diff_view(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if self.git.tab == 0 && self.git.selected["conflicted"] == true {
+        if self.git.tab == 0 && self.git.entry().is_some_and(|entry| entry.conflicted) {
             self.git.diff_text.clear(cx);
             return self.conflict_view(cx);
         }
         let selected = if self.git_is_inspection() {
-            self.git.history.path["bytesB64"].is_string()
+            self.git.history.path.is_some()
         } else {
-            self.git.selected["entryId"].is_string()
+            self.git.entry().is_some()
         };
         if !selected {
             self.git.diff_text.clear(cx);
             let loading = !self.git_is_inspection()
                 && (self.git.changes.searching()
                     || EmptyChanges::for_page(
-                        &self.git.page,
+                        self.git.status_page(),
                         self.resources.get("git-list"),
                         self.git.error.is_some(),
                     ) == EmptyChanges::Loading);
@@ -658,9 +670,11 @@ impl Newport {
             } else if self.git.changes.searching() {
                 project_loading::diff()
             } else if self.git.changes.filtering()
-                && self.git.page["entries"]
-                    .as_array()
-                    .is_some_and(Vec::is_empty)
+                && self
+                    .git
+                    .page
+                    .as_ref()
+                    .is_some_and(git_listing::Listing::is_empty)
                 && self
                     .resources
                     .get("git-list")
@@ -676,7 +690,7 @@ impl Newport {
                 .into_any_element()
             } else {
                 match EmptyChanges::for_page(
-                    &self.git.page,
+                    self.git.status_page(),
                     self.resources.get("git-list"),
                     self.git.error.is_some(),
                 ) {
@@ -738,7 +752,7 @@ impl Newport {
         let selection_bar = self
             .diff_actions(&presentation, cx)
             .and_then(|actions| actions.selection_bar(cx));
-        let scroll_key = page_key(page);
+        let scroll_key = page.map(PageKey::of);
         // Prepare the text/search projection before rendering its match count.
         let content = (footer != Footer::Loading && !empty).then(|| {
             if self.diff_layout() == git_diff_split::Layout::Split {
@@ -785,13 +799,18 @@ impl Newport {
                         .bg(cx.theme().muted),
                 )
             })
-            .when(page["metadata"]["truncated"] == true, |view| {
-                view.child(
-                    crate::label("The diff exceeds the agent’s limit. Some changes are not shown.")
+            .when(
+                page.is_some_and(|page| page.metadata.truncated == Some(true)),
+                |view| {
+                    view.child(
+                        crate::label(
+                            "The diff exceeds the agent’s limit. Some changes are not shown.",
+                        )
                         .px_3()
                         .py_2(),
-                )
-            })
+                    )
+                },
+            )
             .when(footer == Footer::Loading, |view| {
                 view.child(project_loading::diff())
             })
@@ -988,40 +1007,77 @@ pub(super) fn render_unified<T: 'static>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cache, ContextLines, EmptyChanges, Footer, Row, ScrollDemand, decode, page_key};
-    use base64::Engine;
+    use super::{
+        Cache, ContextLines, DiffPage, EmptyChanges, Footer, PageKey, Row, ScrollDemand, decode,
+    };
+    use crate::git_fixture::{diff_page, file, hunk, line, working_metadata};
     use newport_client::resources::Resources;
-    use serde_json::json;
+    use newport_protocol::git::{LineFragment, Path, Side};
+
+    /// A page whose `units` complete lines sit in one hunk of one file.
+    fn lines_page(snapshot: &str, cursor: Option<&str>, units: u64) -> DiffPage {
+        diff_page(
+            snapshot,
+            working_metadata("status", "entry"),
+            vec![file(
+                0,
+                "file",
+                vec![hunk(
+                    0,
+                    None,
+                    (0..units).map(|i| line(i, "+", None, b"a\n")).collect(),
+                )],
+            )],
+            cursor,
+        )
+    }
+    /// The first piece of a line whose bytes continue on the next piece.
+    fn partial(index: u64, offset: u64, bytes: &[u8]) -> LineFragment {
+        LineFragment {
+            byte_offset: offset,
+            line_complete: false,
+            ..line(index, "+", None, bytes)
+        }
+    }
+    fn split_euro() -> Vec<u8> {
+        [vec![b'x'; 4095], vec![0xe2]].concat()
+    }
+    fn key(page: &DiffPage) -> Option<PageKey> {
+        Some(PageKey::of(page))
+    }
     #[test]
     fn scrolling_loads_one_page_and_never_drains_on_repaint() {
-        let page = json!({"snapshot":"a", "nextCursor":"p2", "metadata":{}, "entries":[1]});
+        let page = lines_page("a", Some("p2"), 1);
         let mut demand = ScrollDemand::default();
-        assert!(!demand.take_ready(&page, Footer::More, true, true));
-        demand.arm(page_key(&page));
-        assert!(demand.take_ready(&page, Footer::More, true, true));
-        assert!(!demand.take_ready(&page, Footer::More, true, true));
-        let next = json!({"snapshot":"a", "nextCursor":"p3", "metadata":{}, "entries":[1,2]});
-        assert!(!demand.take_ready(&next, Footer::More, true, true));
-        demand.arm(page_key(&next));
-        assert!(demand.take_ready(&next, Footer::More, true, true));
+        assert!(!demand.take_ready(Some(&page), Footer::More, true, true));
+        demand.arm(key(&page));
+        assert!(demand.take_ready(Some(&page), Footer::More, true, true));
+        assert!(!demand.take_ready(Some(&page), Footer::More, true, true));
+        let next = lines_page("a", Some("p3"), 2);
+        assert!(!demand.take_ready(Some(&next), Footer::More, true, true));
+        demand.arm(key(&next));
+        assert!(demand.take_ready(Some(&next), Footer::More, true, true));
     }
     #[test]
     fn scroll_demand_cannot_cross_a_comparison_or_page_boundary() {
-        let page = json!({"snapshot":"a", "nextCursor":"p2", "metadata":{"side":"head_to_index"}, "entries":[1]});
-        for next in [
-            json!({"snapshot":"b", "nextCursor":"p2", "metadata":page["metadata"], "entries":[1]}),
-            json!({"snapshot":"a", "nextCursor":"p3", "metadata":page["metadata"], "entries":[1,2]}),
-            json!({"snapshot":"a", "nextCursor":"p2", "metadata":{"side":"index_to_worktree"}, "entries":[1]}),
-        ] {
+        let mut page = lines_page("a", Some("p2"), 1);
+        page.metadata.side = Some(Side::HeadToIndex);
+        let mut other_side = page.clone();
+        other_side.metadata.side = Some(Side::IndexToWorktree);
+        let mut other_snapshot = page.clone();
+        other_snapshot.snapshot = "b".into();
+        let mut longer = lines_page("a", Some("p3"), 2);
+        longer.metadata.side = Some(Side::HeadToIndex);
+        for next in [other_snapshot, longer, other_side] {
             let mut demand = ScrollDemand::default();
-            demand.arm(page_key(&page));
-            assert!(!demand.take_ready(&next, Footer::More, true, true));
-            assert!(!demand.take_ready(&page, Footer::More, true, true));
+            demand.arm(key(&page));
+            assert!(!demand.take_ready(Some(&next), Footer::More, true, true));
+            assert!(!demand.take_ready(Some(&page), Footer::More, true, true));
         }
     }
     #[test]
     fn hidden_busy_failed_and_nonterminal_viewports_do_not_load() {
-        let page = json!({"snapshot":"a", "nextCursor":"p2", "entries":[1]});
+        let page = lines_page("a", Some("p2"), 1);
         for (footer, visible, at_end) in [
             (Footer::More, false, true),
             (Footer::More, true, false),
@@ -1032,28 +1088,27 @@ mod tests {
             (Footer::Unavailable, true, true),
         ] {
             let mut demand = ScrollDemand::default();
-            demand.arm(page_key(&page));
-            assert!(!demand.take_ready(&page, footer, visible, at_end));
-            assert!(!demand.take_ready(&page, Footer::More, true, true));
+            demand.arm(key(&page));
+            assert!(!demand.take_ready(Some(&page), footer, visible, at_end));
+            assert!(!demand.take_ready(Some(&page), Footer::More, true, true));
         }
     }
     #[test]
     fn presentation_cache_reuses_a_snapshot_prefix_and_invalidates_on_read_changes() {
         let cache = Cache::default();
-        let mut page = json!({"snapshot":"first","metadata":{"side":"index_to_worktree"},"entries":[],"nextCursor":"page-2"});
-        let first = cache.get(&page);
-        assert!(std::rc::Rc::ptr_eq(&first, &cache.get(&page)));
-        page["nextCursor"] = json!(null);
-        let completed = cache.get(&page);
+        let mut page = diff_page("first", working_metadata("s", "e"), vec![], Some("page-2"));
+        let first = cache.get(Some(&page));
+        assert!(std::rc::Rc::ptr_eq(&first, &cache.get(Some(&page))));
+        page.next_cursor = None;
+        let completed = cache.get(Some(&page));
         assert!(!std::rc::Rc::ptr_eq(&first, &completed));
-        page["metadata"]["side"] = json!("head_to_index");
-        let staged = cache.get(&page);
+        page.metadata.side = Some(Side::HeadToIndex);
+        let staged = cache.get(Some(&page));
         assert!(!std::rc::Rc::ptr_eq(&completed, &staged));
-        page["snapshot"] = json!("second");
-        assert!(!std::rc::Rc::ptr_eq(&staged, &cache.get(&page)));
-        // Unfingerprinted responses never qualify for reuse.
-        page["snapshot"] = json!(null);
-        assert!(!std::rc::Rc::ptr_eq(&cache.get(&page), &cache.get(&page)));
+        page.snapshot = "second".into();
+        assert!(!std::rc::Rc::ptr_eq(&staged, &cache.get(Some(&page))));
+        // No page never qualifies for reuse.
+        assert!(!std::rc::Rc::ptr_eq(&cache.get(None), &cache.get(None)));
     }
     #[test]
     fn eof_notes_and_control_characters_cannot_create_extra_display_rows() {
@@ -1077,35 +1132,64 @@ mod tests {
     #[test]
     fn context_choices_bind_the_response_to_the_requested_comparison() {
         let mut context = ContextLines::default();
-        let mut page = json!({"metadata":{"contextLines":3,"side":"index_to_worktree"}});
-        assert!(context.matches(&page, false));
-        assert!(!context.matches(&page, true));
+        let mut metadata = working_metadata("s", "e");
+        assert!(context.matches(&metadata, false));
+        assert!(!context.matches(&metadata, true));
         assert!(!context.set(3));
         assert!(!context.set(255));
         assert_eq!(context.value(), 3);
         for value in [0, 1, 3, 10, 25] {
             assert!(context.set(value));
-            page["metadata"]["contextLines"] = json!(value);
-            assert!(context.matches(&page, false));
-            let mut stale = page.clone();
-            stale["metadata"]["contextLines"] = json!(100);
+            metadata.context_lines = Some(u32::from(value));
+            assert!(context.matches(&metadata, false));
+            let mut stale = metadata.clone();
+            stale.context_lines = Some(100);
             assert!(!context.matches(&stale, false));
         }
-        assert!(!context.matches(&json!({}), false));
+        metadata.context_lines = None;
+        assert!(!context.matches(&metadata, false));
     }
     #[test]
     fn hunk_headers_preserve_ranges_without_counting_as_changed_lines() {
-        let encode = |s: &[u8]| base64::engine::general_purpose::STANDARD.encode(s);
-        let page = json!({"entries":[{"fileIndex":0,"hunks":[
-            {"id":"first-hunk","index":0,"oldStart":0,"oldLines":0,"newStart":1,"newLines":1,"lines":[
-                {"lineIndex":0,"byteOffset":0,"lineComplete":false,"origin":"+","newLine":1,"oldLine":null,"contentBytesB64":encode(&[vec![b'x'; 4095], vec![0xe2]].concat())},
-                {"lineIndex":0,"byteOffset":4096,"lineComplete":true,"origin":"+","newLine":1,"oldLine":null,"contentBytesB64":encode(&[0x82,0xac])}
-            ]},
-            {"id":"second-hunk","index":1,"oldStart":20,"oldLines":1,"newStart":21,"newLines":0,"lines":[
-                {"lineIndex":0,"byteOffset":0,"lineComplete":true,"origin":"-","oldLine":20,"newLine":null,"contentBytesB64":encode(b"removed\n")}
-            ]}
-        ]}],"nextCursor":null});
-        let rows = decode(&page).unwrap();
+        let mut first = hunk(
+            0,
+            Some("first-hunk"),
+            vec![
+                partial(0, 0, &split_euro()),
+                LineFragment {
+                    byte_offset: 4096,
+                    ..line(0, "+", None, &[0x82, 0xac])
+                },
+            ],
+        );
+        (
+            first.old_start,
+            first.old_lines,
+            first.new_start,
+            first.new_lines,
+        ) = (0, 0, 1, 1);
+        let mut second = hunk(
+            1,
+            Some("second-hunk"),
+            vec![LineFragment {
+                old_line: Some(20),
+                new_line: None,
+                ..line(0, "-", None, b"removed\n")
+            }],
+        );
+        (
+            second.old_start,
+            second.old_lines,
+            second.new_start,
+            second.new_lines,
+        ) = (20, 1, 21, 0);
+        let page = diff_page(
+            "s",
+            working_metadata("s", "e"),
+            vec![file(0, "file", vec![first, second])],
+            None,
+        );
+        let rows = decode(Some(&page)).unwrap();
         assert_eq!(rows.len(), 4);
         assert!(rows[0].heading && rows[2].heading);
         assert_eq!(rows[0].hunk.as_deref(), Some("first-hunk"));
@@ -1119,31 +1203,46 @@ mod tests {
     }
     #[test]
     fn metadata_only_changes_are_not_displayed_as_an_empty_diff() {
-        let page = json!({"entries":[{"fileIndex":0,"oldPath":{"bytesB64":"b2xk","display":"old"},"newPath":{"bytesB64":"bmV3","display":"new"},"oldMode":33188,"newMode":33261,"hunks":[]}]});
-        let rows = decode(&page).unwrap();
+        let mut renamed = file(0, "new", vec![]);
+        renamed.old_path = Path::new(b"old");
+        renamed.new_mode = 0o100755;
+        let page = diff_page("s", working_metadata("s", "e"), vec![renamed], None);
+        let rows = decode(Some(&page)).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].bytes, b"Renamed from old");
         assert_eq!(rows[1].bytes, "Mode 100644 → 100755".as_bytes());
         assert!(rows.iter().all(|row| row.heading && row.origin.is_empty()));
-        let new_file = json!({"entries":[{"oldMode":0,"newMode":33188,"hunks":[]}]});
-        assert!(decode(&new_file).unwrap().is_empty());
-        let binary = json!({"entries":[{"omissionReason":"binary","hunks":[]}]});
+        let mut added = file(0, "new", vec![]);
+        added.old_mode = 0;
+        let new_file = diff_page("s", working_metadata("s", "e"), vec![added], None);
+        assert!(decode(Some(&new_file)).unwrap().is_empty());
+        let mut binary = file(0, "new", vec![]);
+        binary.omission_reason = Some("binary".into());
+        let binary = diff_page("s", working_metadata("s", "e"), vec![binary], None);
         assert_eq!(
-            decode(&binary).unwrap()[0].bytes,
+            decode(Some(&binary)).unwrap()[0].bytes,
             b"Binary file changed. A text diff is not available."
         );
     }
     #[test]
     fn multi_file_diffs_identify_each_file_and_keep_context_between_headers() {
-        let file = |index, name: &str| {
-            json!({"fileIndex":index,"oldPath":{"bytesB64":name,"display":name},
-            "newPath":{"bytesB64":name,"display":name}, "hunks":[{"index":0,"oldStart":0,"oldLines":0,"newStart":1,"newLines":1,
-                "lines":[{"lineIndex":0,"byteOffset":0,"lineComplete":true,"origin":"+","oldLine":null,"newLine":1,"contentBytesB64":"YQo="}]}]})
+        let added = |index, name: &str| {
+            file(
+                index,
+                name,
+                vec![hunk(0, None, vec![line(0, "+", None, b"a\n")])],
+            )
         };
-        let mut page = json!({"snapshot":"s","nextCursor":null,"metadata":{"totalFiles":2},
-            "entries":[file(0, "docs/a.md"), file(1, "docs/nested/b.md")]});
+        let mut metadata = working_metadata("s", "e");
+        metadata.total_files = Some(2);
+        let mut page = diff_page(
+            "s",
+            metadata,
+            vec![added(0, "docs/a.md"), added(1, "docs/nested/b.md")],
+            None,
+        );
         let cache = Cache::default();
-        let view = cache.get(&page);
+        let view = cache.get(Some(&page));
         assert!(view.error.is_none());
         assert_eq!(view.lines.len(), 6);
         assert_eq!(view.lines[0].text(), "docs/a.md");
@@ -1159,34 +1258,39 @@ mod tests {
         }
         // A single-file page still gets an exact sticky file identity without
         // adding a redundant in-body heading.
-        page["snapshot"] = json!("single");
-        page["metadata"]["totalFiles"] = json!(1);
-        page["entries"].as_array_mut().unwrap().truncate(1);
-        let view = cache.get(&page);
+        page.snapshot = "single".into();
+        page.metadata.total_files = Some(1);
+        page.entries.truncate(1);
+        let view = cache.get(Some(&page));
         assert_eq!(view.lines.len(), 2);
         assert_eq!(view.file_at(1).as_deref(), Some("docs/a.md"));
     }
     #[test]
     fn pagination_preserves_selected_lines_but_refresh_does_not() {
         let cache = Cache::default();
-        let mut page = json!({"snapshot":"diff", "nextCursor":"page2",
-            "metadata":{"readOnly":false,"totalFiles":1,"sourceSnapshot":"status","entryId":"file","side":"index_to_worktree","contextLines":3},
-            "entries":[{"fileIndex":0,"status":"Untracked","oldMode":0,"newMode":33188,
-                "oldPath":{"bytesB64":"Zg=="},"newPath":{"bytesB64":"Zg=="},
-                "hunks":[{"id":"h","index":0,"totalLines":2,"oldStart":0,"oldLines":0,"newStart":1,"newLines":2,
-                    "lines":[{"lineIndex":0,"byteOffset":0,"lineComplete":true,"origin":"+","oldLine":null,"newLine":1,"id":"a","contentBytesB64":"YQo="}]}]}]});
-        let first = cache.get(&page);
+        let mut untracked = file(
+            0,
+            "f",
+            vec![hunk(0, Some("h"), vec![line(0, "+", Some("a"), b"a\n")])],
+        );
+        untracked.status = "Untracked".into();
+        untracked.old_mode = 0;
+        untracked.hunks[0].total_lines = 2;
+        let mut page = diff_page(
+            "diff",
+            working_metadata("status", "file"),
+            vec![untracked],
+            Some("page2"),
+        );
+        let first = cache.get(Some(&page));
         assert!(first.error.is_none());
         first.selection.borrow_mut().insert("a".into());
         assert!(!first.review.as_ref().unwrap().hunk_complete("h"));
-        let mut fragment = page["entries"][0].clone();
-        fragment["hunks"][0]["lines"][0] = json!({"lineIndex":1,"byteOffset":0,"lineComplete":true,"origin":"+","oldLine":null,"newLine":2,"id":"b","contentBytesB64":"Ygo="});
-        page["entries"][0]["hunks"][0]["lines"]
-            .as_array_mut()
-            .unwrap()
-            .push(fragment["hunks"][0]["lines"][0].clone());
-        page["nextCursor"] = json!(null);
-        let next = cache.get(&page);
+        page.entries[0].hunks[0]
+            .lines
+            .push(line(1, "+", Some("b"), b"b\n"));
+        page.next_cursor = None;
+        let next = cache.get(Some(&page));
         assert!(next.error.is_none());
         assert!(next.selection.borrow().contains("a"));
         assert!(std::rc::Rc::ptr_eq(
@@ -1198,187 +1302,219 @@ mod tests {
             next.lines.iter().filter(|r| r.selection.is_some()).count(),
             2
         );
-        page["snapshot"] = json!("refreshed");
-        assert!(cache.get(&page).selection.borrow().is_empty());
+        page.snapshot = "refreshed".into();
+        assert!(cache.get(Some(&page)).selection.borrow().is_empty());
     }
     #[test]
     fn line_selection_is_scoped_to_the_cached_comparison() {
         let cache = Cache::default();
-        let original = json!({"snapshot":"a","metadata":{"side":"index_to_worktree","contextLines":3},"entries":[],"nextCursor":null});
-        let first = cache.get(&original);
+        let original = diff_page("a", working_metadata("s", "e"), vec![], None);
+        let first = cache.get(Some(&original));
         first.selection.borrow_mut().insert("chosen".into());
-        assert!(cache.get(&original).selection.borrow().contains("chosen"));
-        for pointer in [
-            "/snapshot",
-            "/metadata/side",
-            "/metadata/contextLines",
-            "/nextCursor",
-        ] {
+        assert!(
+            cache
+                .get(Some(&original))
+                .selection
+                .borrow()
+                .contains("chosen")
+        );
+        let edits: [fn(&mut DiffPage); 4] = [
+            |p| p.snapshot = "changed".into(),
+            |p| p.metadata.side = Some(Side::HeadToIndex),
+            |p| p.metadata.context_lines = Some(10),
+            |p| p.next_cursor = Some("changed".into()),
+        ];
+        for edit in edits {
             let mut changed = original.clone();
-            *changed.pointer_mut(pointer).unwrap() = json!("changed");
-            assert!(cache.get(&changed).selection.borrow().is_empty());
+            edit(&mut changed);
+            assert!(cache.get(Some(&changed)).selection.borrow().is_empty());
         }
         // Returning after another comparison starts a new selection, too.
-        assert!(cache.get(&original).selection.borrow().is_empty());
+        assert!(cache.get(Some(&original)).selection.borrow().is_empty());
     }
     #[test]
     fn continuation_fragments_do_not_repeat_file_or_hunk_headers() {
-        let encode = |s: &[u8]| base64::engine::general_purpose::STANDARD.encode(s);
-        let mut file = json!({"fileIndex":0,"oldPath":{"bytesB64":"b2xk","display":"old"},"newPath":{"bytesB64":"bmV3","display":"new"},"oldMode":33188,"newMode":33261,"hunks":[{"index":0,"oldStart":0,"oldLines":0,"newStart":1,"newLines":1,"lines":[
-            {"lineIndex":0,"byteOffset":0,"lineComplete":false,"origin":"+","oldLine":null,"newLine":1,"contentBytesB64":encode(&[vec![b'x'; 4095], vec![0xe2]].concat())}
-        ]}]});
-        file["hunks"][0]["id"] = json!("hunk");
-        file["hunks"][0]["lines"][0]["id"] = json!(null);
-        let first = file.clone();
-        file["hunks"][0]["lines"][0]["byteOffset"] = json!(4096);
-        file["hunks"][0]["lines"][0]["id"] = json!("line");
-        file["hunks"][0]["lines"][0]["lineComplete"] = json!(true);
-        file["hunks"][0]["lines"][0]["contentBytesB64"] = json!(encode(&[0x82, 0xac]));
-        // merge_page retains file/hunk fragments from both pages.
-        let page = json!({"entries":[first,file],"nextCursor":null});
-        let rows = decode(&page).unwrap();
+        let fragment = |piece: LineFragment| {
+            let mut fragment = file(0, "new", vec![hunk(0, Some("hunk"), vec![piece])]);
+            fragment.old_path = Path::new(b"old");
+            fragment.new_mode = 0o100755;
+            fragment
+        };
+        let first = fragment(partial(0, 0, &split_euro()));
+        let last = fragment(LineFragment {
+            byte_offset: 4096,
+            ..line(0, "+", Some("line"), &[0x82, 0xac])
+        });
+        // A merged page keeps file/hunk fragments from both pages.
+        let page = diff_page("s", working_metadata("s", "e"), vec![first, last], None);
+        let rows = decode(Some(&page)).unwrap();
         assert_eq!(rows.len(), 4);
         assert_eq!(rows.iter().filter(|row| row.heading).count(), 3);
         assert_eq!(rows[3].bytes, format!("{}€", "x".repeat(4095)).as_bytes());
         assert!(!rows[3].heading);
         assert_eq!(rows[3].selection, Some(("hunk".into(), "line".into())));
         let mut mismatched = page;
-        mismatched["entries"][1]["hunks"][0]["id"] = json!("other");
-        assert!(decode(&mismatched).is_err());
+        mismatched.entries[1].hunks[0].id = Some("other".into());
+        assert!(decode(Some(&mismatched)).is_err());
     }
     #[test]
     fn clean_detail_requires_a_successful_settled_empty_status() {
-        let page = json!({"entries":[],"nextCursor":null});
+        use crate::git_fixture::{status_entry, status_page};
+        let page = status_page("s", vec![], None);
         let mut resources = Resources::default();
         let first = resources.begin("status").unwrap();
         assert_eq!(
-            EmptyChanges::for_page(&serde_json::Value::Null, resources.get("status"), false),
+            EmptyChanges::for_page(None, resources.get("status"), false),
             EmptyChanges::Loading
         );
-        resources.complete("status", first, Ok(page.clone()));
+        resources.complete_owned("status", first, Ok(true));
         assert_eq!(
-            EmptyChanges::for_page(&page, resources.get("status"), false),
+            EmptyChanges::for_page(Some(&page), resources.get("status"), false),
             EmptyChanges::Clean
         );
-        for incomplete in [
-            json!({"entries":[],"metadata":{"truncated":true}}),
-            json!({"entries":[],"metadata":{"totalEntries":1}}),
-            json!({"entries":[],"nextCursor":"more"}),
-        ] {
+        let mut truncated = page.clone();
+        truncated.metadata.truncated = true;
+        let mut counted = page.clone();
+        counted.metadata.total_entries = 1;
+        let more = status_page("s", vec![], Some("more"));
+        for incomplete in [truncated, counted, more] {
             assert_eq!(
-                EmptyChanges::for_page(&incomplete, resources.get("status"), false),
+                EmptyChanges::for_page(Some(&incomplete), resources.get("status"), false),
                 EmptyChanges::Unavailable
             );
         }
         let refresh = resources.begin("status").unwrap();
         assert_eq!(
-            EmptyChanges::for_page(&page, resources.get("status"), false),
+            EmptyChanges::for_page(Some(&page), resources.get("status"), false),
             EmptyChanges::Loading
         );
         resources.complete("status", refresh, Err("Connection lost".into()));
         assert_eq!(
-            EmptyChanges::for_page(&page, resources.get("status"), false),
+            EmptyChanges::for_page(Some(&page), resources.get("status"), false),
             EmptyChanges::Unavailable
         );
         let retry = resources.begin("status").unwrap();
-        let changed = json!({"entries":[{"entryId":"file"}],"nextCursor":null});
-        resources.complete("status", retry, Ok(changed.clone()));
+        let changed = status_page("s", vec![status_entry("file", "file")], None);
+        resources.complete_owned("status", retry, Ok(true));
         assert_eq!(
-            EmptyChanges::for_page(&changed, resources.get("status"), false),
+            EmptyChanges::for_page(Some(&changed), resources.get("status"), false),
             EmptyChanges::Select
         );
         assert_eq!(
-            EmptyChanges::for_page(&page, resources.get("status"), true),
+            EmptyChanges::for_page(Some(&page), resources.get("status"), true),
             EmptyChanges::Unavailable
         );
         assert_eq!(
-            EmptyChanges::for_page(&page, None, false),
+            EmptyChanges::for_page(Some(&page), None, false),
             EmptyChanges::Unavailable
         );
     }
     #[test]
     fn one_long_line_can_load_more_without_vertical_scrolling() {
-        let bytes = base64::engine::general_purpose::STANDARD.encode(vec![b'x'; 4096]);
         let pieces: Vec<_> = (0..16)
-            .map(|i| {
-                json!({
-                    "lineIndex":0,"byteOffset":i * 4096,"lineComplete":false,
-                    "origin":"+","newLine":1,"oldLine":null,"contentBytesB64":bytes
-                })
-            })
+            .map(|i| partial(0, i * 4096, &[b'x'; 4096]))
             .collect();
-        let page = json!({"entries":[{"fileIndex":0,"hunks":[{"index":0,"lines":pieces}]}],"nextCursor":"next"});
-        assert_eq!(decode(&page).unwrap().len(), 1);
-        assert_eq!(Footer::for_page(&page, None, None, false), Footer::More);
+        let page = diff_page(
+            "s",
+            working_metadata("s", "e"),
+            vec![file(0, "file", vec![hunk(0, None, pieces)])],
+            Some("next"),
+        );
+        // The hunk header, then the one partial line.
+        assert_eq!(decode(Some(&page)).unwrap().len(), 2);
+        assert_eq!(
+            Footer::for_page(Some(&page), None, None, false),
+            Footer::More
+        );
     }
     #[test]
     fn pagination_failure_and_pending_reads_never_claim_completion() {
-        let page = json!({"entries":[],"nextCursor":"next"});
+        let page = diff_page("s", working_metadata("s", "e"), vec![], Some("next"));
         let mut resources = Resources::default();
         let first = resources.begin("first").unwrap();
         assert_eq!(
-            Footer::for_page(
-                &serde_json::Value::Null,
-                resources.get("first"),
-                None,
-                false
-            ),
+            Footer::for_page(None, resources.get("first"), None, false),
             Footer::Loading
         );
-        resources.complete("first", first, Ok(page.clone()));
+        resources.complete_owned("first", first, Ok(true));
         let more = resources.begin("more").unwrap();
         assert_eq!(
-            Footer::for_page(&page, resources.get("first"), resources.get("more"), false),
+            Footer::for_page(
+                Some(&page),
+                resources.get("first"),
+                resources.get("more"),
+                false
+            ),
             Footer::LoadingMore
         );
         resources.complete("more", more, Err("Connection lost".into()));
         assert_eq!(
-            Footer::for_page(&page, resources.get("first"), resources.get("more"), false),
+            Footer::for_page(
+                Some(&page),
+                resources.get("first"),
+                resources.get("more"),
+                false
+            ),
             Footer::Failed
         );
-        let complete = json!({"entries":[],"nextCursor":null});
+        let complete = diff_page("s", working_metadata("s", "e"), vec![], None);
         assert_eq!(
-            Footer::for_page(&complete, None, None, false),
+            Footer::for_page(Some(&complete), None, None, false),
             Footer::Complete
         );
         assert_eq!(
-            Footer::for_page(&complete, None, None, true),
+            Footer::for_page(Some(&complete), None, None, true),
             Footer::Failed
         );
         assert_eq!(
-            Footer::for_page(&serde_json::Value::Null, None, None, false),
+            Footer::for_page(None, None, None, false),
             Footer::Unavailable
         );
     }
     #[test]
     fn utf8_split_across_pages_is_reassembled_before_display() {
-        let encode = |s: &[u8]| base64::engine::general_purpose::STANDARD.encode(s);
-        let page = json!({"entries":[{"fileIndex":0,"hunks":[{"index":0,"lines":[
-            {"lineIndex":0,"byteOffset":0,"lineComplete":false,"origin":"+","newLine":1,"oldLine":null,"contentBytesB64":encode(&[vec![b'x'; 4095], vec![0xe2]].concat())},
-            {"lineIndex":0,"byteOffset":4096,"lineComplete":true,"origin":"+","newLine":1,"oldLine":null,"contentBytesB64":encode(&[0x82,0xac])}
-        ]}]}],"nextCursor":null});
+        let page = diff_page(
+            "s",
+            working_metadata("s", "e"),
+            vec![file(
+                0,
+                "file",
+                vec![hunk(
+                    0,
+                    None,
+                    vec![
+                        partial(0, 0, &split_euro()),
+                        LineFragment {
+                            byte_offset: 4096,
+                            ..line(0, "+", None, &[0x82, 0xac])
+                        },
+                    ],
+                )],
+            )],
+            None,
+        );
         assert_eq!(
-            decode(&page).unwrap()[0].bytes,
+            decode(Some(&page)).unwrap()[1].bytes,
             format!("{}€", "x".repeat(4095)).as_bytes()
         );
         let mut broken = page;
-        broken["entries"][0]["hunks"][0]["lines"][1]["byteOffset"] = json!(2);
-        assert!(decode(&broken).is_err());
+        broken.entries[0].hunks[0].lines[1].byte_offset = 2;
+        assert!(decode(Some(&broken)).is_err());
     }
 }
 
 /// File metadata is repeated in paginated fragments; count each file once.
-fn diff_totals(page: &Value) -> Option<(u64, u64)> {
+fn diff_totals(page: Option<&DiffPage>) -> Option<(u64, u64)> {
     let mut seen = std::collections::HashSet::new();
     Some(
-        page["entries"]
-            .as_array()?
+        page?
+            .entries
             .iter()
-            .filter(|file| seen.insert(file["fileIndex"].as_u64()))
+            .filter(|file| seen.insert(file.file_index))
             .fold((0u64, 0u64), |(adds, dels), file| {
                 (
-                    adds.saturating_add(file["additions"].as_u64().unwrap_or(0)),
-                    dels.saturating_add(file["deletions"].as_u64().unwrap_or(0)),
+                    adds.saturating_add(file.additions),
+                    dels.saturating_add(file.deletions),
                 )
             }),
     )
@@ -1386,15 +1522,21 @@ fn diff_totals(page: &Value) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod statistics_tests {
     use super::diff_totals;
-    use serde_json::{Value, json};
+    use crate::git_fixture::{diff_page, file, working_metadata};
     #[test]
     fn diff_statistics_count_paginated_file_fragments_once() {
-        assert_eq!(
-            diff_totals(
-                &json!({"entries":[{"fileIndex":0,"additions":1527,"deletions":0},{"fileIndex":0,"additions":1527,"deletions":0},{"fileIndex":1,"additions":2,"deletions":3}]})
-            ),
-            Some((1529, 3))
+        let counted = |index, additions, deletions| {
+            let mut file = file(index, "file", vec![]);
+            (file.additions, file.deletions) = (additions, deletions);
+            file
+        };
+        let page = diff_page(
+            "s",
+            working_metadata("s", "e"),
+            vec![counted(0, 1527, 0), counted(0, 1527, 0), counted(1, 2, 3)],
+            None,
         );
-        assert_eq!(diff_totals(&Value::Null), None);
+        assert_eq!(diff_totals(Some(&page)), Some((1529, 3)));
+        assert_eq!(diff_totals(None), None);
     }
 }

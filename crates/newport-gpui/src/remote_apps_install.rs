@@ -1,6 +1,7 @@
 //! Remote Apps uses the backend's shared agent installer and progress. The
 //! backend owns verification, activation, rollback fencing and update policy.
-use serde_json::Value;
+use newport_protocol::desktop::applications::Availability;
+use newport_protocol::desktop::configuration::{InstallProgress, InstallStage};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug, Default)]
@@ -32,17 +33,25 @@ impl Progress {
         self.0.lock().unwrap().uploaded
     }
     #[cfg_attr(not(any(newport_remote_apps, test)), allow(dead_code))]
-    fn observe(&self, value: &Value) {
+    fn observe(&self, value: Option<&InstallProgress>) {
         let mut upload = self.0.lock().unwrap();
-        if value["stage"] == "uploading" {
-            upload.sent = value["sent"].as_u64().unwrap_or_default() as usize;
-            upload.total = value["total"].as_u64().unwrap_or_default() as usize;
-            upload.uploaded = upload.total > 0 && upload.sent >= upload.total;
-        } else {
-            upload.uploaded = matches!(
-                value["stage"].as_str(),
-                Some("installing" | "verifying" | "activating" | "ready")
-            );
+        match value {
+            Some(value) if value.stage == InstallStage::Uploading => {
+                upload.sent = value.sent as usize;
+                upload.total = value.total as usize;
+                upload.uploaded = upload.total > 0 && upload.sent >= upload.total;
+            }
+            _ => {
+                upload.uploaded = value.is_some_and(|value| {
+                    matches!(
+                        value.stage,
+                        InstallStage::Installing
+                            | InstallStage::Verifying
+                            | InstallStage::Activating
+                            | InstallStage::Ready
+                    )
+                });
+            }
         }
     }
 }
@@ -54,20 +63,20 @@ pub(crate) fn available() -> bool {
 #[cfg(newport_remote_apps)]
 pub(crate) fn start(
     server: &str,
-    status: &Value,
+    status: Option<&Availability>,
 ) -> Result<(Progress, async_channel::Receiver<Result<String, String>>), String> {
-    if status["bundledVariant"] != "full" {
+    let Some(status) =
+        status.filter(|status| status.bundled_variant == newport_protocol::product::Variant::Full)
+    else {
         return Err("This Newport build does not include the full agent. Update Newport to install Remote Apps.".into());
-    }
-    let expected = status["expectedConnection"].clone();
-    if expected["id"].as_str() != Some(server) {
+    };
+    let expected = status.expected_server.clone();
+    if expected.id.to_string() != server {
         return Err("Check the server connection again before installing.".into());
     }
-    let expected = newport_client::desktop_inputs::server_record(&expected)
-        .map_err(|error| error.to_string())?;
+    let expected_id = expected.id;
     let progress = Progress::default();
     let observed = progress.clone();
-    let server = server.to_owned();
     let (sender, receiver) = async_channel::bounded(1);
     std::thread::spawn(move || {
         let (finished, result) = std::sync::mpsc::channel();
@@ -98,22 +107,20 @@ pub(crate) fn start(
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     // Progress failure must not turn a completed backend install
                     // into an error. Its own reply is the authoritative outcome.
+                    use newport_protocol::desktop::{self, configuration};
                     if let Ok(snapshot) = backend
                         .execute_with_timeout(
-                            newport_protocol::desktop::Operation::Configuration(Box::new(
-                                newport_protocol::desktop::configuration::Operation::Snapshot(
-                                    Box::new(newport_protocol::common::Present {}),
-                                ),
+                            desktop::Operation::Configuration(Box::new(
+                                configuration::Operation::Snapshot(Box::new(
+                                    newport_protocol::common::Present {},
+                                )),
                             )),
                             std::time::Duration::from_secs(2),
                         )
-                        .map_err(|error| error.to_string())
-                        .and_then(|reply| {
-                            newport_client::desktop_result::project(reply)
-                                .map_err(|error| error.to_string())
-                        })
+                        .map_err(Into::into)
+                        .and_then(newport_client::backend::snapshot_reply)
                     {
-                        observed.observe(&snapshot["runtime"]["agentInstallation"][&server]);
+                        observed.observe(snapshot.runtime.agent_installation(expected_id));
                     }
                 }
             }
@@ -125,7 +132,7 @@ pub(crate) fn start(
 #[cfg(not(newport_remote_apps))]
 pub(crate) fn start(
     _: &str,
-    _: &Value,
+    _: Option<&Availability>,
 ) -> Result<(Progress, async_channel::Receiver<Result<String, String>>), String> {
     Err("Installing Remote Apps requires a Newport build with the full agent.".into())
 }
@@ -133,28 +140,31 @@ pub(crate) fn start(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     #[test]
     fn progress_tracks_backend_upload_and_verification() {
         let progress = Progress::default();
         assert!(!progress.uploaded());
-        progress.observe(&json!({"stage":"uploading", "sent":100, "total":200}));
+        let stage = |stage, sent, total| crate::snapshot_fixture::install(stage, sent, total);
+        progress.observe(Some(&stage(InstallStage::Uploading, 100, 200)));
         assert_eq!(progress.fraction(), 0.5);
         assert!(!progress.uploaded());
-        progress.observe(&json!({"stage":"verifying", "sent":0, "total":0}));
+        progress.observe(Some(&stage(InstallStage::Verifying, 0, 0)));
         assert!(progress.uploaded());
+        progress.observe(None);
+        assert!(!progress.uploaded());
         assert_eq!(Progress::at(200, 250).fraction(), 1.);
         assert_eq!(Progress::at(0, 0).fraction(), 0.);
     }
     #[test]
     fn invalid_install_requests_never_connect() {
-        assert!(start("server", &json!({"bundledVariant":"core"})).is_err());
-        assert!(
-            start(
-                "server",
-                &json!({"bundledVariant":"full", "expectedConnection":{"id":"other"}})
-            )
-            .is_err()
-        );
+        use crate::remote_apps_fixture::status;
+        use newport_protocol::product::Variant;
+        assert!(start("server", None).is_err());
+        assert!(start("server", Some(&status())).is_err());
+        let full = newport_protocol::desktop::applications::Availability {
+            bundled_variant: Variant::Full,
+            ..status()
+        };
+        assert!(start("server", Some(&full)).is_err());
     }
 }

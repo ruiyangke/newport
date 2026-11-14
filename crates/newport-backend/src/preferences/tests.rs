@@ -1,5 +1,6 @@
 use super::*;
 use crate::git::ClientIdentity;
+use newport_protocol::desktop::preferences::{Appearance, WindowPatch};
 use projects::{Project, git_projects_list, git_projects_remove, git_projects_save};
 use uuid::Uuid;
 
@@ -9,7 +10,11 @@ fn sidebar_width(state: &Preferences) -> Option<f64> {
     state.get("sidebarWidth").unwrap().and_then(|v| v.as_f64())
 }
 async fn set_sidebar_width(state: &Preferences, width: f64) -> Result<(), String> {
-    set_window_preferences(state, json!({ "sidebarWidth": width })).await
+    let patch = WindowPatch {
+        sidebar_width: Some(width as f32),
+        ..Default::default()
+    };
+    set_window_preferences(state, &patch).await
 }
 
 #[test]
@@ -69,26 +74,39 @@ async fn native_rpc_edits_and_reopens_preferences() {
     let task = tokio::spawn(listener.run(NativeHost(state)));
     let server = Uuid::new_v4();
     let bookmark = serde_json::to_value(project(server, b"/native/repo\xff")).unwrap();
-    let expected = bookmark.clone();
+    let expected = crate::rpc::test_fixture::project(&bookmark).unwrap();
+    let stored = bookmark.clone();
     tokio::task::spawn_blocking(move || {
-        let client = crate::rpc::test_fixture::Client::at_path(endpoint);
+        use newport_protocol::desktop::{Reply, preferences};
+        let client = crate::rpc::test_fixture::Client::at_path(endpoint.clone());
+        let execute = |method, args| match crate::rpc::test_fixture::execute(
+            endpoint.clone(),
+            method,
+            args,
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap()
+        {
+            Reply::Preferences(reply) => *reply,
+            _ => panic!("expected a preferences reply"),
+        };
+        let listed = |reply| match reply {
+            preferences::Reply::ProjectsList(projects) => projects.projects,
+            _ => panic!("expected a project list"),
+        };
         client
             .call(
                 "set_window_preferences",
                 json!({"preferences":{"sidebarWidth":260}}),
             )
             .unwrap();
+        assert!(matches!(
+            execute("git_projects_save", json!({"project":bookmark})),
+            preferences::Reply::ProjectsSave(saved) if *saved == expected
+        ));
         assert_eq!(
-            client
-                .call("git_projects_save", json!({"project":bookmark}))
-                .unwrap(),
-            bookmark
-        );
-        assert_eq!(
-            client
-                .call("git_projects_list", json!({"serverId":server}))
-                .unwrap(),
-            json!([bookmark])
+            listed(execute("git_projects_list", json!({"serverId":server}))),
+            std::slice::from_ref(&expected)
         );
         assert!(
             client
@@ -98,17 +116,13 @@ async fn native_rpc_edits_and_reopens_preferences() {
                 )
                 .is_err()
         );
-        client
-            .call(
-                "git_projects_remove",
-                json!({"serverId":Uuid::new_v4(),"projectId":bookmark["id"]}),
-            )
-            .unwrap();
+        execute(
+            "git_projects_remove",
+            json!({"serverId":Uuid::new_v4(),"projectId":bookmark["id"]}),
+        );
         assert_eq!(
-            client
-                .call("git_projects_list", json!({"serverId":server}))
-                .unwrap(),
-            json!([bookmark])
+            listed(execute("git_projects_list", json!({"serverId":server}))),
+            [expected]
         );
     })
     .await
@@ -119,7 +133,7 @@ async fn native_rpc_edits_and_reopens_preferences() {
     assert_eq!(sidebar_width(&reopened), Some(260.));
     assert_eq!(
         serde_json::to_value(git_projects_list(&reopened, server).await.unwrap()).unwrap(),
-        json!([expected])
+        json!([stored])
     );
 }
 
@@ -397,7 +411,12 @@ async fn window_preferences_merge_validate_and_keep_other_keys() {
     set_sidebar_width(&state, 245.).await.unwrap();
     crate::preferences::set_window_preferences(
         &state,
-        json!({"sidebarCompact": true, "appearance": "dark", "terminalOptionAsMeta": false}),
+        &WindowPatch {
+            sidebar_compact: Some(true),
+            appearance: Some(Appearance::Dark),
+            terminal_option_as_meta: Some(false),
+            ..Default::default()
+        },
     )
     .await
     .unwrap();
@@ -409,20 +428,21 @@ async fn window_preferences_merge_validate_and_keep_other_keys() {
         json!({"sidebarWidth": 245.0, "sidebarCompact": true, "appearance": "dark",
             "terminalOptionAsMeta": false})
     );
-    for invalid in [
-        json!({"appearance": "blue"}),
-        json!({"sidebarWidth": 999}),
-        json!({"sidebarCompact": "yes"}),
-        json!({"terminalOptionAsMeta": "yes"}),
-        json!({"unknown": 1}),
-        json!([]),
-    ] {
+    let path = directory.path().join("preferences.json");
+    let before = std::fs::read(&path).unwrap();
+    for width in [175.0, 300.01, f32::NAN, f32::INFINITY] {
+        let patch = WindowPatch {
+            sidebar_width: Some(width),
+            sidebar_compact: Some(false),
+            ..Default::default()
+        };
         assert!(
-            crate::preferences::set_window_preferences(&state, invalid.clone())
+            crate::preferences::set_window_preferences(&state, &patch)
                 .await
                 .is_err(),
-            "{invalid}"
+            "{width}"
         );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 }
 

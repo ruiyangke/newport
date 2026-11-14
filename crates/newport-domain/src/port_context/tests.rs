@@ -1,5 +1,50 @@
 use super::*;
-use serde_json::json;
+use serde_json::{Value, json};
+
+fn text<'a>(port: &'a Value, field: &str) -> Option<&'a str> {
+    port[field].as_str().filter(|value| !value.is_empty())
+}
+
+/// Discovery reports a container by its name or image.
+fn docker(port: &Value) -> bool {
+    text(port, "containerName").is_some() || text(port, "image").is_some()
+}
+
+fn arguments(port: &Value) -> Vec<String> {
+    port["arguments"]
+        .as_array()
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| value.as_str().unwrap_or_default().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn facts<'a>(port: &'a Value, arguments: &'a [String]) -> ProcessFacts<'a> {
+    ProcessFacts {
+        name: text(port, "processName"),
+        executable: text(port, "executable"),
+        executable_name: None,
+        directory: text(port, "workingDirectory"),
+        arguments,
+    }
+}
+
+fn kinds(port: &Value) -> Vec<&'static str> {
+    if docker(port) {
+        return container_kinds(text(port, "image"));
+    }
+    facts(port, &arguments(port)).kinds()
+}
+
+fn process_details(port: &Value) -> Vec<Detail> {
+    if docker(port) {
+        return Vec::new();
+    }
+    facts(port, &arguments(port)).details()
+}
 
 fn listener(overrides: Value) -> Value {
     let mut value = json!({
@@ -21,41 +66,6 @@ fn details(values: &[(&'static str, &str)]) -> Vec<Detail> {
             value: (*value).to_owned(),
         })
         .collect()
-}
-
-#[test]
-fn names_use_observed_service_identity_before_runtime_and_thread() {
-    assert_eq!(
-        owner(&listener(
-            json!({"containerName":"queue","applicationName":"Vite · app"})
-        )),
-        Some("queue")
-    );
-    assert_eq!(
-        name(&listener(
-            json!({"containerName":"shop-db-1","composeService":"db"})
-        )),
-        Some("db")
-    );
-    assert_eq!(
-        owner(&listener(
-            json!({"processName":null,"applicationName":null})
-        )),
-        None
-    );
-    assert_eq!(
-        service_name(&listener(
-            json!({"executable":"/usr/bin/node","processName":"MainThread","applicationName":"Vite · site"})
-        )),
-        Some("Vite · site".into())
-    );
-    assert_eq!(
-        service_name(&listener(
-            json!({"executable":"/usr/bin/postgres","processName":"postgres"})
-        )),
-        Some("Postgres".into())
-    );
-    assert_eq!(service_name(&json!({"port":5432})), None);
 }
 
 #[test]
@@ -348,51 +358,6 @@ fn docker_images_support_registry_ports_tags_and_digests_without_process_leakage
 }
 
 #[test]
-fn row_context_hides_title_and_project_repetition_but_keeps_operational_context() {
-    let base = "/home/ci/work/atlas";
-    let app = listener(
-        json!({"executable":"node","processName":"MainThread","arguments":["node","/site/vite.js"],"workingDirectory":format!("{base}/app")}),
-    );
-    assert_eq!(service_name(&app), Some("Vite".into()));
-    assert_eq!(
-        service_detail(&app, &["127.0.0.1".into()], Some(base)),
-        vec!["app/", "Node"]
-    );
-    let compose =
-        listener(json!({"containerName":"shop-db-1","composeService":"db","image":"postgres:17"}));
-    assert_eq!(
-        service_detail(&compose, &["127.0.0.1".into(), "::".into()], None),
-        vec!["Postgres", "all interfaces"]
-    );
-    assert_eq!(
-        service_detail(
-            &listener(json!({"executable":"sshd","processName":"sshd"})),
-            &[],
-            None
-        ),
-        vec!["sshd"]
-    );
-    assert_eq!(
-        service_detail(
-            &listener(json!({"executable":"postgres","processName":"postgres"})),
-            &[],
-            None
-        ),
-        Vec::<String>::new()
-    );
-    assert_eq!(
-        service_detail(
-            &listener(
-                json!({"executable":"node","processName":"node","workingDirectory":"/tmp/build/preview","workingDirectoryDeleted":true})
-            ),
-            &[],
-            None
-        ),
-        vec!["folder deleted", "/tmp/build/preview"]
-    );
-}
-
-#[test]
 fn tildify_and_short_paths_preserve_owner_and_directory_boundaries() {
     assert_eq!(
         tildify("/home/ci/work/atlas", &[Some("ci"), Some("ci")]),
@@ -426,68 +391,6 @@ fn tildify_and_short_paths_preserve_owner_and_directory_boundaries() {
 }
 
 #[test]
-fn tooltip_carries_full_paths_both_addresses_identity_and_stale_file_flags() {
-    let port = listener(
-        json!({"executable":"node","user":"ci","workingDirectoryDeleted":true,"executableDeleted":true,"command":"node server.js"}),
-    );
-    assert_eq!(
-        tooltip(&port, &["0.0.0.0".into(), "::".into()]),
-        "Project directory: /srv/acme/worker\nIts working directory was deleted while it kept running; it may be left over.\nIts program file changed since it started; restart it to run the new one.\nListening on 0.0.0.0, ::\nPID 40 · ci\nnode server.js"
-    );
-    let container = listener(json!({"containerName":"shop-db-1","pid":null}));
-    assert_eq!(
-        tooltip(&container, &["::1".into()]),
-        "Container: shop-db-1\nListening on ::1"
-    );
-}
-
-#[test]
-fn search_includes_curated_unabridged_context_and_secondary_bind_addresses() {
-    let port = listener(
-        json!({"port":8080,"executable":"python3","processName":"MainThread","applicationName":"Reporting","user":"CI","arguments":["python3","-m","gunicorn","--secret=NotSearchable"],"worktreePath":"/home/ci/WORK/feature/","worktreeBranch":"Feat/REPORTS"}),
-    );
-    let text = search_text(&port, &["127.0.0.1".into(), "::1".into()]);
-    assert_eq!(
-        text,
-        "8080 127.0.0.1 ::1 reporting mainthread ci 40 gunicorn python gunicorn /srv/acme/worker feat/reports /home/ci/work/feature"
-    );
-    assert!(!text.contains("notsearchable"));
-    assert!(!search_text(&listener(json!({"worktreeBranch":"ignored"})), &[]).contains("ignored"));
-}
-
-#[test]
-fn forward_names_only_add_a_linked_checkout_branch() {
-    assert_eq!(
-        forward_name(&listener(
-            json!({"executable":"node","arguments":["node","vite"],"worktreePath":"/srv/search","worktreeMain":false,"worktreeBranch":"feat/search"})
-        )),
-        "Vite · feat/search"
-    );
-    assert_eq!(
-        forward_name(
-            &json!({"worktreePath":"/srv/search","worktreeMain":false,"worktreeBranch":"feat/search"})
-        ),
-        "feat/search"
-    );
-    assert_eq!(
-        forward_name(&listener(
-            json!({"worktreeMain":true,"worktreeBranch":"main"})
-        )),
-        "worker"
-    );
-    assert_eq!(
-        forward_name(&listener(json!({"worktreeMain":false,"worktreeBranch":""}))),
-        "worker"
-    );
-    assert_eq!(
-        forward_name(&listener(
-            json!({"worktreeMain":false,"worktreeBranch":"ignored"})
-        )),
-        "worker"
-    );
-}
-
-#[test]
 fn nix_wrappers_normalize_display_and_detection_without_losing_raw_evidence() {
     for raw in [
         ".opencode-wrapped",
@@ -496,25 +399,15 @@ fn nix_wrappers_normalize_display_and_detection_without_losing_raw_evidence() {
     ] {
         let path = format!("/nix/store/hash-opencode/bin/{raw}");
         let port = json!({"processName":raw,"executable":path});
-        assert_eq!(service_name(&port).as_deref(), Some("OpenCode"));
         assert_eq!(kinds(&port), vec!["OpenCode"]);
-        assert!(tooltip(&port, &[]).contains(&path));
-        assert!(
-            !service_detail(&port, &[], None)
-                .iter()
-                .any(|d| d.contains("-wrapped"))
-        );
         assert_eq!(port["processName"], raw);
     }
-    let process_only = json!({"processName":".opencode-wrapped"});
-    assert_eq!(service_name(&process_only).as_deref(), Some("OpenCode"));
-    assert!(tooltip(&process_only, &[]).contains(".opencode-wrapped"));
+    assert_eq!(
+        kinds(&json!({"processName":".opencode-wrapped"})),
+        vec!["OpenCode"]
+    );
     let python = json!({"executable":"/nix/store/hash/bin/.python3.12-wrapped (deleted)","arguments":["python3.12", "-m", "http.server"]});
     assert_eq!(kinds(&python), vec!["HTTP server", "Python"]);
-    assert_eq!(
-        service_name(&json!({"processName":".custom-tool-wrapped"})).as_deref(),
-        Some("custom-tool")
-    );
 }
 
 #[test]
@@ -529,15 +422,11 @@ fn wrapper_normalization_does_not_rename_regular_programs_or_containers() {
         assert_eq!(unwrapped_name(name), name);
     }
     let container = json!({"containerName":".opencode-wrapped", "image":"custom:latest", "processName":".node-wrapped"});
-    assert_eq!(
-        service_name(&container).as_deref(),
-        Some(".opencode-wrapped")
-    );
     assert_eq!(kinds(&container), vec!["Docker"]);
 }
 
 #[test]
-fn docker_icons_use_images_while_names_preserve_container_and_compose_identity() {
+fn docker_icons_come_from_images_never_from_the_process() {
     for (image, expected) in [
         ("pgvector/pgvector:pg17", "Postgres"),
         (
@@ -559,25 +448,14 @@ fn docker_icons_use_images_while_names_preserve_container_and_compose_identity()
             json!({"containerName":"nginx", "composeService":"redis", "image":image,
             "executable":"postgres", "arguments":["node", "vite"]}),
         );
-        assert_eq!(service_name(&port).as_deref(), Some("redis"), "{image}");
         let inferred = image_service(image)
             .unwrap_or_else(|| image_repository(image).rsplit('/').next().unwrap());
         assert_eq!(inferred, expected, "{image}");
-        let standalone = json!({"containerName":"My-Original_Container", "image":image});
-        assert_eq!(
-            service_name(&standalone).as_deref(),
-            Some("My-Original_Container")
-        );
-        assert!(is_docker(&port));
-        assert!(tooltip(&port, &[]).contains(&format!("Image: {image}")));
-        assert!(tooltip(&port, &[]).contains("Compose service: redis"));
         assert!(!kinds(&port).contains(&"Vite"));
     }
     let image_only = json!({"image":"postgres:17"});
-    assert_eq!(service_name(&image_only).as_deref(), Some("postgres"));
     assert_eq!(kinds(&image_only), vec!["Postgres", "Docker"]);
     let missing_image = json!({"containerName":"postgres", "composeService":"redis"});
-    assert_eq!(service_name(&missing_image).as_deref(), Some("redis"));
     assert_eq!(kinds(&missing_image), vec!["Docker"]);
 }
 
@@ -619,9 +497,6 @@ fn popular_service_images_support_registries_mirrors_tags_and_digests() {
                 let image = format!("{prefix}{repository}{suffix}");
                 let port = json!({"image":image, "composeService":"My-Service", "containerName":"My_Container", "executable":"nginx"});
                 assert_eq!(kinds(&port), vec![expected, "Docker"], "{image}");
-                assert_eq!(service_name(&port).as_deref(), Some("My-Service"));
-                let standalone = json!({"image":image, "containerName":"My_Container"});
-                assert_eq!(service_name(&standalone).as_deref(), Some("My_Container"));
             }
         }
     }
@@ -718,7 +593,6 @@ fn kubectl_identifies_forwarding_and_proxy_after_global_flags() {
     ] {
         let port = json!({"executable":"/nix/store/hash/bin/.kubectl-wrapped", "arguments":args});
         assert_eq!(kinds(&port), vec!["kubectl port-forward"]);
-        assert_eq!(service_name(&port).as_deref(), Some("kubectl port-forward"));
     }
     assert_eq!(
         kinds(

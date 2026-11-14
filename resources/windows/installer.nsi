@@ -273,13 +273,6 @@ Section "Newport"
     Goto install_failed
   ${EndIf}
 
-  ClearErrors
-  ExecWait '"$INSTDIR\newport.exe" --check-pdf' $0
-  IfErrors install_failed
-  ${If} $0 != 0
-    Goto install_failed
-  ${EndIf}
-
   WriteINIStr "$Journal" "transaction" "phase" "committed"
   IfErrors install_failed
   !insertmacro FlushJournal

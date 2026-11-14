@@ -1,10 +1,14 @@
-use newport_protocol::desktop;
+use newport_protocol::desktop::{self, configuration};
+#[cfg(test)]
+mod account_fixture;
 mod grammars;
 pub mod remote_app_catalog;
 pub mod remote_app_focus;
 pub mod remote_app_tile;
 mod remote_apps;
 mod remote_apps_api;
+#[cfg(test)]
+mod remote_apps_fixture;
 mod remote_apps_install;
 mod remote_apps_sessions;
 pub mod separate_apps;
@@ -52,7 +56,6 @@ mod connection_wait;
 mod file_icon;
 mod file_icon_assets;
 mod file_image;
-mod file_pdf;
 mod file_preview;
 #[cfg(test)]
 mod file_test_backend;
@@ -174,6 +177,8 @@ fn test_shortcuts(cx: &mut gpui_kit::VisualTestContext, mac_keys: &str) {
         cx.simulate_keystrokes(&mac_keys.replace("cmd-", "ctrl-"));
     }
 }
+#[cfg(test)]
+mod git_fixture;
 mod server_picker;
 mod services;
 mod services_host;
@@ -181,11 +186,13 @@ mod settings;
 mod shell;
 mod sidebar_account;
 mod sidebar_layout;
+#[cfg(test)]
+mod snapshot_fixture;
 mod snapshot_presentation;
 mod state;
+mod terminal_agent;
 mod terminal_color;
 mod terminal_paint;
-mod terminal_scope;
 mod terminal_search_paint;
 mod terminal_session_menu;
 mod terminal_view;
@@ -208,7 +215,6 @@ use gpui_kit::component::{
     input::{Input, InputState},
 };
 use gpui_kit::{prelude::*, *};
-use serde_json::{Value, json};
 use state::Resources;
 use std::{
     sync::mpsc,
@@ -247,17 +253,25 @@ impl Page {
     }
 }
 struct Completion {
-    discovery: Option<connections::DiscoveryCompletion>,
-    pdf: Option<file_pdf::PdfBytes>,
-    pdf_text: Option<std::sync::Arc<file_pdf::TextLayer>>,
-    image: Option<std::sync::Arc<RenderImage>>,
     server: String,
     key: String,
     generation: u64,
-    result: Result<Value, newport_client::request_error::RequestError>,
+    result: Outcome,
+}
+/// A finished request's result. A request sent as
+/// [`request_dispatch::Request::Typed`] hands its decoded reply to the key's
+/// owner, a Git read its checked reply, a Git log poll its rendered commands,
+/// a file preview its decoded image, an added project its saved bookmark and
+/// a port discovery its prepared reading.
+enum Outcome {
+    Discovery(connections::DiscoveryCompletion),
+    Typed(Result<desktop::Reply, newport_client::request_error::RequestError>),
+    Git(Result<newport_protocol::git::Reply, newport_client::request_error::RequestError>),
+    Project(Result<desktop::preferences::Project, newport_client::request_error::RequestError>),
+    GitLog(Result<git_log_text::LogBatch, newport_client::request_error::RequestError>),
+    Preview(Result<file_image::Prepared, newport_client::request_error::RequestError>),
 }
 struct Work {
-    pdf: Option<file_pdf::PdfBytes>,
     key: String,
     generation: u64,
     request: request_dispatch::Request,
@@ -270,7 +284,7 @@ struct Newport {
     window_state: window_state::WindowState,
     terminals: std::collections::HashMap<String, Entity<terminal_workspace::Workspace>>,
     integration_refresh_pending: std::collections::HashSet<String>,
-    needle_details: std::collections::HashMap<String, Value>,
+    needle_details: std::collections::HashMap<String, configuration::ConnectionScope>,
     needle_uninstall_confirmations:
         std::collections::HashMap<String, integration_needle::Confirmation>,
     integration_shell: Entity<integration::ShellCode>,
@@ -295,6 +309,8 @@ struct Newport {
     remote_apps_transport: Option<(String, Option<u64>)>,
     /// Preference changes not yet sent, and keys with one in flight.
     remote_apps_mutations: std::collections::VecDeque<remote_apps::Mutation>,
+    /// The typed replies of the Remote apps reads in `resources`.
+    remote_apps_readings: remote_apps::Readings,
     remote_apps_mutating: std::collections::HashSet<String>,
     /// A status-only read asked for, and whether it replaces one in flight.
     remote_apps_recheck: Option<bool>,
@@ -325,7 +341,12 @@ struct Newport {
     content_width: f32,
     server: String,
     saved_server_selection: Option<String>,
-    snapshot: Value,
+    /// The backend's configuration and runtime state; `None` until the first
+    /// snapshot arrives.
+    snapshot: Option<configuration::Snapshot>,
+    /// When the snapshot's data last changed, in milliseconds since the Unix
+    /// epoch. An identical read keeps it, so it adds no new presentation.
+    snapshot_updated_at: Option<u64>,
     resources: Resources,
     work: request_dispatch::Dispatcher,
     replies: mpsc::Receiver<Completion>,
@@ -339,19 +360,29 @@ struct Newport {
     file_browsers: std::collections::HashMap<String, files::Browser>,
     files_refresh_requested: bool,
     file_preview_path: Option<String>,
-    file_preview_image: Option<std::sync::Arc<RenderImage>>,
+    /// The selected file's prepared preview; read it through
+    /// [`Self::file_preview_data`], which checks its read is still shown.
+    file_preview: Option<file_image::Prepared>,
+    /// The places panel's saved projects; read them through [`Self::owned`]
+    /// with the `file-places` key.
+    file_places: Option<desktop::preferences::Projects>,
     file_preview_viewport: file_preview::Viewport,
-    file_preview_pdf: Option<file_pdf::PdfBytes>,
-    file_preview_pdf_text: Option<std::sync::Arc<file_pdf::TextLayer>>,
     file_transfer: Option<file_transfer::Transfer>,
     file_chooser: Option<file_transfer::FileChooser>,
-    file_project_connection: Option<Value>,
-    selection: Option<Value>,
+    file_project_connection: Option<configuration::ConnectionScope>,
+    /// Decoded connection replies by request key; read them through
+    /// [`Self::connection_reply`].
+    connection_replies: std::collections::HashMap<String, desktop::connection::Reply>,
+    /// The saved project whose checkout Projects shows.
+    selection: Option<desktop::preferences::Project>,
     project_add: Option<project_add::Add>,
     project_edit: Option<project_library::Edit>,
     project_create: Option<project_create::Create>,
     project_creation_save_owner: Option<(uuid::Uuid, String)>,
     project_folder: Option<project_folder::Chooser>,
+    /// The folder chooser's listing; read it through [`Self::owned`] with the
+    /// `project-folder` key.
+    project_folder_listing: Option<desktop::files::Listing>,
     project_dialog_open: bool,
     project_dialog_feedback: project_dialog::FeedbackScope,
     project_dialog_rendering: bool,
@@ -364,7 +395,7 @@ struct Newport {
     git_mutation: Option<git_mutation::Mutation>,
     git_notice_clear: bool,
     git_log: git_log::Log,
-    git_drafts: std::collections::HashMap<String, git_commit::Draft>,
+    git_drafts: std::collections::HashMap<git_commit::DraftKey, git_commit::Draft>,
     notice: Option<String>,
     notification: Option<Notification>,
 }
@@ -394,23 +425,12 @@ gpui_kit::actions!(
         ToggleFullScreen
     ]
 );
-fn text(value: &Value, field: &str) -> String {
-    let v = &value[field];
-    v.as_str().map(str::to_owned).unwrap_or_else(|| {
-        if v.is_null() {
-            "—".into()
-        } else {
-            v.to_string()
-        }
-    })
-}
-fn data_server_exists(snapshot: &Value) -> bool {
-    snapshot["config"]["servers"]
-        .as_array()
-        .is_some_and(|a| !a.is_empty())
-}
-fn rows(value: &Value) -> Vec<Value> {
-    value.as_array().cloned().unwrap_or_default()
+/// Now, in milliseconds since the Unix epoch, for a query's update time.
+fn now_millis() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
 }
 fn label(value: impl Into<SharedString>) -> Div {
     div()
@@ -425,8 +445,11 @@ fn cell(value: impl Into<SharedString>, width: f32) -> Div {
         .overflow_hidden()
         .child(value.into())
 }
-fn bytes(value: &Value) -> String {
-    let n = value.as_f64().unwrap_or(0.);
+fn bytes(value: u64) -> String {
+    byte_size(value as f64)
+}
+/// A byte count in binary units.
+fn byte_size(n: f64) -> String {
     if n < 1024. {
         format!("{n:.0} B")
     } else if n < 1048576. {
@@ -442,11 +465,6 @@ fn bytes(value: &Value) -> String {
 fn desktop_server(value: &str) -> Result<uuid::Uuid, newport_client::request_error::RequestError> {
     newport_client::desktop_inputs::identity(value, "server identity")
         .map_err(|error| error.to_string().into())
-}
-fn desktop_server_record(
-    value: &Value,
-) -> Result<desktop::configuration::Server, newport_client::request_error::RequestError> {
-    newport_client::desktop_inputs::server_record(value).map_err(|error| error.to_string().into())
 }
 impl Newport {
     /// Saves window state and closes this window's terminals.
@@ -488,6 +506,7 @@ impl Newport {
         cx: &mut Context<Self>,
     ) -> Self {
         Self::observe_connectivity(cx);
+        connectivity::observe_latency(cx, |this: &Self| &this.server).detach();
         Self::observe_modal_visibility(window, cx);
         cx.observe_window_bounds(window, |this, window, cx| {
             this.window_state.capture(window, cx)
@@ -542,6 +561,7 @@ impl Newport {
         cx.set_global(terminal_workspace::RestoredTabs(
             saved.terminals.clone().into_iter().collect(),
         ));
+        cx.set_global(project_editor::RestoredFiles(saved.files.clone()));
         let ui_state = ui_state::Writer::start(saved);
         cx.set_global(terminal_workspace::TabsSaver(ui_state.clone()));
         cx.set_global(terminal_workspace::HeldShellsSource(
@@ -604,7 +624,8 @@ impl Newport {
             content_width: 854.,
             server: restored.server,
             saved_server_selection: None,
-            snapshot: Value::Null,
+            snapshot: None,
+            snapshot_updated_at: None,
             resources: Resources::default(),
             work,
             replies,
@@ -620,7 +641,8 @@ impl Newport {
             file_browsers: Default::default(),
             files_refresh_requested: true,
             file_preview_path: None,
-            file_preview_image: None,
+            file_preview: None,
+            file_places: None,
             remote_apps: None,
             remote_apps_refresh: false,
             remote_apps_visit: 0,
@@ -628,12 +650,11 @@ impl Newport {
             remote_apps_returned: false,
             remote_apps_transport: None,
             remote_apps_mutations: Default::default(),
+            remote_apps_readings: Default::default(),
             remote_apps_mutating: Default::default(),
             remote_apps_recheck: None,
             remote_apps_record_tried: None,
             file_preview_viewport: file_preview::Viewport::default(),
-            file_preview_pdf: None,
-            file_preview_pdf_text: None,
             file_transfer: None,
             file_chooser: None,
             file_project_connection: None,
@@ -643,6 +664,8 @@ impl Newport {
             project_create: None,
             project_creation_save_owner: None,
             project_folder: None,
+            project_folder_listing: None,
+            connection_replies: Default::default(),
             project_dialog_open: false,
             project_dialog_feedback: Default::default(),
             project_dialog_rendering: false,
@@ -664,17 +687,176 @@ impl Newport {
         this
     }
     fn request_snapshot(&mut self) {
-        self.request(
+        self.request_work(
             "snapshot",
-            newport_protocol::desktop::Operation::Configuration(Box::new(
-                newport_protocol::desktop::configuration::Operation::Snapshot(Box::new(
+            request_dispatch::Request::Typed(Box::new(desktop::Operation::Configuration(
+                Box::new(configuration::Operation::Snapshot(Box::new(
                     newport_protocol::common::Present {},
-                )),
-            )),
+                ))),
+            ))),
         );
     }
-    fn request(&mut self, key: &str, operation: newport_protocol::desktop::Operation) {
-        self.request_work(key, request_dispatch::Request::Desktop(Box::new(operation)));
+    /// Settles a configuration read. Returns whether its generation was still
+    /// current, and the snapshot it delivered.
+    fn complete_snapshot(
+        &mut self,
+        generation: u64,
+        result: Result<desktop::Reply, newport_client::request_error::RequestError>,
+    ) -> (bool, Option<configuration::Snapshot>) {
+        let snapshot = result.and_then(newport_client::backend::snapshot_reply);
+        let changed = snapshot
+            .as_ref()
+            .is_ok_and(|next| self.snapshot.as_ref() != Some(next));
+        let updated_at = match &snapshot {
+            Ok(_) if changed || self.snapshot_updated_at.is_none() => now_millis(),
+            _ => self.snapshot_updated_at,
+        };
+        let status = newport_client::resources::QueryStatus {
+            error: snapshot.as_ref().err().cloned(),
+            updated_at,
+            ..Default::default()
+        };
+        let has_data = snapshot.is_ok() || self.snapshot.is_some();
+        if !self
+            .resources
+            .complete_query("snapshot", generation, &status, has_data, changed)
+        {
+            return (false, None);
+        }
+        self.snapshot_updated_at = updated_at;
+        (true, snapshot.ok())
+    }
+    /// Settles a read whose typed data the page keeps in `held`, with whether
+    /// it differs from the data shown. A failed read keeps that data.
+    fn complete_owned<T>(
+        &mut self,
+        key: &str,
+        generation: u64,
+        result: Result<(T, bool), newport_client::request_error::RequestError>,
+        held: fn(&mut Self) -> &mut Option<T>,
+    ) -> bool {
+        let (data, result) = match result {
+            Ok((data, changed)) => (Some(data), Ok(changed)),
+            Err(error) => (None, Err(error)),
+        };
+        let accepted = self.resources.complete_owned(key, generation, result);
+        if accepted && let Some(data) = data {
+            *held(self) = Some(data);
+        }
+        accepted
+    }
+    /// The data `held` keeps for `key`, while that key's read still shows it.
+    fn owned<'a, T>(&'a self, key: &str, held: &'a Option<T>) -> Option<&'a T> {
+        self.resources
+            .get(key)
+            .is_some_and(newport_client::resources::Resource::has_value)
+            .then_some(held.as_ref())
+            .flatten()
+    }
+    /// The decoded connection reply `key`'s read still shows.
+    fn connection_reply(&self, key: &str) -> Option<&desktop::connection::Reply> {
+        self.resources
+            .get(key)
+            .is_some_and(newport_client::resources::Resource::has_value)
+            .then(|| self.connection_replies.get(key))
+            .flatten()
+    }
+    /// Settles a connection or configuration request. A reply that carries
+    /// data is kept for [`Self::connection_reply`]; an acknowledgement settles
+    /// its key without data, as a failure does.
+    fn complete_connection(
+        &mut self,
+        key: &str,
+        generation: u64,
+        result: Result<desktop::Reply, newport_client::request_error::RequestError>,
+    ) -> bool {
+        use desktop::connection::Reply as Connection;
+        let reply = match result {
+            Ok(desktop::Reply::Connection(reply)) => match *reply {
+                Connection::SetupInstall(_)
+                | Connection::SetupSkip(_)
+                | Connection::TestConnection(_)
+                | Connection::ReinstallAgent(_)
+                | Connection::InspectAgent(_) => None,
+                Connection::ConnectionsQuery(_) => {
+                    return self.resources.complete_detailed(
+                        key,
+                        generation,
+                        Err("Port discovery replies are read by the Ports page.".into()),
+                    );
+                }
+                reply => Some(reply),
+            },
+            Ok(desktop::Reply::Configuration(reply))
+                if !matches!(
+                    *reply,
+                    configuration::Reply::Snapshot(_) | configuration::Reply::ForwardTunnelBatch(_)
+                ) =>
+            {
+                None
+            }
+            Ok(_) => {
+                return self.resources.complete_detailed(
+                    key,
+                    generation,
+                    Err("The backend answered with an unexpected reply.".into()),
+                );
+            }
+            Err(error) => {
+                return self
+                    .resources
+                    .complete_detailed(key, generation, Err(error));
+            }
+        };
+        let Some(reply) = reply else {
+            return self.resources.complete_detailed(key, generation, Ok(()));
+        };
+        let accepted = self.resources.complete_owned(key, generation, Ok(true));
+        if accepted {
+            self.connection_replies.insert(key.to_owned(), reply);
+        }
+        accepted
+    }
+    /// Refreshes a key whose owner reads the decoded reply, keeping its data
+    /// on screen meanwhile.
+    fn request_typed_refresh(
+        &mut self,
+        key: &str,
+        operation: Result<desktop::Operation, newport_client::request_error::RequestError>,
+    ) {
+        let generation = self.resources.begin_refresh(key, false);
+        self.dispatch_typed(key, operation, generation);
+    }
+    /// Starts a read whose owner reads the decoded reply.
+    fn request_typed(
+        &mut self,
+        key: &str,
+        operation: Result<desktop::Operation, newport_client::request_error::RequestError>,
+    ) {
+        let generation = self.resources.begin(key);
+        self.dispatch_typed(key, operation, generation);
+    }
+    /// Sends a request whose owner reads the decoded reply, under a generation
+    /// the caller began.
+    fn dispatch_typed(
+        &mut self,
+        key: &str,
+        operation: Result<desktop::Operation, newport_client::request_error::RequestError>,
+        generation: Option<u64>,
+    ) {
+        match operation {
+            Ok(operation) => self.dispatch_request(
+                key,
+                request_dispatch::Request::Typed(Box::new(operation)),
+                generation,
+            ),
+            Err(error) => {
+                if let Some(generation) = generation {
+                    self.resources
+                        .complete_detailed(key, generation, Err(error));
+                }
+            }
+        }
     }
     fn request_work(&mut self, key: &str, request: request_dispatch::Request) {
         let generation = if key == "snapshot" {
@@ -684,69 +866,21 @@ impl Newport {
         };
         self.dispatch_request(key, request, generation);
     }
-    fn request_result(
-        &mut self,
-        key: &str,
-        operation: Result<
-            newport_protocol::desktop::Operation,
-            newport_client::request_error::RequestError,
-        >,
-    ) {
-        match operation {
-            Ok(operation) => self.request(key, operation),
-            Err(error) => {
-                if let Some(generation) = self.resources.begin(key) {
-                    self.resources
-                        .complete_detailed(key, generation, Err(error));
-                }
-            }
+    /// Settles a read that could not be sent, as if it had failed.
+    fn request_failed(&mut self, key: &str, error: newport_client::request_error::RequestError) {
+        if let Some(generation) = self.resources.begin(key) {
+            self.resources
+                .complete_detailed(key, generation, Err(error));
         }
     }
-    fn request_refresh_result(
-        &mut self,
-        key: &str,
-        operation: Result<desktop::Operation, newport_client::request_error::RequestError>,
-    ) {
-        let generation = self.resources.begin_refresh(key, false);
-        self.dispatch_result(key, operation, generation);
+    /// Starts a Git read whose owner reads the checked reply from
+    /// [`Self::git_reply`].
+    fn request_git_typed(&mut self, key: &str, request: newport_protocol::git::Request) {
+        let generation = self.resources.begin(key);
+        self.dispatch_git_typed(key, request, generation);
     }
-    fn dispatch_result(
-        &mut self,
-        key: &str,
-        operation: Result<desktop::Operation, newport_client::request_error::RequestError>,
-        generation: Option<u64>,
-    ) {
-        match operation {
-            Ok(operation) => self.dispatch_request(
-                key,
-                request_dispatch::Request::Desktop(Box::new(operation)),
-                generation,
-            ),
-            Err(error) => {
-                if let Some(generation) = generation {
-                    self.resources
-                        .complete_detailed(key, generation, Err(error));
-                }
-            }
-        }
-    }
-    fn request_git(&mut self, key: &str, request: newport_protocol::git::Request) {
-        let operation = uuid::Uuid::parse_str(&self.server)
-            .map_err(|error| newport_client::request_error::RequestError::from(error.to_string()))
-            .map(|server| {
-                newport_protocol::desktop::Operation::Git(Box::new(
-                    newport_protocol::desktop::git::Operation::Request(Box::new(
-                        newport_protocol::desktop::git::RequestArgs {
-                            server,
-                            request,
-                            retry_connection: false,
-                        },
-                    )),
-                ))
-            });
-        self.request_result(key, operation);
-    }
-    fn dispatch_git_request(
+    /// Sends a Git read under a generation the caller began.
+    fn dispatch_git_typed(
         &mut self,
         key: &str,
         request: newport_protocol::git::Request,
@@ -755,43 +889,31 @@ impl Newport {
         match uuid::Uuid::parse_str(&self.server) {
             Ok(server) => self.dispatch_request(
                 key,
-                request_dispatch::Request::Desktop(Box::new(
-                    newport_protocol::desktop::Operation::Git(Box::new(
-                        newport_protocol::desktop::git::Operation::Request(Box::new(
-                            newport_protocol::desktop::git::RequestArgs {
-                                server,
-                                request,
-                                retry_connection: false,
-                            },
-                        )),
-                    )),
+                request_dispatch::Request::Git(Box::new(
+                    newport_protocol::desktop::git::RequestArgs {
+                        server,
+                        request,
+                        retry_connection: false,
+                    },
                 )),
                 generation,
             ),
             Err(error) => {
                 if let Some(generation) = generation {
-                    self.resources
-                        .complete(key, generation, Err(error.to_string()));
+                    self.resources.complete_detailed(
+                        key,
+                        generation,
+                        Err(error.to_string().into()),
+                    );
                 }
             }
         }
     }
-    fn request_git_refresh(&mut self, key: &str, request: newport_protocol::git::Request) {
-        match uuid::Uuid::parse_str(&self.server) {
-            Ok(server) => self.request_refresh(
-                key,
-                newport_protocol::desktop::Operation::Git(Box::new(
-                    newport_protocol::desktop::git::Operation::Request(Box::new(
-                        newport_protocol::desktop::git::RequestArgs {
-                            server,
-                            request,
-                            retry_connection: false,
-                        },
-                    )),
-                )),
-            ),
-            Err(error) => self.request_result(key, Err(error.to_string().into())),
-        }
+    /// The checked Git reply `key`'s read still shows.
+    fn git_reply(&self, key: &str) -> Option<&newport_protocol::git::Reply> {
+        self.resources
+            .get(key)
+            .and_then(newport_client::resources::Resource::git)
     }
     fn request_repository_settings(&mut self, key: &str, repo_id: String) {
         match uuid::Uuid::parse_str(&self.server) {
@@ -799,16 +921,48 @@ impl Newport {
                 key,
                 request_dispatch::Request::RepositorySettings { server, repo_id },
             ),
-            Err(error) => self.request_result(key, Err(error.to_string().into())),
+            Err(error) => self.request_failed(key, error.to_string().into()),
         }
     }
-    fn request_refresh(&mut self, key: &str, operation: newport_protocol::desktop::Operation) {
+    /// Asks the backend to drop its cached reads of the open repository. The
+    /// reported repository lands in [`git::Workspace::refreshed`].
+    fn request_repository_refresh(&mut self, key: &str, server: uuid::Uuid) {
         let generation = self.resources.begin_refresh(key, false);
         self.dispatch_request(
             key,
-            request_dispatch::Request::Desktop(Box::new(operation)),
+            request_dispatch::Request::Typed(Box::new(desktop::Operation::Git(Box::new(
+                desktop::git::Operation::RefreshRepository(Box::new(
+                    desktop::git::RefreshRepositoryArgs {
+                        server,
+                        repo_id: self.git_repository_id(),
+                    },
+                )),
+            )))),
             generation,
         );
+    }
+    fn complete_repository_refresh(
+        &mut self,
+        key: &str,
+        generation: u64,
+        result: Result<desktop::Reply, newport_client::request_error::RequestError>,
+    ) -> bool {
+        let result = result.and_then(|reply| match reply {
+            desktop::Reply::Git(reply) => match *reply {
+                desktop::git::Reply::RefreshRepository(refreshed) => Ok(refreshed.repo_id),
+                _ => Err("Invalid Git response operation".into()),
+            },
+            _ => Err("Invalid Git response family".into()),
+        });
+        let changed = result
+            .as_ref()
+            .map(|repo| self.git.refreshed.get(key) != Some(repo))
+            .map_err(Clone::clone);
+        let accepted = self.resources.complete_owned(key, generation, changed);
+        if accepted && let Ok(repo) = result {
+            self.git.refreshed.insert(key.to_owned(), repo);
+        }
+        accepted
     }
     fn dispatch_request(
         &mut self,
@@ -822,7 +976,6 @@ impl Newport {
         if self
             .work
             .try_send(Work {
-                pdf: None,
                 key: key.into(),
                 generation,
                 request,
@@ -851,7 +1004,7 @@ impl Newport {
             |this: &Self| &this.server,
             |this, cx| {
                 this.request_snapshot();
-                if connectivity::scoped(&this.server, &this.snapshot, cx)
+                if connectivity::scoped(&this.server, this.snapshot.as_ref(), cx)
                     .is_some_and(|state| state.phase == connectivity::Phase::Connected)
                     && this.configuration_available()
                 {
@@ -915,21 +1068,90 @@ impl Newport {
                 (resource.updated_at.is_some() || resource.has_value())
                     .then_some(resource.presentation_revision)
             });
-            let opened = (reply.key == "repository")
-                .then(|| reply.result.as_ref().ok().cloned())
-                .flatten();
-            let accepted = if let Some(discovery) = reply.discovery {
-                reply.key == "page"
-                    && self.complete_connections_reading(&reply.server, reply.generation, discovery)
-            } else {
-                self.resources
-                    .complete_detailed(&reply.key, reply.generation, reply.result)
+            let opened = match &reply.result {
+                Outcome::Git(Ok(newport_protocol::git::Reply::Open(repo)))
+                    if reply.key == "repository" =>
+                {
+                    Some(repo.repo_id.clone())
+                }
+                _ => None,
+            };
+            let mut received = None;
+            let mut git_log = None;
+            let mut saved_project = None;
+            let accepted = match reply.result {
+                Outcome::Discovery(discovery) => {
+                    reply.key == "ports"
+                        && self.complete_connections_reading(
+                            &reply.server,
+                            reply.generation,
+                            discovery,
+                        )
+                }
+                Outcome::Typed(result) if reply.key == "snapshot" => {
+                    let (accepted, snapshot) = self.complete_snapshot(reply.generation, result);
+                    received = snapshot;
+                    accepted
+                }
+                Outcome::Typed(result) if reply.key == settings::WINDOW_PREFERENCES => {
+                    self.complete_window_preferences(reply.generation, result)
+                }
+                Outcome::Typed(result) if matches!(reply.key.as_str(), "overview" | "history") => {
+                    self.complete_metrics(&reply.key, reply.generation, result)
+                }
+                Outcome::Typed(result) if reply.key == "file-places" => {
+                    self.complete_file_places(reply.generation, result)
+                }
+                Outcome::Typed(result) if reply.key == "connection-projects" => {
+                    self.complete_connection_projects(reply.generation, result)
+                }
+                Outcome::Typed(result) if reply.key == "projects" => {
+                    self.complete_projects(reply.generation, result)
+                }
+                Outcome::Typed(result) if reply.key == "project-folder" => {
+                    self.complete_project_folder(reply.generation, result)
+                }
+                Outcome::Typed(result) if reply.key == "project-edit" => {
+                    self.complete_project_edit(reply.generation, result)
+                }
+                Outcome::Typed(result)
+                    if matches!(reply.key.as_str(), "git-refresh" | "git-index-refresh") =>
+                {
+                    self.complete_repository_refresh(&reply.key, reply.generation, result)
+                }
+                Outcome::Typed(result) if reply.key.starts_with("remote-apps-") => self
+                    .remote_apps_readings
+                    .complete(&mut self.resources, &reply.key, reply.generation, result),
+                Outcome::Typed(result) => {
+                    self.complete_connection(&reply.key, reply.generation, result)
+                }
+                Outcome::Git(result) => {
+                    self.resources
+                        .complete_git(&reply.key, reply.generation, result)
+                }
+                Outcome::Project(result) => {
+                    let (accepted, project) =
+                        self.complete_added_project(&reply.key, reply.generation, result);
+                    saved_project = project;
+                    accepted
+                }
+                Outcome::GitLog(result) if reply.key == "git-log-events" => {
+                    let (accepted, batch) = self.complete_git_log(reply.generation, result);
+                    git_log = batch;
+                    accepted
+                }
+                Outcome::GitLog(_) => false,
+                Outcome::Preview(result) if reply.key == "preview" => self.complete_owned(
+                    "preview",
+                    reply.generation,
+                    result.map(|prepared| (prepared, true)),
+                    |this| &mut this.file_preview,
+                ),
+                Outcome::Preview(_) => false,
             };
             if !accepted {
-                if let Some(repo) = opened {
-                    std::thread::spawn(move || {
-                        backend::Backend::discover().release_repository(&reply.server, &repo)
-                    });
+                if let Some(repo_id) = opened {
+                    git::release_repository(reply.server, repo_id);
                 }
                 continue;
             }
@@ -953,7 +1175,7 @@ impl Newport {
                 changed |= presentation_changed || recovered || reconciled;
                 continue;
             }
-            if reply.key == "page" && self.page == Page::Projects {
+            if reply.key == "projects" && self.page == Page::Projects {
                 self.restore_git_destination();
             }
             if reply.key.starts_with("remote-apps-") {
@@ -963,7 +1185,10 @@ impl Newport {
             }
             let background_read = reply.key == "snapshot"
                 || reply.key == "connection-projects" && self.page == Page::Ports
-                || reply.key == "page" && matches!(self.page, Page::Ports | Page::Projects)
+                || matches!(
+                    (reply.key.as_str(), self.page),
+                    ("ports", Page::Ports) | ("projects", Page::Projects)
+                )
                 || reply.key.starts_with("project-status:")
                 || reply.key.starts_with("remote-apps-");
             let configuration_acknowledgement = reply.key == "snapshot"
@@ -992,45 +1217,28 @@ impl Newport {
             changed |= reply.key != "snapshot"
                 || configuration_acknowledgement
                 || previous_snapshot_status != snapshot_status(self.resources.get("snapshot"))
-                || snapshot_presentation::changed(
-                    &self.snapshot,
-                    self.resources
-                        .get("snapshot")
-                        .map(|resource| &resource.value)
-                        .unwrap_or(&Value::Null),
-                    &self.server,
-                    match self.page {
-                        Page::Integration => snapshot_presentation::Surface::Integration,
-                        Page::Overview if self.setup_visible() => {
-                            snapshot_presentation::Surface::Setup
-                        }
-                        _ => snapshot_presentation::Surface::General,
-                    },
-                );
+                || received.as_ref().is_some_and(|next| {
+                    snapshot_presentation::changed(
+                        self.snapshot.as_ref(),
+                        next,
+                        self.server_id(),
+                        match self.page {
+                            Page::Integration => snapshot_presentation::Surface::Integration,
+                            Page::Overview if self.setup_visible() => {
+                                snapshot_presentation::Surface::Setup
+                            }
+                            _ => snapshot_presentation::Surface::General,
+                        },
+                    )
+                });
             // Even quiet snapshots must reconcile retained connection owners.
-            if reply.key == "preview"
-                && self
-                    .resources
-                    .get("preview")
-                    .is_some_and(|resource| resource.error.is_none())
-            {
-                self.file_preview_image = reply.image;
-                self.file_preview_pdf = reply.pdf;
-                self.file_preview_pdf_text = reply.pdf_text;
-            }
             if reply.key == "snapshot" {
-                let data = self.value("snapshot");
-                if !data.is_null() {
-                    let old_server = self.snapshot["config"]["servers"]
-                        .as_array()
-                        .and_then(|a| a.iter().find(|s| s["id"] == self.server))
-                        .cloned();
-                    let old_connection = old_server
-                        .as_ref()
-                        .map(|server| terminal_scope::connection(server, &self.snapshot));
+                if let Some(data) = received {
+                    let old_server = self.selected_server().cloned();
+                    let old_connection = self.selected_connection();
                     self.sync_connections_snapshot(&data);
-                    self.snapshot = data;
-                    remote_apps::sync_permissions(&self.snapshot, cx);
+                    remote_apps::sync_permissions(&data, cx);
+                    self.snapshot = Some(data);
                     // A failed profile load is not evidence that a server was
                     // deleted. Preserve the destination until a valid snapshot.
                     if !self.configuration_available() {
@@ -1043,47 +1251,54 @@ impl Newport {
                     // Keep its controls locked through retries until fresh
                     // configuration has actually been accepted.
                     self.integration_refresh_pending.clear();
-                    let server_ids: std::collections::HashSet<String> =
-                        rows(&self.snapshot["config"]["servers"])
-                            .iter()
-                            .filter_map(|server| server["id"].as_str().map(str::to_owned))
-                            .collect();
+                    let server_ids: std::collections::HashSet<String> = self
+                        .servers()
+                        .iter()
+                        .map(|server| server.id.to_string())
+                        .collect();
                     // A removed server's saved tabs go with it.
-                    for removed in self.terminals.keys().filter(|id| !server_ids.contains(*id)) {
-                        self.ui_state
-                            .terminals(removed.clone(), ui_state::SavedTerminals::default());
+                    let removed: std::collections::BTreeSet<String> = self
+                        .terminals
+                        .keys()
+                        .chain(self.code_workspaces.iter().map(|retained| &retained.server))
+                        .filter(|id| !server_ids.contains(*id))
+                        .cloned()
+                        .collect();
+                    for removed in removed {
+                        self.ui_state.forget(removed);
                     }
                     self.terminals.retain(|id, _| server_ids.contains(id));
                     self.file_browsers.retain(|id, _| server_ids.contains(id));
-                    for server in rows(&self.snapshot["config"]["servers"]) {
-                        if let Some(id) = server["id"].as_str() {
-                            let scope = terminal_scope::connection(&server, &self.snapshot);
-                            if self
-                                .file_browsers
-                                .get(id)
-                                .is_some_and(|browser| browser.connection != scope)
-                            {
-                                self.file_connection_changed(id, scope);
-                            }
-                        }
-                        if let Some(workspace) =
-                            server["id"].as_str().and_then(|id| self.terminals.get(id))
+                    let connections: Vec<_> = self
+                        .servers()
+                        .iter()
+                        .map(|server| {
+                            (
+                                server.id.to_string(),
+                                self.connection(server),
+                                format!("{}@{}", server.ssh_user, server.ssh_host),
+                            )
+                        })
+                        .collect();
+                    for (id, scope, endpoint) in connections {
+                        if self
+                            .file_browsers
+                            .get(&id)
+                            .is_some_and(|browser| browser.connection != scope)
                         {
-                            let scope = terminal_scope::connection(&server, &self.snapshot);
-                            let endpoint = format!(
-                                "{}@{}",
-                                text(&server, "sshUser"),
-                                text(&server, "sshHost")
-                            );
+                            self.file_connection_changed(&id, scope.clone());
+                        }
+                        if let Some(workspace) = self.terminals.get(&id) {
                             workspace.update(cx, |workspace, cx| {
                                 workspace.sync_connection(scope, endpoint, cx)
                             });
                         }
                     }
                     if let Some(id) = self.saved_server_selection.clone()
-                        && rows(&self.snapshot["config"]["servers"])
+                        && self
+                            .servers()
                             .iter()
-                            .any(|server| server["id"] == id)
+                            .any(|server| server.id.to_string() == id)
                     {
                         self.saved_server_selection = None;
                         // Re-saving the current server keeps its pages; the
@@ -1095,21 +1310,12 @@ impl Newport {
                             self.refresh();
                         }
                     }
-                    if self.server.is_empty() && data_server_exists(&self.snapshot) {
-                        self.server = self.snapshot["config"]["servers"][0]["id"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .into();
+                    if self.server.is_empty() && !self.servers().is_empty() {
+                        self.server = self.servers()[0].id.to_string();
                         self.refresh();
                     } else {
-                        let current = self.snapshot["config"]["servers"]
-                            .as_array()
-                            .and_then(|a| a.iter().find(|s| s["id"] == self.server))
-                            .cloned();
-                        let connection_changed = current
-                            .as_ref()
-                            .map(|server| terminal_scope::connection(server, &self.snapshot))
-                            != old_connection;
+                        let current = self.selected_server().cloned();
+                        let connection_changed = self.selected_connection() != old_connection;
                         if connection_changed || (!self.server.is_empty() && current.is_none()) {
                             // A backend restart or connection reset invalidates reads,
                             // not the user's repository/worktree destination. Reopen
@@ -1118,11 +1324,11 @@ impl Newport {
                                 .then(|| self.git_destination())
                                 .flatten();
                             if current.is_none() {
-                                self.server = rows(&self.snapshot["config"]["servers"])
+                                self.server = self
+                                    .servers()
                                     .first()
-                                    .and_then(|server| server["id"].as_str())
-                                    .unwrap_or_default()
-                                    .to_owned();
+                                    .map(|server| server.id.to_string())
+                                    .unwrap_or_default();
                             }
                             self.reset();
                             self.restore_git = destination;
@@ -1169,21 +1375,14 @@ impl Newport {
                 self.integration_completed(&reply.key, &reply.server);
             } else if reply.key == "file-project" {
                 let resource = self.resources.get("file-project").unwrap();
-                completed_file_project = Some((
-                    reply.server,
-                    self.file_project_connection.take(),
-                    resource
-                        .error
-                        .clone()
-                        .map_or_else(|| Ok(resource.value.clone()), Err),
-                ));
+                let result = match (saved_project.take(), &resource.error) {
+                    (Some(project), None) => Ok(project),
+                    (_, error) => Err(error.clone().unwrap_or_default()),
+                };
+                completed_file_project =
+                    Some((reply.server, self.file_project_connection.take(), result));
             } else if reply.key == "project-created-save" {
-                let saved = self.value("project-created-save");
-                if self
-                    .resources
-                    .get("project-created-save")
-                    .is_some_and(|r| r.error.is_none())
-                {
+                if let Some(saved) = saved_project.take() {
                     if self.project_create.as_ref().is_some_and(|form| {
                         self.project_creation_save_owner
                             .as_ref()
@@ -1196,7 +1395,7 @@ impl Newport {
                     self.notification = Some(Notification::success(
                         "Repository created and saved in Projects.",
                     ));
-                    if saved["serverId"].as_str() == Some(&self.server)
+                    if saved.server.to_string() == self.server
                         && self.page == Page::Projects
                         && self.selection.is_none()
                     {
@@ -1219,23 +1418,11 @@ impl Newport {
                     }
                 }
             } else if reply.key.starts_with("git-") || reply.key == "repository" {
-                if reply.key == "git-log-events" {
-                    self.git_log_completed(cx);
+                if let Some(batch) = git_log.take() {
+                    self.git_log_completed(batch, cx);
                 }
                 self.git_sync_completed(&reply.key, cx);
                 self.git_completed(&reply.key);
-            } else if reply.key == "action" {
-                let r = self.resources.get("action").unwrap();
-                self.notice = Some(r.error.clone().unwrap_or_else(|| {
-                    if r.value["needsPassword"] == true {
-                        "This action requires a password. Use Newport’s terminal to authorize it."
-                            .into()
-                    } else {
-                        "Operation completed.".into()
-                    }
-                }));
-                self.request_snapshot();
-                self.refresh();
             }
         }
         // Apply configuration replies before draining retained panel actions so
@@ -1316,21 +1503,14 @@ impl Newport {
     fn invalidate_metric_readings(&mut self) {
         self.overview_state.cached_reads = None;
         // Generations reject replies that started before cache clearing finished.
-        // Page resources are shared by route; never erase another page's data.
         self.resources.invalidate("history");
         self.overview_state.charts.borrow_mut().take();
         self.overview_state.inspection = None;
         self.overview_state.keyboard_inspection = false;
         if self.page == Page::Overview {
-            self.resources.invalidate("page");
+            self.resources.invalidate("overview");
             self.refresh();
         }
-    }
-    fn value(&self, key: &str) -> Value {
-        self.resources
-            .get(key)
-            .map(|r| r.value.clone())
-            .unwrap_or_default()
     }
     fn refresh(&mut self) {
         self.project_checks = None;
@@ -1343,8 +1523,8 @@ impl Newport {
                 if self.setup_visible() || self.needle_missing() {
                     return;
                 }
-                self.request_refresh_result(
-                    "page",
+                self.request_typed_refresh(
+                    "overview",
                     desktop_server(&self.server).map(|server| {
                         desktop::Operation::Metrics(Box::new(desktop::metrics::Operation::Collect(
                             Box::new(desktop::metrics::CollectArgs {
@@ -1355,7 +1535,7 @@ impl Newport {
                         )))
                     }),
                 );
-                self.request_refresh_result(
+                self.request_typed_refresh(
                     "history",
                     desktop_server(&self.server).and_then(|server| {
                         let minutes =
@@ -1495,7 +1675,7 @@ impl Newport {
         if let Some(error) = &r.error {
             return error_banner(format!("{key}-error"), error.clone(), cx).into_any_element();
         }
-        if r.pending && (r.value.is_null() || key.ends_with("-more")) && r.placeholder_due() {
+        if r.pending && (!r.has_value() || key.ends_with("-more")) && r.placeholder_due() {
             if self.page == Page::Projects
                 && (key.starts_with("git-") || key.starts_with("project-") || key == "repository")
             {
@@ -1555,11 +1735,8 @@ impl Render for Newport {
         {
             let server = self.server.clone();
             let config = self.selected_server().expect("validated server");
-            let endpoint = format!("{}@{}", text(config, "sshUser"), text(config, "sshHost"));
-            let scope = terminal_scope::connection(
-                self.selected_server().expect("validated server"),
-                &self.snapshot,
-            );
+            let endpoint = format!("{}@{}", config.ssh_user, config.ssh_host);
+            let scope = self.selected_connection();
             let workspace = cx
                 .new(|cx| terminal_workspace::Workspace::new(server.clone(), scope, endpoint, cx));
             self.terminals.insert(server, workspace);
@@ -1597,7 +1774,7 @@ impl Render for Newport {
             } else {
                 0.
             };
-        let connection = connectivity::scoped(&self.server, &self.snapshot, cx);
+        let connection = connectivity::scoped(&self.server, self.snapshot.as_ref(), cx);
         let health = connection.map(|state| state.phase);
         let health_label = health
             .map(connectivity::Phase::label)
@@ -1607,6 +1784,8 @@ impl Render for Newport {
             Some(connectivity::Phase::Failed) => theme::error(cx.theme().is_dark()),
             _ => cx.theme().muted_foreground,
         };
+        let latency = connectivity::latency(&self.server, cx)
+            .filter(|_| health == Some(connectivity::Phase::Connected));
         let sidebar_toggle_label = if !self.sidebar_visible {
             "Show sidebar"
         } else if self.sidebar_layout.compact() {
@@ -1668,21 +1847,53 @@ impl Render for Newport {
             .when(
                 !self.server.is_empty() && self.page != Page::Settings,
                 |header| {
-                    header.child(
-                        div()
-                            .id("server-connection-status")
-                            .role(accesskit::Role::Status)
-                            .test_support()
-                            .aria_label(health_label)
-                            .flex()
-                            .flex_shrink_0()
-                            .items_center()
-                            .gap(px(6.))
-                            .text_size(px(crate::ui::FONT_SIZE))
-                            .text_color(health_color)
-                            .child(crate::controls::status_dot(Some(health_color), cx))
-                            .child(health_label),
-                    )
+                    header
+                        // Apart from the status, so screen readers don't announce
+                        // every new reading.
+                        .when_some(latency, |header, latency| {
+                            let label = connectivity::latency_label(latency.round_trip);
+                            let (color, hint) = match latency.speed {
+                                connectivity::Speed::Normal => {
+                                    (cx.theme().muted_foreground, "SSH round trip")
+                                }
+                                connectivity::Speed::Slow => (
+                                    theme::warning(cx.theme().is_dark()),
+                                    "SSH round trip, slow connection",
+                                ),
+                                connectivity::Speed::VerySlow => (
+                                    theme::error(cx.theme().is_dark()),
+                                    "SSH round trip, very slow connection",
+                                ),
+                            };
+                            header.child(
+                                div()
+                                    .id("server-latency")
+                                    .debug_selector(|| "server-latency".into())
+                                    .aria_label(format!("{hint}: {label}"))
+                                    .hover_hint(hint)
+                                    .flex_shrink_0()
+                                    .mr(px(2.))
+                                    .text_size(px(crate::ui::FONT_SIZE))
+                                    .font_features(crate::ui::tabular_figures())
+                                    .text_color(color)
+                                    .child(label),
+                            )
+                        })
+                        .child(
+                            div()
+                                .id("server-connection-status")
+                                .role(accesskit::Role::Status)
+                                .test_support()
+                                .aria_label(health_label)
+                                .flex()
+                                .flex_shrink_0()
+                                .items_center()
+                                .gap(px(6.))
+                                .text_size(px(crate::ui::FONT_SIZE))
+                                .text_color(health_color)
+                                .child(crate::controls::status_dot(Some(health_color), cx))
+                                .child(health_label),
+                        )
                 },
             )
             .child(self.shell_actions(cx));
@@ -1706,8 +1917,9 @@ impl Render for Newport {
                 view.child(self.status("snapshot", cx))
             })
             .when_some(
-                self.snapshot["loadError"]
-                    .as_str()
+                self.snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.load_error.as_deref())
                     .filter(|error| !error.is_empty()),
                 |content, error| {
                     content.child(error_banner(
@@ -1718,16 +1930,8 @@ impl Render for Newport {
                 },
             )
             .when(
-                !matches!(
-                    self.page,
-                    Page::Overview
-                        | Page::Ports
-                        | Page::Settings
-                        | Page::Services
-                        | Page::Containers
-                        | Page::Files
-                ) && !self.initial_loading("page"),
-                |view| view.child(self.status("page", cx)),
+                self.page == Page::Projects && !self.initial_loading("projects"),
+                |view| view.child(self.status("projects", cx)),
             )
             .when_some(self.notice.clone(), |s, n| {
                 s.child(div().px_4().py_2().bg(cx.theme().muted).child(n))

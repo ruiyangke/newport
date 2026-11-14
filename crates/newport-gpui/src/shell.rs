@@ -42,10 +42,9 @@ pub(super) fn server_menu(menu: PopupMenu, view: WeakEntity<Newport>, cx: &App) 
 }
 impl Newport {
     pub(super) fn configuration_available(&self) -> bool {
-        !self.snapshot.is_null()
-            && self.snapshot["loadError"]
-                .as_str()
-                .is_none_or(str::is_empty)
+        self.snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.load_error.as_deref().is_none_or(str::is_empty))
             && self
                 .resources
                 .get("snapshot")
@@ -152,10 +151,61 @@ impl Newport {
         self.save_sidebar();
         cx.notify();
     }
-    pub(super) fn selected_server(&self) -> Option<&Value> {
-        self.snapshot["config"]["servers"]
-            .as_array()
-            .and_then(|servers| servers.iter().find(|server| server["id"] == self.server))
+    /// The selected server's id, when one is selected.
+    pub(super) fn server_id(&self) -> Option<uuid::Uuid> {
+        canonical_id(&self.server)
+    }
+    /// The saved servers, or none before the first snapshot.
+    pub(super) fn servers(&self) -> &[configuration::Server] {
+        self.snapshot
+            .as_ref()
+            .map_or(&[], |snapshot| &snapshot.config.servers)
+    }
+    /// The saved forwards, or none before the first snapshot.
+    pub(super) fn tunnels(&self) -> &[configuration::Tunnel] {
+        self.snapshot
+            .as_ref()
+            .map_or(&[], |snapshot| &snapshot.config.tunnels)
+    }
+    /// The saved forwards in the domain model the forwarding rules work on.
+    pub(super) fn saved_forwards(&self) -> Result<Vec<newport_domain::model::Tunnel>, String> {
+        let snapshot = self
+            .snapshot
+            .as_ref()
+            .ok_or("Server configuration is unavailable.")?;
+        Ok(snapshot
+            .config
+            .tunnels
+            .iter()
+            .map(newport_domain::model::Tunnel::from)
+            .collect())
+    }
+    /// The backend's runtime state, once a snapshot has arrived.
+    pub(super) fn runtime(&self) -> Option<&configuration::Runtime> {
+        self.snapshot.as_ref().map(|snapshot| &snapshot.runtime)
+    }
+    /// A saved server, by the id the UI keeps.
+    pub(super) fn saved_server(&self, id: &str) -> Option<&configuration::Server> {
+        self.snapshot.as_ref()?.config.server(canonical_id(id)?)
+    }
+    pub(super) fn selected_server(&self) -> Option<&configuration::Server> {
+        self.saved_server(&self.server)
+    }
+    /// A saved server's connection scope in the current snapshot. Only a
+    /// snapshot has servers, so there is one whenever the server is listed.
+    pub(super) fn connection(
+        &self,
+        server: &configuration::Server,
+    ) -> Option<configuration::ConnectionScope> {
+        Some(self.snapshot.as_ref()?.connection_scope(server))
+    }
+    /// A saved server's connection scope, by the id the UI keeps.
+    pub(super) fn connection_of(&self, id: &str) -> Option<configuration::ConnectionScope> {
+        self.connection(self.saved_server(id)?)
+    }
+    /// The selected server's connection scope.
+    pub(super) fn selected_connection(&self) -> Option<configuration::ConnectionScope> {
+        self.connection_of(&self.server)
     }
     pub(super) fn navigate(&mut self, page: Page, cx: &mut Context<Self>) {
         if self.server_form.is_some() || self.modal_open || self.page == page {
@@ -171,7 +221,7 @@ impl Newport {
         self.suspend_checkout();
         if self.page == Page::Overview {
             self.overview_state.cached_reads =
-                Some(self.resources.take_cached(&["page", "history"]));
+                Some(self.resources.take_cached(&["overview", "history"]));
         }
         self.page = page;
         if page != Page::Settings {
@@ -195,7 +245,7 @@ impl Newport {
         if self.server_form.is_some() || self.modal_open || self.selected_server().is_none() {
             return;
         }
-        self.request_result(
+        self.request_typed(
             &format!("server-test:{}", self.server),
             desktop_server(&self.server).map(|server| {
                 desktop::Operation::Connection(Box::new(
@@ -214,10 +264,11 @@ impl Newport {
         {
             return;
         }
-        let Some(server) = self.selected_server() else {
+        let (Some(snapshot), Some(server)) = (self.snapshot.as_ref(), self.selected_server())
+        else {
             return;
         };
-        let id = text(server, "id");
+        let id = server.id.to_string();
         if self
             .resources
             .get(&format!("server-delete:{id}"))
@@ -225,25 +276,21 @@ impl Newport {
         {
             return;
         }
-        let name = text(server, "name");
+        let name = server.name.clone();
         let title = format!("Delete {name}?");
         let terminals = self
             .terminals
             .get(&id)
             .map_or(0, |workspace| workspace.read(cx).session_ids(cx).len());
-        let forwards = self.snapshot["config"]["tunnels"]
-            .as_array()
-            .map_or(0, |tunnels| {
-                tunnels
-                    .iter()
-                    .filter(|t| t["serverId"] == id.as_str())
-                    .count()
-            });
+        let forwards = snapshot.config.tunnels_of(server.id).count();
         let description: SharedString = delete_description(
             terminals,
             forwards,
-            server["authMethod"] == "password",
-            self.snapshot["runtime"]["agentStatus"][id.as_str()]["installed"] == true,
+            server.auth_method == configuration::AuthMethod::Password,
+            snapshot
+                .runtime
+                .agent_status(server.id)
+                .is_some_and(|status| status.installed == Some(true)),
         )
         .into();
         let view = cx.entity().downgrade();
@@ -298,7 +345,7 @@ impl Newport {
                                         .label("Delete server")
                                         .on_click(move |_, window, cx| {
                                             let _ = view.update(cx, |this, cx| {
-                                                this.request_result(&format!("server-delete:{id}"),desktop_server(&id).map(|server|desktop::Operation::Configuration(Box::new(desktop::configuration::Operation::DeleteServer(Box::new(desktop::configuration::DeleteServerArgs { server }))))));
+                                                this.request_typed(&format!("server-delete:{id}"),desktop_server(&id).map(|server|desktop::Operation::Configuration(Box::new(desktop::configuration::Operation::DeleteServer(Box::new(desktop::configuration::DeleteServerArgs { server }))))));
                                                 cx.notify();
                                             });
                                             window.close_dialog(cx);
@@ -391,5 +438,26 @@ mod delete_tests {
             "Its open terminal closes. Its 3 forwards stop and are removed. \
              Newport forgets its saved password. Nothing on the server changes; Needle stays installed."
         );
+    }
+}
+
+/// A server id in the form the UI keys its state by. Other spellings of the
+/// same UUID name no server, as they match none of those keys.
+fn canonical_id(id: &str) -> Option<uuid::Uuid> {
+    uuid::Uuid::parse_str(id)
+        .ok()
+        .filter(|parsed| parsed.to_string() == id)
+}
+
+#[cfg(test)]
+mod id_tests {
+    #[test]
+    fn only_the_canonical_spelling_names_a_server() {
+        let id = uuid::Uuid::new_v4();
+        let canonical = id.to_string();
+        assert_eq!(super::canonical_id(&canonical), Some(id));
+        assert_eq!(super::canonical_id(&canonical.to_uppercase()), None);
+        assert_eq!(super::canonical_id(&id.simple().to_string()), None);
+        assert_eq!(super::canonical_id("not a server"), None);
     }
 }

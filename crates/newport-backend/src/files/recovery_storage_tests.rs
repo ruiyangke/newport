@@ -1,4 +1,5 @@
 use super::*;
+use crate::files::cleanup::tests::scope;
 use serde_json::json;
 
 fn staging() -> String {
@@ -19,8 +20,8 @@ fn fresh_storage_writes_descriptor_and_keeps_server_journals_independent() {
     let path = profile.path().join("upload-recovery.json");
     let a = Uuid::new_v4();
     let b = Uuid::new_v4();
-    let scope_a = json!([a, "host", "user"]);
-    let scope_b = json!([b, "host", "user"]);
+    let scope_a = scope(a);
+    let scope_b = scope(b);
     let owners = Owners::<UploadCleanup>::open(path.clone());
     assert_eq!(
         value(&path),
@@ -32,12 +33,12 @@ fn fresh_storage_writes_descriptor_and_keeps_server_journals_independent() {
     let id = a_owner
         .lock()
         .unwrap()
-        .register(scope_a.clone(), staging())
+        .register(&scope_a, staging())
         .unwrap();
     b_owner
         .lock()
         .unwrap()
-        .register(scope_b.clone(), staging())
+        .register(&scope_b, staging())
         .unwrap();
     let b_before = fs::read(shard(&path, b)).unwrap();
     a_owner.lock().unwrap().finish(id, true);
@@ -120,7 +121,7 @@ fn damaged_or_wrong_owner_upload_shards_do_not_block_other_servers() {
             .unwrap()
             .lock()
             .unwrap()
-            .register(json!([a]), staging())
+            .register(&scope(a), staging())
             .unwrap();
         drop(owners);
         let a_path = shard(&path, a);
@@ -149,7 +150,7 @@ fn damaged_or_wrong_owner_upload_shards_do_not_block_other_servers() {
             .unwrap()
             .lock()
             .unwrap()
-            .register(json!([b]), staging())
+            .register(&scope(b), staging())
             .unwrap();
         assert_eq!(fs::read(&a_path).ok(), before);
     }
@@ -194,7 +195,7 @@ fn missing_descriptor_or_storage_preserves_evidence_and_refuses_new_writes() {
             .unwrap()
             .lock()
             .unwrap()
-            .register(json!([server]), staging())
+            .register(&scope(server), staging())
             .unwrap();
         drop(owners);
         if remove_descriptor {
@@ -248,7 +249,7 @@ fn interrupted_server_write_does_not_poison_other_servers_or_delete_evidence() {
         .unwrap()
         .lock()
         .unwrap()
-        .register(json!([b]), staging())
+        .register(&scope(b), staging())
         .unwrap();
     assert_eq!(fs::read(partial).unwrap(), b"incomplete journal");
     #[cfg(unix)]

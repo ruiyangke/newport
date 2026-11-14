@@ -3,10 +3,8 @@
 use super::*;
 use crate::{log_line, selectable_log::SelectableLog};
 use newport_client::containers::LogWindow;
-use newport_domain::{
-    containers::ContainerLogEntry,
-    containers_log::{Filter, Level, Severity},
-};
+use newport_domain::containers_log::{Filter, Level, Severity};
+use newport_protocol::monitor::containers::ContainerLogEntry;
 
 pub(super) fn new_lines_button(id: &'static str, count: u64, cx: &App) -> Button {
     let mut content = div().text_size(px(crate::ui::FONT_SIZE)).gap(px(5.));

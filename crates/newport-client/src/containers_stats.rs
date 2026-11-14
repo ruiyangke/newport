@@ -1,6 +1,7 @@
 //! Bounded statistics from accepted snapshots of one retained connection.
 //! Missing readings stay missing; renderers can split a series at sequence gaps.
-use newport_domain::containers::{ContainerState, ContainersSnapshot, valid_container_id};
+use newport_domain::containers::valid_container_id;
+use newport_protocol::monitor::containers::{ContainerState, ContainersSnapshot};
 use std::{
     collections::{HashSet, VecDeque},
     time::{Duration, Instant},
@@ -132,7 +133,7 @@ fn push<T>(samples: &mut Vec<StatsSample<T>>, sample: StatsSample<T>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use newport_domain::containers::Container;
+    use newport_protocol::monitor::containers::Container;
 
     fn container(id: u32, cpu: Option<f64>, memory: Option<u64>) -> Container {
         Container {

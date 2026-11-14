@@ -46,7 +46,7 @@ pub(super) struct Cache {
     syntax: RefCell<git_diff_syntax::Cache>,
 }
 struct State {
-    key: Value,
+    key: Key,
     presentation: Weak<git_diff::Presentation>,
     documents: Vec<Document>,
 }
@@ -62,7 +62,7 @@ impl Cache {
     }
     pub(super) fn prepare(
         &self,
-        key: Value,
+        key: Key,
         presentation: &Rc<git_diff::Presentation>,
         rows: impl FnOnce() -> Vec<Vec<Option<String>>>,
         focus: &FocusHandle,
@@ -82,7 +82,7 @@ impl Cache {
         }
         let rows = rows();
         self.syntax.borrow_mut().set_source(
-            key[3].as_str().unwrap_or_default(),
+            &key.path,
             git_diff_syntax::project(presentation, &rows),
             window,
             cx,
@@ -161,10 +161,27 @@ fn code_label(row: &git_diff::Row, side: Option<bool>) -> String {
     };
     format!("{location}{change}: {content}")
 }
-pub(super) fn key(page: &Value, split: bool, path: &str) -> Value {
+/// Which comparison, file and layout a diff's text documents show.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct Key {
+    pub(super) snapshot: Option<String>,
+    pub(super) metadata: Option<newport_protocol::git::DiffMetadata>,
+    pub(super) split: bool,
+    pub(super) path: String,
+}
+pub(super) fn key(
+    page: Option<&newport_client::git_diff_page::DiffPage>,
+    split: bool,
+    path: &str,
+) -> Key {
     // Cursor is intentionally excluded: continuation is an append, not a new
     // comparison. Context, side, path, source snapshot and layout are identity.
-    json!([page["snapshot"], page["metadata"], split, path])
+    Key {
+        snapshot: page.map(|page| page.snapshot.clone()),
+        metadata: page.map(|page| page.metadata.clone()),
+        split,
+        path: path.into(),
+    }
 }
 pub(super) fn text(document: &Document, index: usize, cx: &App) -> AnyElement {
     let doc = document.borrow();
@@ -191,7 +208,6 @@ mod tests {
         Window, div, point, px, size,
     };
     use gpui_kit as gpui;
-    use serde_json::{Value, json};
     use std::{cell::OnceCell, rc::Rc};
     struct View {
         presentation: Rc<Presentation>,
@@ -253,7 +269,12 @@ mod tests {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let p = &self.presentation;
             self.documents = self.cache.prepare(
-                json!([self.snapshot, null, self.split, "preview.rs"]),
+                super::Key {
+                    snapshot: Some(self.snapshot.clone()),
+                    metadata: None,
+                    split: self.split,
+                    path: "preview.rs".into(),
+                },
                 p,
                 || {
                     if self.split {
@@ -730,13 +751,18 @@ mod tests {
     }
     #[test]
     fn cursor_is_not_comparison_identity_but_metadata_and_layout_are() {
-        let mut page = json!({"snapshot":"a","metadata":{"side":"old"},"nextCursor":"next"});
-        let first = super::key(&page, false, "demo.rs");
-        page["nextCursor"] = Value::Null;
-        assert_eq!(first, super::key(&page, false, "demo.rs"));
-        assert_ne!(first, super::key(&page, true, "demo.rs"));
-        assert_ne!(first, super::key(&page, false, "demo.js"));
-        page["metadata"]["side"] = json!("new");
-        assert_ne!(first, super::key(&page, false, "demo.rs"));
+        let mut page = crate::git_fixture::diff_page(
+            "a",
+            crate::git_fixture::working_metadata("status", "entry"),
+            vec![],
+            Some("next"),
+        );
+        let first = super::key(Some(&page), false, "demo.rs");
+        page.next_cursor = None;
+        assert_eq!(first, super::key(Some(&page), false, "demo.rs"));
+        assert_ne!(first, super::key(Some(&page), true, "demo.rs"));
+        assert_ne!(first, super::key(Some(&page), false, "demo.js"));
+        page.metadata.side = Some(newport_protocol::git::Side::HeadToIndex);
+        assert_ne!(first, super::key(Some(&page), false, "demo.rs"));
     }
 }

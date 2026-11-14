@@ -1,6 +1,7 @@
 //! Negotiated capabilities and subscriptions are scoped to a server/worktree.
 use super::*;
 use lsp_types::{Registration, RegistrationParams, ServerCapabilities, UnregistrationParams};
+use serde_json::{Value, json};
 
 #[derive(Default)]
 pub(super) struct State {
@@ -154,7 +155,12 @@ impl State {
         }
         serde_json::from_value(caps).unwrap_or_else(|_| base.clone())
     }
-    pub fn watched_changes(&self, params: &Value, root: &str) -> Vec<Value> {
+    /// The changes a server registered to watch, for `workspace/didChangeWatchedFiles`.
+    pub fn watched_changes(
+        &self,
+        files: &worker::FilesChanged,
+        root: &str,
+    ) -> Vec<lsp_types::FileEvent> {
         let watchers: Vec<_> = self
             .registrations
             .iter()
@@ -166,27 +172,24 @@ impl State {
                     .unwrap_or_default()
             })
             .collect();
-        params["changes"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|event| {
-                let Some(path) = event["uri"]
-                    .as_str()
-                    .and_then(|u| u.parse::<lsp_types::Uri>().ok())
-                    .and_then(|u| uri_path(&u))
-                else {
-                    return false;
-                };
+        files
+            .changes
+            .iter()
+            .filter_map(|change| {
+                let uri = change.uri.parse::<lsp_types::Uri>().ok()?;
+                let path = uri_path(&uri)?;
                 if !features::within_root(&path, root) {
-                    return false;
+                    return None;
                 }
-                let Some(kind @ 1..=3) = event["type"].as_u64() else {
-                    return false;
+                // The change type and its `WatchKind` bit.
+                let (typ, bit) = match change.kind {
+                    worker::FileChangeKind::Created => (lsp_types::FileChangeType::CREATED, 1),
+                    worker::FileChangeKind::Changed => (lsp_types::FileChangeType::CHANGED, 2),
+                    worker::FileChangeKind::Deleted => (lsp_types::FileChangeType::DELETED, 4),
                 };
-                watchers.iter().any(|watcher| {
+                let watched = watchers.iter().any(|watcher| {
                     let mask = watcher["kind"].as_u64().unwrap_or(7);
-                    if mask & (1 << (kind - 1)) == 0 {
+                    if mask & bit == 0 {
                         return false;
                     }
                     let Ok((base, pattern)) = watcher_pattern(watcher, root) else {
@@ -198,9 +201,9 @@ impl State {
                         return false;
                     };
                     glob(&pattern).is_ok_and(|g| g.is_match(relative) || g.is_match(&path))
-                })
+                });
+                watched.then_some(lsp_types::FileEvent { uri, typ })
             })
-            .cloned()
             .collect()
     }
 }
@@ -241,35 +244,34 @@ impl CodeWorkspace {
         request.respond(result.map(|()| Value::Null).map_err(|e| (-32602, e)));
         cx.notify();
     }
+    /// Initializes the server with what the worker sent, or with the defaults
+    /// when that notification was dropped.
     pub(super) fn configure_language_server(
         &mut self,
         server: Rc<Server>,
-        config: Value,
+        config: Option<worker::Configuration>,
         cx: &mut Context<Self>,
     ) {
         if server.protocol.borrow().initializing {
             return;
         }
-        if let Some(error) = config["error"].as_str() {
-            *server.status.borrow_mut() = Status::Stopped(Some(error.into()));
-            server.protocol.borrow_mut().initializing = true;
-            cx.notify();
-            return;
-        }
         server.protocol.borrow_mut().initializing = true;
-        server.protocol.borrow_mut().watching = config["fileWatch"] == true;
-        if let Some(problem) = config["settingsError"].as_str() {
+        server.protocol.borrow_mut().watching = config.as_ref().is_some_and(|c| c.file_watch);
+        if let Some(problem) = config.as_ref().and_then(|c| c.settings_error.clone()) {
             self.language_message(problem, cx);
         }
         let Some(connection) = server.connection.borrow().clone() else {
             return;
         };
-        let settings = config.get("settings").cloned().unwrap_or_else(|| json!({}));
-        connection.set_configuration(settings.clone());
         let mut params = initialize_params(&self.root, server.id);
-        if let Some(options) = config.get("initializationOptions") {
-            params.initialization_options = Some(options.clone());
-        }
+        let settings = match config {
+            Some(config) => {
+                params.initialization_options = Some(config.initialization_options);
+                config.settings
+            }
+            None => Value::Object(Default::default()),
+        };
+        connection.set_configuration(settings.clone());
         if server.protocol.borrow().watching {
             params
                 .capabilities
@@ -291,9 +293,8 @@ impl CodeWorkspace {
                 if let Some(server) = this.current_language_server(&weak)
                     && server.ready.get()
                 {
-                    connection.notify_value(
-                        "workspace/didChangeConfiguration",
-                        json!({"settings":settings}),
+                    connection.notify::<lsp_types::notification::DidChangeConfiguration>(
+                        lsp_types::DidChangeConfigurationParams { settings },
                     );
                 }
             });
@@ -306,6 +307,11 @@ impl CodeWorkspace {
 mod tests {
     use super::super::{Document, file_uri};
     use super::State;
+    use newport_protocol::lsp::{
+        FileChange,
+        FileChangeKind::{self, Changed, Created, Deleted},
+        FilesChanged,
+    };
     use serde_json::json;
     use std::cell::{Cell, RefCell};
     fn document(path: &str, language: &'static str) -> Document {
@@ -354,6 +360,17 @@ mod tests {
                 .is_none()
         );
     }
+    fn files(changes: &[(&str, FileChangeKind)]) -> FilesChanged {
+        FilesChanged {
+            changes: changes
+                .iter()
+                .map(|&(uri, kind)| FileChange {
+                    uri: uri.into(),
+                    kind,
+                })
+                .collect(),
+        }
+    }
     #[test]
     fn watches_filter_relative_patterns_kinds_and_worktree_boundaries() {
         let mut state = State {
@@ -362,24 +379,33 @@ mod tests {
         };
         state.register(json!({"registrations":[{"id":"watch","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":{"baseUri":"file:///repo/src","pattern":"**/*.rs"},"kind":5}]}}]}), "/repo").unwrap();
         let changes = state.watched_changes(
-            &json!({"changes":[
-                {"uri":"file:///repo/src/a.rs","type":1},
-                {"uri":"file:///repo/src/nested/b.rs","type":3},
-                {"uri":"file:///repo/src/a.rs","type":2},
-                {"uri":"file:///repo/src/a.py","type":1},
-                {"uri":"file:///other/a.rs","type":1}
-            ]}),
+            &files(&[
+                ("file:///repo/src/a.rs", Created),
+                ("file:///repo/src/nested/b.rs", Deleted),
+                ("file:///repo/src/a.rs", Changed),
+                ("file:///repo/src/a.py", Created),
+                ("file:///other/a.rs", Created),
+            ]),
             "/repo",
         );
-        assert_eq!(changes.len(), 2);
+        assert_eq!(
+            changes
+                .iter()
+                .map(|change| (change.uri.as_str(), change.typ))
+                .collect::<Vec<_>>(),
+            [
+                ("file:///repo/src/a.rs", lsp_types::FileChangeType::CREATED),
+                (
+                    "file:///repo/src/nested/b.rs",
+                    lsp_types::FileChangeType::DELETED
+                ),
+            ]
+        );
         assert!(state.register(json!({"registrations":[{"id":"bad","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":{"baseUri":"file:///other","pattern":"**"}}]}}]}), "/repo").is_err());
         state.unregister(json!({"unregisterations":[{"id":"watch","method":"workspace/didChangeWatchedFiles"}]})).unwrap();
         assert!(
             state
-                .watched_changes(
-                    &json!({"changes":[{"uri":"file:///repo/src/a.rs","type":1}]}),
-                    "/repo"
-                )
+                .watched_changes(&files(&[("file:///repo/src/a.rs", Created)]), "/repo")
                 .is_empty()
         );
     }

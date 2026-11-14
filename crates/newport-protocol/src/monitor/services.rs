@@ -39,17 +39,31 @@ pub enum Scope {
     System,
     User,
 }
+impl Scope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+        }
+    }
+}
+impl fmt::Display for Scope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Privilege {
     Root,
     Sudo,
     Password,
+    #[default]
     None,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verb {
     Start,
@@ -60,6 +74,14 @@ pub enum Verb {
     Disable,
 }
 impl Verb {
+    pub const ALL: [Self; 6] = [
+        Self::Start,
+        Self::Stop,
+        Self::Restart,
+        Self::Reload,
+        Self::Enable,
+        Self::Disable,
+    ];
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Start => "start",
@@ -69,6 +91,11 @@ impl Verb {
             Self::Enable => "enable",
             Self::Disable => "disable",
         }
+    }
+}
+impl fmt::Display for Verb {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -159,7 +186,7 @@ impl Request {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Service {
     pub name: String,
@@ -182,7 +209,13 @@ pub struct Service {
     pub triggered_by: Vec<String>,
     pub user: Option<String>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+impl Service {
+    /// The unit's identity: system and user units may share a name.
+    pub fn key(&self) -> String {
+        unit_key(self.scope, &self.name)
+    }
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Timer {
     pub name: String,
@@ -193,19 +226,25 @@ pub struct Timer {
     pub last: Option<i64>,
     pub unit: Option<String>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+impl Timer {
+    /// The timer's identity: system and user timers may share a name.
+    pub fn key(&self) -> String {
+        unit_key(self.scope, &self.name)
+    }
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserManager {
     pub available: bool,
     pub reason: Option<String>,
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub services: Vec<Service>,
     pub timers: Vec<Timer>,
     pub user: UserManager,
     pub privilege: Privilege,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub at: Option<i64>,
     pub priority: Option<u8>,
@@ -213,16 +252,16 @@ pub struct Entry {
     pub identifier: Option<String>,
     pub message: String,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Logs {
     pub entries: Vec<Entry>,
     pub cursor: Option<String>,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnitFile {
     pub text: String,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionReply {
     pub ok: bool,
@@ -238,6 +277,11 @@ pub enum Reply {
     Logs(Logs),
     Unit(UnitFile),
     Action(ActionReply),
+}
+
+/// A unit's identity across scopes, as `scope:name`.
+pub fn unit_key(scope: Scope, name: &str) -> String {
+    format!("{scope}:{name}")
 }
 
 /// Unit-name arguments accept systemd escapes, with no leading option or shell syntax.
@@ -407,6 +451,15 @@ impl Reply {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn unit_names_have_a_bounded_stem_and_timers_only_where_allowed() {
+        let stem = "a".repeat(255);
+        assert!(super::valid_unit(&format!("{stem}.service"), false));
+        assert!(!super::valid_unit(&format!("{stem}a.service"), false));
+        assert!(super::valid_unit("backup.timer", true));
+        assert!(!super::valid_unit("backup.timer", false));
+    }
     use super::*;
     #[test]
     fn inventory_validates_scoped_identity_cpu_and_total_text() {

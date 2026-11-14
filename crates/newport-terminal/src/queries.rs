@@ -1,7 +1,9 @@
 //! Replies to the queries Alacritty's parser does not dispatch: terminfo
-//! capabilities (XTGETTCAP), selected settings (DECRQSS) and the terminal
-//! version (XTVERSION). A second parser watches the same bytes and stops after
-//! each query, so the engine answers it in order with the rest of the output.
+//! capabilities (XTGETTCAP), selected settings (DECRQSS), the terminal
+//! version (XTVERSION) and program status support (OSC 7501), and picks out
+//! program status reports. A second parser watches the same bytes and stops
+//! after each such sequence, so the engine handles it in order with the rest
+//! of the output.
 use crate::engine::Listener;
 use alacritty_terminal::{
     Term,
@@ -42,9 +44,9 @@ pub(crate) struct Queries {
     watcher: Watcher,
 }
 impl Queries {
-    /// Bytes up to and including the next complete query, and that query.
-    /// Text between sequences is skipped: every query starts with ESC.
-    pub fn next(&mut self, bytes: &[u8]) -> (usize, Option<Query>) {
+    /// Bytes up to and including the next complete sequence, and that
+    /// sequence. Text between sequences is skipped: every one starts with ESC.
+    pub fn next(&mut self, bytes: &[u8]) -> (usize, Option<Sequence>) {
         let mut offset = 0;
         while offset < bytes.len() {
             if self.watcher.between_sequences {
@@ -66,15 +68,24 @@ impl Queries {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Sequence {
+    Query(Query),
+    /// A program status report, the text after `7501;`.
+    ProgramStatus(Vec<u8>),
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Query {
     Capabilities(Vec<u8>),
     Setting(Vec<u8>),
     Version,
+    ProgramStatus,
 }
 impl Query {
     pub fn reply(&self, term: &Term<Listener>) -> String {
         match self {
             Self::Version => format!("\x1bP>|Newport {}\x1b\\", env!("CARGO_PKG_VERSION")),
+            Self::ProgramStatus => "\x1b]7501;?\x1b\\".into(),
             Self::Capabilities(request) => request
                 .split(|byte| *byte == b';')
                 .map(capability)
@@ -89,7 +100,7 @@ impl Query {
 
 struct Watcher {
     pending: Option<Query>,
-    found: Option<Query>,
+    found: Option<Sequence>,
     /// The parser finished a sequence and only text has followed.
     between_sequences: bool,
 }
@@ -109,8 +120,20 @@ impl Perform for Watcher {
     fn esc_dispatch(&mut self, _: &[u8], _: bool, _: u8) {
         self.between_sequences = true;
     }
-    fn osc_dispatch(&mut self, _: &[&[u8]], _: bool) {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _: bool) {
         self.between_sequences = true;
+        if let [crate::program_status::CODE, data @ ..] = params
+            && !data.is_empty()
+        {
+            let data = data.join(&b';');
+            self.found = if data.starts_with(b"?") {
+                Some(Sequence::Query(Query::ProgramStatus))
+            } else if data.len() <= crate::program_status::MAX_REPORT {
+                Some(Sequence::ProgramStatus(data))
+            } else {
+                None
+            };
+        }
     }
     fn hook(&mut self, _: &Params, intermediates: &[u8], ignore: bool, action: char) {
         self.pending = match (intermediates, action) {
@@ -130,7 +153,7 @@ impl Perform for Watcher {
         }
     }
     fn unhook(&mut self) {
-        self.found = self.pending.take();
+        self.found = self.pending.take().map(Sequence::Query);
         self.between_sequences = self.found.is_none();
     }
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
@@ -140,7 +163,7 @@ impl Perform for Watcher {
             && action == 'q'
             && params.iter().all(|param| param == [0]);
         if version {
-            self.found = Some(Query::Version);
+            self.found = Some(Sequence::Query(Query::Version));
         }
     }
     fn terminated(&self) -> bool {
@@ -243,7 +266,7 @@ fn encode_hex(text: &str) -> String {
 mod tests {
     use super::*;
 
-    fn queries(input: &[u8]) -> Vec<(usize, Query)> {
+    fn queries(input: &[u8]) -> Vec<(usize, Sequence)> {
         let mut queries = Queries::default();
         let mut found = Vec::new();
         let mut offset = 0;
@@ -264,9 +287,9 @@ mod tests {
             queries(input),
             [
                 // A string ends at the ESC that starts its terminator.
-                (10, Query::Capabilities(b"5463".to_vec())),
-                (16, Query::Version),
-                (23, Query::Setting(b"m".to_vec())),
+                (10, Sequence::Query(Query::Capabilities(b"5463".to_vec()))),
+                (16, Sequence::Query(Query::Version)),
+                (23, Sequence::Query(Query::Setting(b"m".to_vec()))),
             ]
         );
     }
@@ -280,7 +303,10 @@ mod tests {
             assert_eq!(read, 1);
             found.extend(query);
         }
-        assert_eq!(found, [Query::Capabilities(b"546372".to_vec())]);
+        assert_eq!(
+            found,
+            [Sequence::Query(Query::Capabilities(b"546372".to_vec()))]
+        );
     }
 
     #[test]
@@ -290,6 +316,19 @@ mod tests {
         long.extend(std::iter::repeat_n(b'4', MAX_REQUEST + 2));
         long.extend(b"\x1b\\");
         assert!(queries(&long).is_empty());
+    }
+
+    #[test]
+    fn program_status_queries_and_reports_are_found_whatever_their_terminator() {
+        let input = b"\x1b]7501;?\x07a\x1b]7501;state=working:app=x\x1b\\\x1b]2;title\x07";
+        assert_eq!(
+            queries(input),
+            [
+                (9, Sequence::Query(Query::ProgramStatus)),
+                (37, Sequence::ProgramStatus(b"state=working:app=x".to_vec())),
+            ]
+        );
+        assert!(queries(b"\x1b]7501\x07\x1b]75011;?\x07").is_empty());
     }
 
     #[test]

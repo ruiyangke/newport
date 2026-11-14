@@ -323,8 +323,12 @@ async fn git_rpc_roundtrip() {
         for file in page["entries"].as_array().unwrap() {
             for hunk in file["hunks"].as_array().unwrap() {
                 for line in hunk["lines"].as_array().unwrap() {
-                    assert_eq!(line[2], true);
-                    paged_lines.push((hunk["id"].clone(), line[7].clone(), line[6].clone()));
+                    assert_eq!(line["lineComplete"], true);
+                    paged_lines.push((
+                        hunk["id"].clone(),
+                        line["id"].clone(),
+                        line["contentBytesB64"].clone(),
+                    ));
                 }
             }
         }

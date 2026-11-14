@@ -1,6 +1,7 @@
 //! Code-action resolution and command-scoped server edits.
 use super::*;
 use lsp_types::{CodeAction, CodeActionOrCommand, Command};
+use serde_json::json;
 
 pub(super) struct CommandState {
     server: Rc<Server>,

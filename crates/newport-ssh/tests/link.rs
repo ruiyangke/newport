@@ -792,3 +792,25 @@ async fn retry_accepts_a_host_key_the_verifier_now_accepts() {
     round_trip(&mut lease).await;
     assert_eq!(rekeyed.seen.sessions.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ready_link_times_pings_until_it_sleeps() {
+    let server = server(Behaviour::default(), &HOST_A).await;
+    let link = link(
+        TestDialer::new(&[server.port]),
+        TestAuthenticator::accepting(),
+        limits(),
+    );
+    let mut latency = link.latency();
+    assert_eq!(*latency.borrow(), None);
+    let _session = link.open(Open::Session).await.expect("a session");
+    tokio::time::timeout(Duration::from_secs(5), latency.wait_for(Option::is_some))
+        .await
+        .expect("a reading once the link is ready")
+        .unwrap();
+    link.sleep();
+    tokio::time::timeout(Duration::from_secs(5), latency.wait_for(Option::is_none))
+        .await
+        .expect("no reading while asleep")
+        .unwrap();
+}

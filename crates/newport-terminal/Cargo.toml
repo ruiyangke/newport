@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 alacritty_terminal = { git = "https://github.com/alacritty/alacritty", rev = "542147067dd016fc5f49120ef0ba605a98a4e3a7", default-features = false }
+base64 = "0.23.1"
 bitflags = "2"
 newport-domain = { path = "../newport-domain" }
 unicode-segmentation = "1.13"

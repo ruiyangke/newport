@@ -40,7 +40,7 @@ impl Form {
         resources.invalidate("git-sync-review-status");
         resources.invalidate("git-sync-remote");
     }
-    fn accept_remote(&mut self, remote: &Value) {
+    fn accept_remote(&mut self, remote: &newport_protocol::git::Remote) {
         if self.needs_review || self.submitted || self.action.is_some() {
             return;
         }
@@ -58,7 +58,7 @@ impl Form {
 impl Newport {
     pub(super) fn sync_git_transfer_status(&mut self) {
         if !self.git_repository_id().is_empty() && self.resources.get("git-sync-status").is_none() {
-            self.request_git(
+            self.request_git_typed(
                 "git-sync-status",
                 Request::Status {
                     repo_id: self.git_repository_id(),
@@ -85,7 +85,7 @@ impl Newport {
             self.server.clone(),
             self.git_repository_id(),
         ));
-        self.request_git(
+        self.request_git_typed(
             "git-sync-review-status",
             Request::Status {
                 repo_id: self.git_repository_id(),
@@ -111,8 +111,9 @@ impl Newport {
             return;
         }
         if key == "git-sync-remote" {
-            let remote = self.value(key);
-            if let Some(form) = self.git.sync_form.as_mut() {
+            if let Some(newport_protocol::git::Reply::Remote(remote)) = self.git_reply(key).cloned()
+                && let Some(form) = self.git.sync_form.as_mut()
+            {
                 form.accept_remote(&remote);
             }
             if self.git_mutation_blocks_write() {
@@ -133,9 +134,12 @@ impl Newport {
         {
             return;
         }
-        match Target::from_status(&self.git.repo, &self.value(key)) {
+        let Some(status) = self.git_status(key) else {
+            return;
+        };
+        match Target::from_status(self.git.repo.as_ref(), status) {
             Ok(target) => {
-                self.request_git(
+                self.request_git_typed(
                     "git-sync-remote",
                     Request::Remote {
                         repo_id: self.git_repository_id(),
@@ -189,7 +193,10 @@ impl Newport {
     }
     pub(super) fn git_sync_control(&self, cx: &mut Context<Self>) -> AnyElement {
         let reading = self.resources.get("git-sync-status");
-        let target = Target::from_status(&self.git.repo, &self.value("git-sync-status"));
+        let target = match self.git_status("git-sync-status") {
+            Some(status) => Target::from_status(self.git.repo.as_ref(), status),
+            None => Err("Refresh repository status first.".into()),
+        };
         let kind = target.as_ref().map_or(Kind::Fetch, Target::preferred);
         let remote = target
             .as_ref()
@@ -197,7 +204,7 @@ impl Newport {
         let busy = self.git_mutation_blocks_write()
             || self.project_dialog_open
             || self.git.sync_form.is_some();
-        let pending = reading.is_none_or(|r| r.pending && r.value.is_null());
+        let pending = reading.is_none_or(|r| r.pending && !r.has_value());
         let error = reading.and_then(|r| r.error.clone());
         // Starting a transfer obtains a fresh review status and remote config.
         // A background observation need not disable the cached entry point.
@@ -363,13 +370,21 @@ impl Newport {
 mod tests {
     use super::{Form, Kind, Target};
     use newport_client::resources::Resources;
-    use serde_json::json;
+    use newport_protocol::git::{Remote, Reply};
+
+    fn remote(name: &str, token: &str) -> Remote {
+        Remote {
+            name: name.into(),
+            url: None,
+            push_url: None,
+            token: token.into(),
+        }
+    }
 
     #[gpui_kit::test]
     fn cached_sync_control_stays_usable_during_observation_and_still_requires_review(
         cx: &mut gpui_kit::TestAppContext,
     ) {
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
         use gpui_kit::{AppContext, Context, Entity, IntoElement, Render, Window};
         struct Host(Entity<crate::Newport>);
         impl Render for Host {
@@ -389,16 +404,18 @@ mod tests {
                 view.work = work.into();
                 view.page = crate::Page::Projects;
                 view.server = "00000000-0000-4000-8000-000000000001".into();
-                view.git.repo = json!({"repoId":"repo", "bare":false,
-                    "capabilities":{"readOnly":false,"workingTree":true}});
-                let reference = |name: &str| json!({"display":name,"bytesB64":STANDARD.encode(name)});
-                let status = json!({"snapshot":"old", "entries":[], "nextCursor":null, "metadata":{
-                    "head":{"detached":false,"unborn":false,"name":reference("refs/heads/main"),
-                        "oid":{"hex":"a".repeat(40)}},
-                    "upstream":{"remote":reference("origin"),"reference":reference("refs/heads/main")}
-                }});
+                view.git.repo = Some(crate::git_fixture::repository("repo"));
+                let mut status = crate::git_fixture::status_page("old", vec![], None);
+                status.metadata.upstream = Some(newport_protocol::git::Upstream {
+                    remote: newport_protocol::git::Path::new(b"origin"),
+                    reference: newport_protocol::git::Path::new(b"refs/heads/main"),
+                });
                 let generation = view.resources.begin("git-sync-status").unwrap();
-                view.resources.complete("git-sync-status", generation, Ok(status));
+                view.resources.complete_git(
+                    "git-sync-status",
+                    generation,
+                    Ok(Reply::Status(Box::new(status))),
+                );
                 view.resources.begin_refresh("git-sync-status", false);
                 view
             });
@@ -418,14 +435,8 @@ mod tests {
         crate::page_perf_tests::frame(visual);
         let request = requests.try_recv().expect("fresh status review");
         assert_eq!(request.key, "git-sync-review-status");
-        let crate::request_dispatch::Request::Desktop(operation) = request.request else {
-            panic!("expected a desktop request");
-        };
-        let newport_protocol::desktop::Operation::Git(operation) = *operation else {
+        let crate::request_dispatch::Request::Git(args) = request.request else {
             panic!("expected a Git request");
-        };
-        let newport_protocol::desktop::git::Operation::Request(args) = *operation else {
-            panic!("expected a Git operation");
         };
         assert_eq!(
             args.server.to_string(),
@@ -462,17 +473,26 @@ mod tests {
     #[test]
     fn refresh_revokes_confirmation_and_rejects_inflight_review_reads() {
         let mut form = review();
-        form.accept_remote(&json!({"name":"origin","token":"reviewed-config"}));
+        form.accept_remote(&remote("origin", "reviewed-config"));
         assert!(form.action.is_some());
         let mut resources = Resources::default();
         let status = resources.begin("git-sync-review-status").unwrap();
-        let remote = resources.begin("git-sync-remote").unwrap();
+        let config = resources.begin("git-sync-remote").unwrap();
         form.invalidate(&mut resources);
         assert!(!form.matches("server-a", "repo-a"));
         assert!(form.action.is_none());
-        assert!(!resources.complete("git-sync-review-status", status, Ok(json!({}))));
-        assert!(!resources.complete("git-sync-remote", remote, Ok(json!({}))));
-        form.accept_remote(&json!({"name":"origin","token":"late-config"}));
+        let page = crate::git_fixture::status_page("late", vec![], None);
+        assert!(!resources.complete_git(
+            "git-sync-review-status",
+            status,
+            Ok(Reply::Status(Box::new(page)))
+        ));
+        assert!(!resources.complete_git(
+            "git-sync-remote",
+            config,
+            Ok(Reply::Remote(Box::new(remote("origin", "late-config"))))
+        ));
+        form.accept_remote(&remote("origin", "late-config"));
         assert!(form.action.is_none());
         // Reopening gets a new identity; an old operation cannot close it.
         assert_ne!(form.id, review().id);
@@ -484,8 +504,8 @@ mod tests {
         assert!(form.matches("server-a", "repo-a"));
         assert!(!form.matches("server-b", "repo-a"));
         assert!(!form.matches("server-a", "repo-b"));
-        form.accept_remote(&json!({"name":"origin","token":"reviewed-config"}));
-        form.accept_remote(&json!({"name":"origin","token":"refreshed-config"}));
+        form.accept_remote(&remote("origin", "reviewed-config"));
+        form.accept_remote(&remote("origin", "refreshed-config"));
         assert_eq!(
             serde_json::to_value(form.action.as_ref().unwrap()).unwrap()["expectedToken"],
             "reviewed-config"
@@ -497,12 +517,12 @@ mod tests {
     #[test]
     fn invalid_remote_keeps_review_recoverable_without_a_write() {
         let mut form = review();
-        form.accept_remote(&json!({"name":"different-remote","token":"token"}));
+        form.accept_remote(&remote("different-remote", "token"));
         assert!(form.error.is_some());
         assert!(form.action.is_none());
         assert!(!form.submitted);
         let mut retried = review();
-        retried.accept_remote(&json!({"name":"origin","token":"fresh-config"}));
+        retried.accept_remote(&remote("origin", "fresh-config"));
         assert!(retried.error.is_none());
         assert_eq!(
             serde_json::to_value(retried.action.unwrap()).unwrap()["expectedToken"],

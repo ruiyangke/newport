@@ -39,6 +39,26 @@ macro_rules! enumeration {
         }
     };
 }
+/// The enum maps `enumeration!` writes.
+#[cfg(test)]
+pub(crate) fn enum_maps() -> Vec<crate::desktop::wire::wire_tables::EnumMap> {
+    fn map<T: Enum + Copy + std::fmt::Debug + 'static>(
+        proto: &'static str,
+    ) -> crate::desktop::wire::wire_tables::EnumMap {
+        crate::desktop::wire::wire_tables::enum_map(
+            proto,
+            |value| T::from_wire(value).ok(),
+            |value| value.to_wire(),
+        )
+    }
+    vec![
+        map::<SocketSource>("newport.discovery.SocketSource"),
+        map::<HolderState>("newport.discovery.HolderState"),
+        map::<ContainerState>("newport.discovery.ContainerState"),
+        map::<Outcome>("newport.discovery.Outcome"),
+        map::<IssueKind>("newport.discovery.IssueKind"),
+    ]
+}
 enumeration!(SocketSource { Diagnostic = 1, Proc = 2 });
 enumeration!(HolderState { Unresolved = 1, Observed = 2, Changed = 3 });
 enumeration!(ContainerState { Running = 1, Stopped = 2, Unknown = 3 });

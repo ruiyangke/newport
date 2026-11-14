@@ -2,9 +2,10 @@
 //! server's applications. Sessions are live resources and stay out of here.
 use crate::server_session::ServerSession;
 use crate::ssh::shell_quote as quote;
-use newport_domain::requirements::{Finding, Gap, Host, Inactive, Requirement};
-use newport_domain::server_os::{Elevation, Updater};
-use serde_json::{Value, json};
+use newport_protocol::desktop::applications::{
+    self as dto, Availability, Elevation, Finding, Gap, Host, Inactive, Requirement, Updater,
+};
+use newport_protocol::remote_apps::apps::Catalogue;
 use std::sync::Arc;
 
 mod display;
@@ -121,7 +122,7 @@ const CATALOGUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60
 
 /// Selected runtime, default installation, and host dependencies. Only a
 /// verified, compatible full runtime receives the launch marker.
-pub(crate) async fn status(owner: &Arc<ServerSession>) -> Result<Value, String> {
+pub(crate) async fn status(owner: &Arc<ServerSession>) -> Result<Availability, String> {
     let server = owner.server().clone();
     if owner.is_revoked() {
         return Err(crate::server_session::STALE.into());
@@ -133,15 +134,12 @@ pub(crate) async fn status(owner: &Arc<ServerSession>) -> Result<Value, String> 
     let output = owner
         .unless_unreachable(crate::remote::command::stdout(owner.link(), &probe, None))
         .await?;
-    let mut value = parse_status(&output);
-    value["expectedConnection"] = json!(server);
-    value["bundledVariant"] = json!(crate::agent_payload::variant());
-    let architecture = value["architecture"].as_str().unwrap_or_default();
-    let payload = crate::agent_payload::payload(architecture);
-    value["bundledRevision"] = json!(payload.map(|p| p.sha256));
-    value["total"] = json!(payload.map(|p| p.size));
-    if value["system"] != "Linux" || payload.is_none() {
-        return Ok(value);
+    let mut status = parse_status(&output, &server);
+    let payload = crate::agent_payload::payload(status.architecture.as_deref().unwrap_or_default());
+    status.bundled_revision = payload.map(|p| p.sha256.to_owned());
+    status.total = payload.map(|p| p.size as u64);
+    if status.system.as_deref() != Some("Linux") || payload.is_none() {
+        return Ok(status);
     }
     let installation = owner.check_installation().await?;
     let needle = owner.needle(&server)?;
@@ -152,11 +150,12 @@ pub(crate) async fn status(owner: &Arc<ServerSession>) -> Result<Value, String> 
             || needle.validate(),
         ))
         .await;
-    apply_installation(&mut value, &installation, selected.as_ref());
-    Ok(value)
+    apply_installation(&mut status, &installation, selected.as_ref());
+    Ok(status)
 }
 
-fn parse_status(output: &str) -> Value {
+/// The probe's report for `server`, before the installation is checked.
+fn parse_status(output: &str, server: &crate::model::Server) -> Availability {
     let (head, release) = output.split_once("--os-release--").unwrap_or((output, ""));
     let field = |name: &str| {
         head.lines()
@@ -183,17 +182,17 @@ fn parse_status(output: &str) -> Value {
             Some((path, seconds.trim().parse().ok()?))
         })
         .collect();
-    let agents: Vec<Value> = head
+    let agents = head
         .lines()
         .filter_map(|line| line.strip_prefix("release="))
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .filter_map(|path| {
-            Some(json!({
-                "revision": revision_of(path)?,
-                "agent": path,
-                "builtAt": built.get(path),
-            }))
+            Some(dto::LegacyAgent {
+                revision: revision_of(path)?,
+                agent: path.to_owned(),
+                built_at: built.get(path).copied(),
+            })
         })
         .collect();
     let mut gaps: Vec<Gap> = head
@@ -219,17 +218,28 @@ fn parse_status(output: &str) -> Value {
     if let Some(gap) = display::gap(field("xwayland")) {
         gaps.insert(0, gap);
     }
-    json!({
-        "agent": null,
-        "legacyAgent": agent,
-        "legacyRevision": revision,
-        "legacyAgents": agents,
-        "system": field("system"),
-        "architecture": field("architecture"),
-        "gaps": gaps,
-        "host": host,
-        "osRelease": release.trim(),
-    })
+    Availability {
+        agent: None,
+        legacy_agent: agent.map(str::to_owned),
+        legacy_revision: revision,
+        legacy_agents: agents,
+        system: field("system").map(str::to_owned),
+        architecture: field("architecture").map(str::to_owned),
+        gaps,
+        host,
+        os_release: release.trim().to_owned(),
+        expected_server: server.into(),
+        bundled_variant: crate::agent_payload::variant(),
+        bundled_revision: None,
+        total: None,
+        installed_variant: None,
+        revision: None,
+        build_relation: newport_protocol::desktop::configuration::BuildRelation::Unknown,
+        installation_error: None,
+        selected_runtime: None,
+        agent_error: None,
+        automatic_update: None,
+    }
 }
 
 #[cfg(test)]
@@ -241,13 +251,13 @@ mod xwayland_tests {
             let report = format!(
                 "system=Linux\narchitecture=aarch64\nxwayland={version}\ngap=dbus missing\n--os-release--\nID=debian\n"
             );
-            let status = parse_status(&report);
+            let status = parse_status(&report, &tests::server());
             let usable = version == "24.1.6";
-            let gaps: Vec<Gap> = serde_json::from_value(status["gaps"].clone()).unwrap();
+            let gaps = &status.gaps;
             assert_eq!(gaps.len(), if usable { 1 } else { 2 }, "{version}");
             if !usable {
                 assert_eq!(gaps[0].requirement, Requirement::Xwayland);
-                assert!(gaps[0].optional());
+                assert!(newport_domain::requirements::optional(&gaps[0]));
             }
             assert_eq!(gaps.last().unwrap().requirement, Requirement::Dbus);
         }
@@ -257,28 +267,29 @@ mod xwayland_tests {
 /// The default entry point can belong to another desktop. Its diagnostics
 /// remain separate from the initialized runtime that admits this one's workers.
 fn apply_installation(
-    value: &mut Value,
+    status: &mut Availability,
     installation: &crate::agent_lifecycle::Status,
     selected: Result<&newport_protocol::runtime::Hello, &crate::agent_runtime::Error>,
 ) {
     use crate::agent_runtime::Error;
+    use crate::rpc::configuration::{build_relation, update_outcome};
     use newport_protocol::product::Variant;
-    value["agent"] = Value::Null;
-    value["installedVariant"] = json!(installation.installed_variant);
-    value["revision"] = json!(installation.installed_hash);
-    value["buildRelation"] = json!(installation.build_relation);
-    value["installationError"] = json!(installation.error);
-    value["selectedRuntime"] = Value::Null;
-    value["agentError"] = Value::Null;
-    value["automaticUpdate"] = json!(installation.automatic_update);
+    status.agent = None;
+    status.installed_variant = installation.installed_variant;
+    status.revision = installation.installed_hash.clone();
+    status.build_relation = build_relation(installation.build_relation);
+    status.installation_error = installation.error.clone();
+    status.selected_runtime = None;
+    status.agent_error = None;
+    status.automatic_update = installation.automatic_update.clone().map(update_outcome);
     let hello = match selected {
         Ok(hello) => hello,
         Err(Error::NotInstalled) if installation.installed == Some(false) => {
-            value["agentError"] = json!(installation.error);
+            status.agent_error = installation.error.clone();
             return;
         }
         Err(error) => {
-            value["agentError"] = json!(match error {
+            status.agent_error = Some(match error {
                 Error::OlderProtocol => installation
                     .error
                     .clone()
@@ -291,16 +302,16 @@ fn apply_installation(
     let inspected = match inspect_selected(installation, hello) {
         Ok(inspected) => inspected,
         Err(error) => {
-            value["agentError"] = json!(error);
+            status.agent_error = Some(error);
             return;
         }
     };
-    value["selectedRuntime"] = json!({
-        "buildSha256": hello.build_sha256,
-        "product": inspected.product.variant,
+    status.selected_runtime = Some(dto::SelectedRuntime {
+        build_sha256: hello.build_sha256.clone(),
+        product: inspected.product.variant,
     });
     if let Some(unmet) = inspected.unmet {
-        value["agentError"] = json!(unusable(&unmet));
+        status.agent_error = Some(unusable(&unmet).to_owned());
         return;
     }
     if inspected.product.variant == Variant::Full {
@@ -311,12 +322,12 @@ fn apply_installation(
             .chain(Variant::Full.needs().iter().copied())
             .find_map(|(service, version)| hello.require(service, version).err())
         {
-            value["agentError"] = json!(error.message);
+            status.agent_error = Some(error.message);
             return;
         }
         // This marker never supplies an executable to a shell. Runtime
         // admission chooses the worker's immutable build.
-        value["agent"] = json!("newport-agent");
+        status.agent = Some("newport-agent".into());
     }
 }
 
@@ -388,16 +399,10 @@ fn parse_gap(line: &str) -> Option<Gap> {
         _ => return None,
     };
     let finding = match state {
-        "missing" => Finding::Missing,
-        "root" => Finding::Inactive {
-            reason: Inactive::Root,
-        },
-        "stopped" => Finding::Inactive {
-            reason: Inactive::Stopped,
-        },
-        "failed" => Finding::Inactive {
-            reason: Inactive::Failed,
-        },
+        "missing" => Finding::Missing(Box::default()),
+        "root" => Finding::Inactive(Box::new(Inactive::Root)),
+        "stopped" => Finding::Inactive(Box::new(Inactive::Stopped)),
+        "failed" => Finding::Inactive(Box::new(Inactive::Failed)),
         _ => return None,
     };
     Some(Gap {
@@ -406,8 +411,8 @@ fn parse_gap(line: &str) -> Option<Gap> {
     })
 }
 
-/// Validated discovery records projected into the desktop catalogue.
-pub(crate) async fn catalogue(owner: &Arc<ServerSession>) -> Result<Value, String> {
+/// The server's validated application catalogue.
+pub(crate) async fn catalogue(owner: &Arc<ServerSession>) -> Result<Catalogue, String> {
     let needle = owner.needle(owner.server())?;
     let (channel, worker) = needle
         .launch_channel(crate::agent::Service::RemoteApps {
@@ -426,15 +431,15 @@ pub(crate) async fn catalogue(owner: &Arc<ServerSession>) -> Result<Value, Strin
     })?;
     drop(worker);
     needle.validate()?;
-    catalogue_value(&output)
+    decode_catalogue(&output)
 }
 
-fn catalogue_value(output: &[u8]) -> Result<Value, String> {
-    let catalogue = newport_protocol::remote_apps::apps::wire::decode_complete(output)
+/// Decoding validates the catalogue; a service error becomes its message.
+fn decode_catalogue(output: &[u8]) -> Result<Catalogue, String> {
+    newport_protocol::remote_apps::apps::wire::decode_complete(output)
         .map_err(|error| format!("The agent returned an invalid catalogue: {error}"))?
         .into_result()
-        .map_err(|error| error.message)?;
-    serde_json::to_value(catalogue).map_err(|error| error.to_string())
+        .map_err(|error| error.message)
 }
 
 enum ReadError {
@@ -510,8 +515,11 @@ pub(crate) fn keep_tail(tail: &mut Vec<u8>, data: &[u8]) {
 
 #[cfg(test)]
 mod tests {
+    use super::Availability;
+    use newport_protocol::{desktop::configuration::BuildRelation, product::Variant as Product};
+
     #[test]
-    fn typed_catalogue_preserves_ui_fields_and_reports_service_errors() {
+    fn the_catalogue_keeps_every_field_and_reports_service_errors() {
         use newport_protocol::{
             common::{Error, Retry},
             remote_apps::apps::{Application, Catalogue, DesktopAction, Reply, wire},
@@ -529,12 +537,12 @@ mod tests {
                 }],
             }],
         });
+        let Reply::Catalogue(expected) = result.clone() else {
+            unreachable!()
+        };
         assert_eq!(
-            super::catalogue_value(&wire::encode(&result).unwrap()).unwrap(),
-            serde_json::json!({
-                "apps": [{"id": "editor.desktop", "name": "Éditeur", "description": "Text editor", "keywords": ["text"],
-                    "icon": null, "actions": [{"id": "new-window", "name": "New window"}]}]
-            })
+            super::decode_catalogue(&wire::encode(&result).unwrap()).unwrap(),
+            expected
         );
         let result = Reply::Failed(Error {
             code: "catalogue_failed".into(),
@@ -542,10 +550,26 @@ mod tests {
             retry: Retry::No,
         });
         assert_eq!(
-            super::catalogue_value(&wire::encode(&result).unwrap()).unwrap_err(),
+            super::decode_catalogue(&wire::encode(&result).unwrap()).unwrap_err(),
             "Directory read failed"
         );
-        assert!(super::catalogue_value(&[5, 10]).is_err());
+        assert!(super::decode_catalogue(&[5, 10]).is_err());
+    }
+
+    pub(super) fn server() -> crate::model::Server {
+        serde_json::from_value(serde_json::json!({
+            "id": "7a9c1d4e-0000-4000-8000-000000000001", "name": "Box",
+            "sshHost": "host", "sshUser": "user", "sshPort": 22, "identityFile": null,
+        }))
+        .unwrap()
+    }
+
+    fn parse(report: &str) -> Availability {
+        super::parse_status(report, &server())
+    }
+
+    fn empty() -> Availability {
+        parse("--os-release--\n")
     }
 
     fn selected_hello(
@@ -618,25 +642,26 @@ mod tests {
         let report = "xwayland=missing\nagent=/c/releases/system/old/current/run-agent\ngap=dbus missing\n--os-release--\nID=debian";
         let hello = selected_hello(Variant::Full);
         for staged in [false, true] {
-            let mut value = super::parse_status(report);
+            let mut value = parse(report);
             let status = crate::agent_lifecycle::Status {
                 bundled_staged: staged,
                 ..retained_installation()
             };
             super::apply_installation(&mut value, &status, Ok(&hello));
-            assert_eq!(value["agent"], "newport-agent");
-            assert!(value["agentError"].is_null());
-            assert_eq!(value["selectedRuntime"]["product"], "full");
-            assert_eq!(value["selectedRuntime"]["buildSha256"], hello.build_sha256);
-            assert!(value["installedVariant"].is_null());
-            assert_eq!(value["revision"], "a".repeat(64));
-            assert_eq!(value["buildRelation"], "older");
+            assert_eq!(value.agent.as_deref(), Some("newport-agent"));
+            assert!(value.agent_error.is_none());
+            let selected = value.selected_runtime.as_ref().unwrap();
+            assert_eq!(selected.product, Product::Full);
+            assert_eq!(selected.build_sha256, hello.build_sha256);
+            assert!(value.installed_variant.is_none());
+            assert_eq!(value.revision, Some("a".repeat(64)));
+            assert_eq!(value.build_relation, BuildRelation::Older);
             assert_eq!(
-                value["installationError"],
-                "The default product cannot be verified"
+                value.installation_error.as_deref(),
+                Some("The default product cannot be verified")
             );
-            assert!(value["legacyAgent"].is_string());
-            assert_eq!(value["gaps"].as_array().unwrap().len(), 2);
+            assert!(value.legacy_agent.is_some());
+            assert_eq!(value.gaps.len(), 2);
         }
     }
 
@@ -658,24 +683,24 @@ mod tests {
                 "Connection lost",
             ),
         ] {
-            let mut value = serde_json::json!({});
+            let mut value = empty();
             super::apply_installation(&mut value, &status, Err(&error));
-            assert!(value["agent"].is_null());
-            assert!(value["selectedRuntime"].is_null());
-            assert_eq!(value["agentError"], message);
+            assert!(value.agent.is_none());
+            assert!(value.selected_runtime.is_none());
+            assert_eq!(value.agent_error.as_deref(), Some(message));
             assert_eq!(
-                value["installationError"],
-                "The default product cannot be verified"
+                value.installation_error.as_deref(),
+                Some("The default product cannot be verified")
             );
         }
         let missing = crate::agent_lifecycle::Status {
             installed: Some(false),
             ..Default::default()
         };
-        let mut value = serde_json::json!({});
+        let mut value = empty();
         super::apply_installation(&mut value, &missing, Err(&Error::NotInstalled));
-        assert!(value["agent"].is_null());
-        assert!(value["agentError"].is_null());
+        assert!(value.agent.is_none());
+        assert!(value.agent_error.is_none());
     }
 
     #[test]
@@ -687,18 +712,19 @@ mod tests {
             error: None,
             ..retained_installation()
         };
-        let mut value = serde_json::json!({});
+        let mut value = empty();
         super::apply_installation(&mut value, &status, Ok(&selected_hello(Variant::Core)));
-        assert!(value["agent"].is_null());
-        assert!(value["agentError"].is_null());
-        assert_eq!(value["installedVariant"], "full");
-        assert_eq!(value["selectedRuntime"]["product"], "core");
+        assert!(value.agent.is_none());
+        assert!(value.agent_error.is_none());
+        assert_eq!(value.installed_variant, Some(Product::Full));
+        assert_eq!(value.selected_runtime.unwrap().product, Product::Core);
+        let mut value = empty();
         super::apply_installation(&mut value, &status, Ok(&selected_hello(Variant::Full)));
-        assert!(value["agent"].is_null());
-        assert!(value["selectedRuntime"].is_null());
+        assert!(value.agent.is_none());
+        assert!(value.selected_runtime.is_none());
         assert_eq!(
-            value["agentError"],
-            "The selected Needle runtime does not match its verified product."
+            value.agent_error.as_deref(),
+            Some("The selected Needle runtime does not match its verified product.")
         );
     }
 
@@ -724,11 +750,11 @@ mod tests {
         hello.build_sha256 = status.installed_hash.clone().unwrap();
         invalid.push(hello);
         for hello in invalid {
-            let mut value = serde_json::json!({});
+            let mut value = empty();
             super::apply_installation(&mut value, &status, Ok(&hello));
-            assert!(value["agent"].is_null(), "{hello:?}");
-            assert!(value["selectedRuntime"].is_null());
-            assert!(value["agentError"].is_string());
+            assert!(value.agent.is_none(), "{hello:?}");
+            assert!(value.selected_runtime.is_none());
+            assert!(value.agent_error.is_some());
         }
     }
 
@@ -747,20 +773,22 @@ mod tests {
                 } else {
                     hello.services.get_mut(*service).unwrap().versions = vec![2];
                 }
-                let mut value = serde_json::json!({});
+                let mut value = empty();
                 super::apply_installation(&mut value, &status, Ok(&hello));
-                assert!(value["agent"].is_null(), "{service} missing={missing}");
-                assert!(value["agentError"].is_string());
+                assert!(value.agent.is_none(), "{service} missing={missing}");
+                assert!(value.agent_error.is_some());
             }
         }
         let mut hello = selected_hello(Variant::Full);
         hello.services.get_mut("remote-apps").unwrap().versions = vec![2];
-        let mut value = serde_json::json!({});
+        let mut value = empty();
         super::apply_installation(&mut value, &status, Ok(&hello));
-        assert!(value["agent"].is_null());
+        assert!(value.agent.is_none());
         assert_eq!(
-            value["agentError"],
-            "This server has a newer Newport Remote than this Newport. Update Newport to use it."
+            value.agent_error.as_deref(),
+            Some(
+                "This server has a newer Newport Remote than this Newport. Update Newport to use it."
+            )
         );
     }
 
@@ -772,10 +800,10 @@ mod tests {
             let mut hello = selected_hello(Variant::Full);
             hello.services.get_mut(service).unwrap().unavailable =
                 Some("Optional dependency is missing".into());
-            let mut value = serde_json::json!({});
+            let mut value = empty();
             super::apply_installation(&mut value, &status, Ok(&hello));
-            assert_eq!(value["agent"], "newport-agent", "{service}");
-            assert!(value["agentError"].is_null());
+            assert_eq!(value.agent.as_deref(), Some("newport-agent"), "{service}");
+            assert!(value.agent_error.is_none());
         }
     }
 
@@ -800,12 +828,15 @@ mod tests {
                             Some("Service dependency failed".into())
                     }
                 }
-                let mut value = serde_json::json!({});
+                let mut value = empty();
                 super::apply_installation(&mut value, &status, Ok(&hello));
-                assert!(value["agent"].is_null(), "{service} {failure}");
-                assert!(value["agentError"].is_string());
+                assert!(value.agent.is_none(), "{service} {failure}");
+                assert!(value.agent_error.is_some());
                 if failure == "unavailable" {
-                    assert_eq!(value["agentError"], "Service dependency failed");
+                    assert_eq!(
+                        value.agent_error.as_deref(),
+                        Some("Service dependency failed")
+                    );
                 }
             }
         }
@@ -874,45 +905,158 @@ mod tests {
             &Err("upload failed".into()),
         );
         let checked = lifecycle.checked(1, Ok(status)).unwrap();
-        let mut value = super::parse_status("xwayland=24.1.6\n--os-release--\nID=debian");
+        let mut value = parse("xwayland=24.1.6\n--os-release--\nID=debian");
         super::apply_installation(
             &mut value,
             &checked,
             Err(&crate::agent_runtime::Error::NotInstalled),
         );
-        assert_eq!(value["automaticUpdate"]["error"], "upload failed");
+        assert_eq!(
+            value.automatic_update.unwrap().error.as_deref(),
+            Some("upload failed")
+        );
     }
 
     #[test]
     fn status_reads_the_agent_and_distribution() {
-        let parsed = super::parse_status(
+        use newport_protocol::{common::Present, desktop::applications as dto};
+        let parsed = parse(
             "xwayland=24.1.6\nagent=/home/u/.cache/newport-remote/releases/nix/a/run-agent\n--os-release--\nID=nixos\n",
         );
         assert_eq!(
-            parsed["legacyAgent"],
-            "/home/u/.cache/newport-remote/releases/nix/a/run-agent"
+            parsed.legacy_agent.as_deref(),
+            Some("/home/u/.cache/newport-remote/releases/nix/a/run-agent")
         );
-        assert_eq!(parsed["osRelease"], "ID=nixos");
-        assert_eq!(parsed["legacyRevision"], "a");
-        let current = super::parse_status(
+        assert_eq!(parsed.os_release, "ID=nixos");
+        assert_eq!(parsed.legacy_revision.as_deref(), Some("a"));
+        let current = parse(
             "xwayland=24.1.6\nagent=/c/releases/system/f00d/current/run-agent\nsystem=Linux\narchitecture=aarch64\ngap=dbus missing\n--os-release--\n",
         );
-        assert_eq!(current["legacyRevision"], "f00d");
-        assert_eq!(current["system"], "Linux");
-        assert_eq!(current["architecture"], "aarch64");
-        assert_eq!(current["gaps"][0]["requirement"], "dbus");
+        assert_eq!(current.legacy_revision.as_deref(), Some("f00d"));
+        assert_eq!(current.system.as_deref(), Some("Linux"));
+        assert_eq!(current.architecture.as_deref(), Some("aarch64"));
+        assert_eq!(current.gaps[0].requirement, dto::Requirement::Dbus);
         assert!(
-            super::parse_status("xwayland=24.1.6\nagent=\n--os-release--\n")["agent"].is_null()
+            parse("xwayland=24.1.6\nagent=\n--os-release--\n")
+                .agent
+                .is_none()
         );
-        let missing = super::parse_status(
+        let missing = parse(
             "xwayland=missing\nagent=/a/run-agent\ngap=audio missing\n--os-release--\nID=debian\n",
         );
         assert_eq!(
-            missing["gaps"],
-            serde_json::json!([
-                {"requirement": "xwayland", "state": "missing"},
-                {"requirement": "audio", "state": "missing"},
-            ])
+            missing.gaps,
+            [
+                dto::Gap {
+                    requirement: dto::Requirement::Xwayland,
+                    finding: dto::Finding::Missing(Box::new(Present {})),
+                },
+                dto::Gap {
+                    requirement: dto::Requirement::Audio,
+                    finding: dto::Finding::Missing(Box::new(Present {})),
+                },
+            ]
+        );
+    }
+
+    /// Everything the desktop receives for a probed full runtime.
+    #[test]
+    fn a_probed_server_reports_its_whole_availability() {
+        use newport_protocol::{
+            common::Present,
+            desktop::{applications as dto, configuration as config},
+        };
+        let mut status = parse(
+            "xwayland=22.1.9\nagent=/c/releases/system/f00d/current/run-agent\n\
+             release=/c/releases/system/f00d/current/run-agent\n\
+             built=/c/releases/system/f00d/current/run-agent 1792000000\n\
+             system=Linux\narchitecture=aarch64\nelevation=doas\nupdater=transactionalUpdate\n\
+             gap=dbus failed\n--os-release--\nID=debian\n",
+        );
+        status.bundled_revision = Some("b".repeat(64));
+        status.total = Some(1024);
+        let installation = crate::agent_lifecycle::Status {
+            installed_variant: Some(Product::Full),
+            automatic_update: Some(crate::agent_lifecycle::UpdateOutcome {
+                at: 7,
+                from: Some("old".into()),
+                to: None,
+                error: Some("upload failed".into()),
+            }),
+            ..retained_installation()
+        };
+        let hello = selected_hello(Product::Full);
+        super::apply_installation(&mut status, &installation, Ok(&hello));
+        let server = server();
+        assert_eq!(
+            status,
+            Availability {
+                agent: Some("newport-agent".into()),
+                legacy_agent: Some("/c/releases/system/f00d/current/run-agent".into()),
+                legacy_revision: Some("f00d".into()),
+                legacy_agents: vec![dto::LegacyAgent {
+                    revision: "f00d".into(),
+                    agent: "/c/releases/system/f00d/current/run-agent".into(),
+                    built_at: Some(1_792_000_000),
+                }],
+                system: Some("Linux".into()),
+                architecture: Some("aarch64".into()),
+                gaps: vec![
+                    dto::Gap {
+                        requirement: dto::Requirement::Xwayland,
+                        finding: dto::Finding::Outdated(Box::new("22.1.9".into())),
+                    },
+                    dto::Gap {
+                        requirement: dto::Requirement::Dbus,
+                        finding: dto::Finding::Inactive(Box::new(dto::Inactive::Failed)),
+                    },
+                ],
+                host: dto::Host {
+                    elevation: dto::Elevation::Doas,
+                    updater: Some(dto::Updater::TransactionalUpdate),
+                    user_services: false,
+                },
+                os_release: "ID=debian".into(),
+                expected_server: config::Server {
+                    id: server.id,
+                    name: "Box".into(),
+                    ssh_user: "user".into(),
+                    ssh_host: "host".into(),
+                    ssh_port: 22,
+                    identity_file: None,
+                    agent_source: None,
+                    agent_key_fingerprint: None,
+                    auth_method: config::AuthMethod::PublicKey,
+                    clipboard_enabled: false,
+                    browser_enabled: false,
+                    agent_install_approved: false,
+                    setup_complete: false,
+                    proxy: None,
+                },
+                bundled_variant: crate::agent_payload::variant(),
+                bundled_revision: Some("b".repeat(64)),
+                total: Some(1024),
+                installed_variant: Some(Product::Full),
+                revision: Some("a".repeat(64)),
+                build_relation: BuildRelation::Older,
+                installation_error: Some("The default product cannot be verified".into()),
+                selected_runtime: Some(dto::SelectedRuntime {
+                    build_sha256: hello.build_sha256.clone(),
+                    product: Product::Full,
+                }),
+                agent_error: None,
+                automatic_update: Some(config::UpdateOutcome {
+                    at: 7,
+                    from: Some("old".into()),
+                    to: None,
+                    error: Some("upload failed".into()),
+                }),
+            }
+        );
+        let unverified = parse("xwayland=unverified\n--os-release--\n");
+        assert_eq!(
+            unverified.gaps[0].finding,
+            dto::Finding::Unverified(Box::new(Present {}))
         );
     }
 
@@ -949,49 +1093,65 @@ mod tests {
 
     #[test]
     fn probe_lines_become_gaps_and_what_the_account_can_do() {
-        let parsed = super::parse_status(
+        use newport_protocol::{common::Present, desktop::applications as dto};
+        let parsed = parse(
             "xwayland=24.1.6\nagent=\nelevation=root\nupdater=rpmOstree\nuserServices=1\n\
              gap=audio root\ngap=dbus failed\ngap=fonts missing\ngap=gles missing\n\
              gap=portal missing\ngap=tar missing\ngap=audio loud\n--os-release--\nID=fedora\n",
         );
+        let inactive = |requirement, reason| dto::Gap {
+            requirement,
+            finding: dto::Finding::Inactive(Box::new(reason)),
+        };
+        let missing = |requirement| dto::Gap {
+            requirement,
+            finding: dto::Finding::Missing(Box::new(Present {})),
+        };
         assert_eq!(
-            parsed["gaps"],
-            serde_json::json!([
-                {"requirement": "audio", "state": "inactive", "reason": "root"},
-                {"requirement": "dbus", "state": "inactive", "reason": "failed"},
-                {"requirement": "fonts", "state": "missing"},
-                {"requirement": "gles", "state": "missing"},
-                {"requirement": "portal", "state": "missing"},
-            ])
+            parsed.gaps,
+            [
+                inactive(dto::Requirement::Audio, dto::Inactive::Root),
+                inactive(dto::Requirement::Dbus, dto::Inactive::Failed),
+                missing(dto::Requirement::Fonts),
+                missing(dto::Requirement::Gles),
+                missing(dto::Requirement::Portal),
+            ]
         );
         assert_eq!(
-            parsed["host"],
-            serde_json::json!({"elevation": "root", "updater": "rpmOstree", "userServices": true})
+            parsed.host,
+            dto::Host {
+                elevation: dto::Elevation::Root,
+                updater: Some(dto::Updater::RpmOstree),
+                user_services: true,
+            }
         );
         // Without an elevation line, sudo.
-        let older = super::parse_status("xwayland=24.1.6\nagent=\n--os-release--\n");
         assert_eq!(
-            older["host"],
-            serde_json::json!({"elevation": "sudo", "updater": null, "userServices": false})
+            parse("xwayland=24.1.6\nagent=\n--os-release--\n").host,
+            dto::Host {
+                elevation: dto::Elevation::Sudo,
+                updater: None,
+                user_services: false,
+            }
         );
     }
 
     #[test]
     fn status_lists_every_installed_release() {
-        let parsed = super::parse_status(
+        let parsed = parse(
             "xwayland=24.1.6\nagent=/c/releases/system/new/current/run-agent\nrelease=/c/releases/system/old/current/run-agent\nrelease=/c/releases/system/new/current/run-agent\n--os-release--\n",
         );
-        assert_eq!(parsed["legacyRevision"], "new");
-        assert_eq!(parsed["legacyAgents"][0]["revision"], "old");
+        assert_eq!(parsed.legacy_revision.as_deref(), Some("new"));
+        assert_eq!(parsed.legacy_agents[0].revision, "old");
         assert_eq!(
-            parsed["legacyAgents"][0]["agent"],
+            parsed.legacy_agents[0].agent,
             "/c/releases/system/old/current/run-agent"
         );
-        assert_eq!(parsed["legacyAgents"][1]["revision"], "new");
-        assert!(parsed["legacyAgents"][0]["builtAt"].is_null());
-        let built = super::parse_status(
+        assert_eq!(parsed.legacy_agents[1].revision, "new");
+        assert!(parsed.legacy_agents[0].built_at.is_none());
+        let built = parse(
             "xwayland=24.1.6\nagent=/c/releases/system/new/current/run-agent\nrelease=/c/releases/system/new/current/run-agent\nbuilt=/c/releases/system/new/current/run-agent 1792000000\n--os-release--\n",
         );
-        assert_eq!(built["legacyAgents"][0]["builtAt"], 1_792_000_000);
+        assert_eq!(built.legacy_agents[0].built_at, Some(1_792_000_000));
     }
 }

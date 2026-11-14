@@ -4,6 +4,7 @@ use crate::containers::{
     compose_jobs::ComposeReview,
     tests::{
         FakeBackend, click, compose_project, draw, element, fixture, select, settle, snapshot,
+        started,
     },
 };
 use gpui::{
@@ -12,9 +13,11 @@ use gpui::{
 };
 use gpui_kit as gpui;
 use newport_client::containers::Action;
-use newport_domain::compose::{ComposeJob, JobState};
-use newport_domain::containers as domain;
-use serde_json::{Value, json};
+use newport_protocol::monitor::{
+    compose::{Job, State},
+    containers::ContainerState,
+};
+use serde_json::json;
 use std::{thread, time::Duration};
 
 fn menu_item(cx: &mut VisualTestContext, label: &str) -> Option<ElementSnapshot> {
@@ -128,13 +131,18 @@ fn container_compose_menu_stopped_build_service_sends_exact_flags_without_naviga
     click(cx, "More actions for stack-worker-1");
     click_menu(cx, "Recreate");
     wait_held(&backend);
-    backend.set_compose_jobs(Ok(json!({"jobs":[ComposeJob {
-        job: "fixture-job".into(), project: "stack".into(),
+    backend.set_compose_jobs(Ok(vec![Job {
+        job: "fixture-job".into(),
+        project: "stack".into(),
         command: "docker compose up --force-recreate worker".into(),
-        state: JobState::Running, started_at: 1_000,
-        finished_at: None, exit_code: None, output: String::new(), offset: 0,
-    }]})));
-    backend.release_action(json!({"job":"fixture-job"}));
+        state: State::Running,
+        started_at: 1_000,
+        finished_at: None,
+        exit_code: None,
+        output: String::new(),
+        offset: 0,
+    }]));
+    backend.release_action(started("fixture-job"));
     settle(&panel, cx);
     panel.read_with(cx, |p, _| {
         assert_eq!(p.client.selected_container().unwrap().id, "b".repeat(64));
@@ -172,7 +180,7 @@ fn container_compose_menu_hides_unsupported_build_cli_and_oneoff_choices(cx: &mu
     assert!(menu_item(cx, "Recreate").is_none());
     close_menu(cx);
     let mut source = snapshot();
-    source.containers[2].state = domain::ContainerState::Running;
+    source.containers[2].state = ContainerState::Running;
     backend.set_snapshot(source);
     panel.update(cx, |p, _| p.client.refresh());
     settle(&panel, cx);
@@ -181,8 +189,8 @@ fn container_compose_menu_hides_unsupported_build_cli_and_oneoff_choices(cx: &mu
     assert!(menu_item(cx, "Recreate").is_none());
     close_menu(cx);
     let mut detail = compose_project();
-    detail["cli"] = Value::Null;
-    detail["cliError"] = json!("Compose is not installed");
+    detail.cli = None;
+    detail.cli_error = Some("Compose is not installed".into());
     backend.set_compose_project(Ok(detail));
     select(&panel, cx, "c:stack-web-1");
     panel.update(cx, |p, _| p.client.retry_compose());
@@ -307,10 +315,10 @@ fn container_compose_menu_revalidates_build_and_cli_after_opening(cx: &mut TestA
         click(cx, "More actions for stack-worker-1");
         let mut detail = compose_project();
         if change == "build" {
-            detail["services"][1]["build"] = json!(false);
+            detail.services.as_mut().unwrap()[1].build = false;
         }
         if change == "cli" {
-            detail["cli"] = Value::Null;
+            detail.cli = None;
         }
         backend.set_compose_project(if change == "error" {
             Err("Compose configuration read failed".into())

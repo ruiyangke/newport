@@ -25,9 +25,17 @@ impl ProjectsCache {
         self.projects.clone()
     }
 
-    fn counts(&mut self, saved: &[Value], runtime: &Value, server: &str) -> Counts {
+    fn counts(
+        &mut self,
+        saved: &[configuration::Tunnel],
+        runtime: Option<&configuration::Runtime>,
+        server: Option<uuid::Uuid>,
+    ) -> Counts {
         *self.counts.get_or_insert_with(|| {
-            let mine = saved.iter().filter(|t| t["serverId"] == server);
+            let mine = saved
+                .iter()
+                .filter(|t| Some(t.server_id) == server)
+                .map(|t| (t.id, runtime.and_then(|runtime| runtime.tunnel(t.id))));
             Counts {
                 all: self.projects.iter().map(|p| p.entries.len()).sum(),
                 saved: self
@@ -49,14 +57,17 @@ impl ProjectsCache {
                     .count(),
                 active: mine
                     .clone()
-                    .filter(|t| {
-                        matches!(
-                            runtime["tunnels"][string(t, "id")]["status"].as_str(),
-                            Some("connected" | "connecting" | "reconnecting")
+                    .filter(|(_, state)| state.is_some_and(|state| active(state.status)))
+                    .count(),
+                attention: mine
+                    .filter(|(id, state)| {
+                        trouble(
+                            *state,
+                            runtime.map_or(&[], |runtime| runtime.tunnel_health(*id)),
+                            None,
                         )
                     })
                     .count(),
-                attention: mine.filter(|t| trouble(runtime, t)).count(),
             }
         })
     }
@@ -134,17 +145,30 @@ impl Viewport {
 /// Cloning a render snapshot shares rows, keys and focus handles in constant time.
 #[derive(Default)]
 pub(super) struct PreparedCache {
-    key: Value,
+    key: Option<PreparedKey>,
     value: Option<Rc<PreparedRows>>,
 }
 impl PreparedCache {
-    fn get(&mut self, key: Value, build: impl FnOnce() -> PreparedRows) -> Rc<PreparedRows> {
-        if self.key != key || self.value.is_none() {
+    fn get(&mut self, key: PreparedKey, build: impl FnOnce() -> PreparedRows) -> Rc<PreparedRows> {
+        if self.key.as_ref() != Some(&key) || self.value.is_none() {
             self.value = Some(Rc::new(build()));
-            self.key = key;
+            self.key = Some(key);
         }
         self.value.as_ref().unwrap().clone()
     }
+}
+/// What the prepared rows were built from.
+#[derive(PartialEq)]
+struct PreparedKey {
+    revisions: [u64; 3],
+    query: String,
+    filter: usize,
+    table: bool,
+    sort: usize,
+    descending: bool,
+    collapsed: std::collections::HashSet<String>,
+    expanded: std::collections::HashSet<String>,
+    collapsed_worktrees: std::collections::HashSet<(String, String)>,
 }
 struct PreparedRows {
     keys: Rc<Vec<String>>,
@@ -163,18 +187,18 @@ struct ProjectRows {
 }
 #[derive(Default)]
 pub(super) struct VisibleCache {
-    key: Value,
+    key: Option<([u64; 3], String, usize)>,
     groups: std::rc::Rc<Vec<std::rc::Rc<ProjectRows>>>,
 }
 impl VisibleCache {
     fn get(
         &mut self,
-        key: Value,
+        key: ([u64; 3], String, usize),
         build: impl FnOnce() -> Vec<std::rc::Rc<ProjectRows>>,
     ) -> std::rc::Rc<Vec<std::rc::Rc<ProjectRows>>> {
-        if self.key != key {
+        if self.key.as_ref() != Some(&key) {
             self.groups = std::rc::Rc::new(build());
-            self.key = key;
+            self.key = Some(key);
         }
         self.groups.clone()
     }
@@ -334,32 +358,63 @@ impl RenderOnce for ConnectionsPage {
     }
 }
 
-pub(super) fn string<'a>(v: &'a Value, key: &str) -> &'a str {
-    v[key].as_str().unwrap_or("")
+/// Whether a forward's connection is up or on its way up.
+pub(super) fn active(status: configuration::ConnectionStatus) -> bool {
+    matches!(
+        status,
+        configuration::ConnectionStatus::Connected
+            | configuration::ConnectionStatus::Connecting
+            | configuration::ConnectionStatus::Reconnecting
+    )
 }
-pub(super) fn trouble(runtime: &Value, t: &Value) -> bool {
-    trouble_for(runtime, t, None)
+/// A forward definition's connection and destination checks in `runtime`.
+pub(super) fn forward_state<'a>(
+    runtime: Option<&'a configuration::Runtime>,
+    forward: &configuration::Tunnel,
+) -> (
+    Option<&'a configuration::ConnectionState>,
+    &'a [configuration::DestinationHealth],
+) {
+    match runtime {
+        Some(runtime) => (
+            runtime.tunnel(forward.id),
+            runtime.tunnel_health(forward.id),
+        ),
+        None => (None, &[]),
+    }
 }
-pub(super) fn trouble_for(runtime: &Value, t: &Value, remote_port: Option<u64>) -> bool {
-    let id = string(t, "id");
-    runtime["tunnels"][id]["status"] == "error"
-        || runtime["tunnels"][id]["errorMessage"]
-            .as_str()
+pub(super) fn trouble(
+    state: Option<&configuration::ConnectionState>,
+    health: &[configuration::DestinationHealth],
+    remote_port: Option<u16>,
+) -> bool {
+    let Some(state) = state else {
+        return false;
+    };
+    state.status == configuration::ConnectionStatus::Error
+        || state
+            .error_message
+            .as_deref()
             .is_some_and(|message| !message.is_empty())
-        || (runtime["tunnels"][id]["status"] == "connected"
-            && runtime["tunnelHealth"][id].as_array().is_some_and(|hs| {
-                hs.iter()
-                    .filter(|h| {
-                        remote_port.is_none_or(|port| h["remotePort"].as_u64() == Some(port))
-                    })
-                    .any(|h| h["message"].as_str().is_some_and(|s| !s.is_empty()))
-            }))
+        || (state.status == configuration::ConnectionStatus::Connected
+            && health
+                .iter()
+                .filter(|h| remote_port.is_none_or(|port| h.remote_port == port))
+                .any(|h| h.message.as_deref().is_some_and(|s| !s.is_empty())))
 }
-fn entry_needs_attention(runtime: &Value, entry: &Entry) -> bool {
+pub(super) fn trouble_for(
+    runtime: Option<&configuration::Runtime>,
+    t: &configuration::Tunnel,
+    remote_port: Option<u16>,
+) -> bool {
+    let (state, health) = forward_state(runtime, t);
+    trouble(state, health, remote_port)
+}
+fn entry_needs_attention(runtime: Option<&configuration::Runtime>, entry: &Entry) -> bool {
     let remote_port = if entry.is_saved() {
         None
     } else {
-        entry.port.number().map(u64::from)
+        entry.port.number()
     };
     entry
         .forwards
@@ -369,7 +424,7 @@ fn entry_needs_attention(runtime: &Value, entry: &Entry) -> bool {
 
 /// Saved forwards whose destination the scan didn't observe: the rows that
 /// say "Destination not observed".
-pub(super) fn unobserved_forwards(groups: &[Project]) -> Vec<Value> {
+pub(super) fn unobserved_forwards(groups: &[Project]) -> Vec<configuration::Tunnel> {
     groups
         .iter()
         .flat_map(|group| &group.entries)
@@ -479,16 +534,10 @@ fn worktree_disclosure_rows(
 
 impl Newport {
     pub(super) fn connection_projects(&self) -> Vec<Project> {
-        let known = self
-            .resources
-            .get("connection-projects")
-            .and_then(|resource| resource.value.as_array())
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-            .iter()
-            .filter(|p| p["serverId"] == self.server)
-            .cloned()
-            .collect::<Vec<_>>();
+        let Some(server) = self.server_id() else {
+            return Vec::new();
+        };
+        let known = self.connection_bookmarks();
         let ports = self
             .connections_state
             .get(&self.server)
@@ -496,17 +545,14 @@ impl Newport {
             .and_then(newport_client::discovery::Reading::view)
             .map(|view| view.members().to_vec())
             .unwrap_or_default();
-        let saved = self.snapshot["config"]["tunnels"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
+        let saved = self.tunnels();
         if let Some(state) = self.connections_state.get(&self.server) {
             state
                 .worktree_associations
                 .borrow_mut()
-                .group(ports, saved, &self.server, &known)
+                .group(ports, saved, server, known)
         } else {
-            newport_domain::port_grouping::group(ports, saved, &self.server, &known)
+            newport_domain::port_grouping::group(ports, saved, server, known)
         }
     }
 
@@ -514,7 +560,7 @@ impl Newport {
     /// a forward's destination wasn't observed. A scan restored from before
     /// the page was left counts only once a new one replaces it.
     pub(super) fn listeners_known(&self, cx: &App) -> bool {
-        self.resources.get("page").is_some_and(|r| {
+        self.resources.get("ports").is_some_and(|r| {
             r.has_value() && r.error.is_none() && !r.stale && r.updated_at.is_some()
         }) && self
             .connections_state
@@ -541,16 +587,13 @@ impl Newport {
             return div().into_any_element();
         };
         let query = input.read(cx).value().trim().to_lowercase();
-        let saved = self.snapshot["config"]["tunnels"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let runtime = &self.snapshot["runtime"];
+        let saved = self.tunnels();
+        let runtime = self.runtime();
         let show_owner = cx.weak_entity();
         let view_owner = show_owner.clone();
         let show_server = self.server.clone();
         let view_server = self.server.clone();
-        let [ports_revision, projects_revision] = ["page", "connection-projects"].map(|key| {
+        let [ports_revision, projects_revision] = ["ports", "connection-projects"].map(|key| {
             self.resources
                 .get(key)
                 .map_or(0, |resource| resource.data_revision)
@@ -569,11 +612,11 @@ impl Newport {
         ) = {
             let mut cache = state.projects.borrow_mut();
             let groups = cache.get(revisions, || self.connection_projects());
-            let counts = cache.counts(saved, runtime, &self.server);
+            let counts = cache.counts(saved, runtime, self.server_id());
             (groups, counts)
         };
         let no_entries = groups.is_empty();
-        let resource = self.resources.get("page");
+        let resource = self.resources.get("ports");
         let has_reading = resource.is_some_and(state::Resource::has_value);
         // Discovery runs on Needle; saved forwards don't.
         let needle_missing = self.needle_missing();
@@ -589,7 +632,7 @@ impl Newport {
         let visible = state
             .visible
             .borrow_mut()
-            .get(json!([revisions, query, filter]), || {
+            .get((revisions, query.clone(), filter), || {
                 groups
                     .iter()
                     .cloned()
@@ -669,7 +712,7 @@ impl Newport {
         }
         let updated = self
             .resources
-            .get("page")
+            .get("ports")
             .and_then(|r| r.updated_at)
             .and_then(|at| chrono::Duration::from_std(at.elapsed()).ok())
             .map(|elapsed| {
@@ -680,17 +723,17 @@ impl Newport {
         let content = if empty {
             div().into_any_element()
         } else {
-            let version = json!([
+            let version = PreparedKey {
                 revisions,
-                query,
+                query: query.clone(),
                 filter,
-                state.table,
-                state.sort,
-                state.descending,
-                state.collapsed,
-                state.expanded,
-                state.collapsed_worktrees
-            ]);
+                table: state.table,
+                sort: state.sort,
+                descending: state.descending,
+                collapsed: state.collapsed.clone(),
+                expanded: state.expanded.clone(),
+                collapsed_worktrees: state.collapsed_worktrees.clone(),
+            };
             let prepared = state.prepared.borrow_mut().get(version, || {
                 if state.table {
                     let mut rows: Vec<_> = visible
@@ -1427,17 +1470,86 @@ impl Newport {
 #[cfg(test)]
 mod tests {
     use super::{
-        Entry, RowSection, entry_needs_attention, row_section, sort_project_rows, trouble,
-        trouble_for,
+        Entry, RowSection, entry_needs_attention, row_section, sort_project_rows, trouble_for,
     };
     use crate::connections::fixtures::Listener;
     use crate::connections_rows::Row;
+    use crate::project_library_state::typed_fixture::projects_reply;
     use gpui_kit::{
         self as gpui, Context, IntoElement, Render, TestAppContext, Window, div, prelude::*, px,
         size,
     };
     use newport_domain::port_grouping::Port;
-    use serde_json::json;
+    use newport_protocol::desktop::configuration;
+
+    const T: &str = "00000000-0000-4000-8000-0000000000aa";
+    /// A forward on the fixture server, numbered `id`.
+    fn forward(id: u128) -> configuration::Tunnel {
+        crate::snapshot_fixture::tunnel(
+            uuid::Uuid::from_u128(id),
+            crate::snapshot_fixture::SERVER,
+            0,
+            0,
+        )
+    }
+    /// A forward from the server's `local_port` back to this computer.
+    fn reverse(id: u128, local_port: u16) -> configuration::Tunnel {
+        configuration::Tunnel {
+            direction: configuration::Direction::Remote,
+            local_port,
+            ..forward(id)
+        }
+    }
+    /// The App forward the Connections fixtures save for `server`.
+    fn app_forward(server: &str) -> configuration::Tunnel {
+        let mut forward = crate::snapshot_fixture::tunnel(
+            uuid::Uuid::from_u128(0xf04),
+            uuid::Uuid::parse_str(server).unwrap(),
+            9000,
+            8000,
+        );
+        forward.name = "App".into();
+        forward.remote_host = "127.0.0.1".into();
+        forward.project = Some("/srv/project-0".into());
+        forward
+    }
+    fn health(
+        remote_port: u16,
+        status: configuration::DestinationStatus,
+        message: Option<&str>,
+    ) -> configuration::DestinationHealth {
+        configuration::DestinationHealth {
+            local_port: remote_port,
+            remote_port,
+            status,
+            message: message.map(Into::into),
+            checked_at: None,
+        }
+    }
+    /// A runtime where forward `T` has this connection and these checks.
+    fn forward_runtime(
+        status: configuration::ConnectionStatus,
+        error: Option<&str>,
+        values: Vec<configuration::DestinationHealth>,
+    ) -> configuration::Runtime {
+        use crate::snapshot_fixture as fixture;
+        let id = uuid::Uuid::parse_str(T).unwrap();
+        let mut runtime = fixture::runtime();
+        fixture::set(
+            &mut runtime.tunnels,
+            id,
+            configuration::ConnectionState {
+                error_message: error.map(Into::into),
+                ..fixture::connection(status)
+            },
+        );
+        fixture::set(
+            &mut runtime.tunnel_health,
+            id,
+            configuration::DestinationHealthList { values },
+        );
+        runtime
+    }
 
     #[test]
     fn saved_checkout_rows_stay_with_their_live_siblings() {
@@ -1449,13 +1561,16 @@ mod tests {
                     addresses: vec![],
                     forwards: vec![],
                 },
-                &json!({}),
+                None,
                 true,
             )
         };
         let mut rows = vec![
             make(Port::Saved {
-                definition: json!({"remotePort":8001}),
+                definition: configuration::Tunnel {
+                    remote_port: 8001,
+                    ..forward(1)
+                },
                 worktree: Some(newport_domain::port_grouping::Worktree {
                     path: "/repo/a".into(),
                     branch: Some("a".into()),
@@ -1533,13 +1648,10 @@ mod tests {
         view.update(visual, |view, cx| {
             view.work = work.into();
             view.replies = incoming;
-            let mut snapshot = view.snapshot.clone();
-            snapshot["config"]["tunnels"] = json!([{
-                "id":"forward", "serverId":server, "name":"App", "localPort":9000,
-                "remotePort":8000, "remoteHost":"127.0.0.1", "direction":"local", "project":"/srv/project-0"
-            }]);
+            let mut snapshot = view.snapshot.clone().unwrap();
+            snapshot.config.tunnels = vec![app_forward(&server)];
             view.sync_connections_snapshot(&snapshot);
-            view.snapshot = snapshot;
+            view.snapshot = Some(snapshot);
             cx.notify();
         });
         frame(visual);
@@ -1563,7 +1675,7 @@ mod tests {
                 .debug_bounds(crate::page_perf_tests::listener_selector(8000, 1))
                 .is_none()
         );
-        let accept = |next: serde_json::Value, visual: &mut gpui::VisualTestContext| {
+        let accept = |next: configuration::Snapshot, visual: &mut gpui::VisualTestContext| {
             view.update(visual, |view, cx| {
                 view.last_refresh = std::time::Instant::now();
                 let generation = requests
@@ -1572,23 +1684,21 @@ mod tests {
                     .map(|request| request.generation)
                     .unwrap_or_else(|| view.resources.begin("snapshot").unwrap());
                 replies
-                    .send(crate::Completion {
-                        discovery: None,
-                        key: "snapshot".into(),
-                        server: server.clone(),
-                        generation,
-                        result: Ok(next),
-                        pdf: None,
-                        pdf_text: None,
-                        image: None,
-                    })
+                    .send(crate::snapshot_fixture::completion(generation, next))
                     .unwrap();
                 view.tick(cx);
             });
             frame(visual);
         };
-        let mut connected = view.read_with(visual, |view, _| view.snapshot.clone());
-        connected["runtime"]["tunnels"] = json!({"forward":{"status":"connected"}});
+        use crate::snapshot_fixture as fixture;
+        use configuration::ConnectionStatus;
+        let mut connected = view.read_with(visual, |view, _| view.snapshot.clone().unwrap());
+        let forward = app_forward(&server).id;
+        fixture::set(
+            &mut connected.runtime.tunnels,
+            forward,
+            fixture::connection(ConnectionStatus::Connected),
+        );
         accept(connected.clone(), visual);
         view.update(visual, |view, cx| view.navigate(crate::Page::Ports, cx));
         frame(visual);
@@ -1608,8 +1718,16 @@ mod tests {
             1
         );
         assert!(visual.debug_bounds("connections-footer").is_some());
-        connected["runtime"]["clipboard"][&server]["status"] = json!("connecting");
-        connected["runtime"]["tunnels"]["another-server"] = json!({"status":"error"});
+        fixture::set(
+            &mut connected.runtime.clipboard,
+            fixture::SERVER,
+            fixture::connection(ConnectionStatus::Connecting),
+        );
+        fixture::set(
+            &mut connected.runtime.tunnels,
+            fixture::SECOND,
+            fixture::connection(ConnectionStatus::Error),
+        );
         accept(connected.clone(), visual);
         view.update(visual, |_, cx| cx.notify());
         frame(visual);
@@ -1617,7 +1735,19 @@ mod tests {
             Rc::ptr_eq(&current, &prepared(visual)),
             "unrelated snapshot changes must retain the projection"
         );
-        connected["runtime"]["tunnelHealth"] = json!({"forward":[{"message":"unavailable"}]});
+        fixture::set(
+            &mut connected.runtime.tunnel_health,
+            forward,
+            configuration::DestinationHealthList {
+                values: vec![configuration::DestinationHealth {
+                    local_port: 9000,
+                    remote_port: 8000,
+                    status: configuration::DestinationStatus::Unavailable,
+                    message: Some("unavailable".into()),
+                    checked_at: None,
+                }],
+            },
+        );
         accept(connected, visual);
         assert!(!Rc::ptr_eq(&current, &prepared(visual)));
         assert_eq!(
@@ -1695,16 +1825,18 @@ mod tests {
             let (view, visual) = connections_fixture(cx, table);
             let server = view.read_with(visual, |view, _| view.server.clone());
             view.update(visual, |view, cx| {
-                let mut snapshot = view.snapshot.clone();
-                snapshot["config"]["tunnels"] = json!([{
-                    "id":"forward", "serverId":server, "name":"App", "localPort":9000,
-                    "remotePort":8000, "remoteHost":"127.0.0.1", "direction":"local", "project":"/srv/project-0", "enabled":false
-                }, {
-                    "id":"stopped", "serverId":server, "name":"Stopped service", "localPort":9001,
-                    "remotePort":9001, "remoteHost":"127.0.0.1", "direction":"local", "enabled":false
-                }]);
+                let mut snapshot = view.snapshot.clone().unwrap();
+                let mut stopped = crate::snapshot_fixture::tunnel(
+                    uuid::Uuid::from_u128(0x5709),
+                    uuid::Uuid::parse_str(&server).unwrap(),
+                    9001,
+                    9001,
+                );
+                stopped.name = "Stopped service".into();
+                stopped.remote_host = "127.0.0.1".into();
+                snapshot.config.tunnels = vec![app_forward(&server), stopped];
                 view.sync_connections_snapshot(&snapshot);
-                view.snapshot = snapshot;
+                view.snapshot = Some(snapshot);
                 cx.notify();
             });
             frame(visual);
@@ -1755,10 +1887,10 @@ mod tests {
                 );
             }
             view.update(visual, |view, cx| {
-                let mut snapshot = view.snapshot.clone();
-                snapshot["config"]["tunnels"] = json!([]);
+                let mut snapshot = view.snapshot.clone().unwrap();
+                snapshot.config.tunnels.clear();
                 view.sync_connections_snapshot(&snapshot);
-                view.snapshot = snapshot;
+                view.snapshot = Some(snapshot);
                 cx.notify();
             });
             frame(visual);
@@ -1862,10 +1994,11 @@ mod tests {
         let (view, visual) = connections_fixture(cx, true);
         let server = view.read_with(visual, |view, _| view.server.clone());
         let bookmarks = |first: &str| {
-            json!([
-                {"serverId":server, "name":first, "path":"/srv/a"},
-                {"serverId":server, "name":"Middle", "path":"/srv/b"}
-            ])
+            use crate::project_library_state::typed_fixture::bookmark;
+            vec![
+                bookmark(1, &server, first, "/srv/a"),
+                bookmark(2, &server, "Middle", "/srv/b"),
+            ]
         };
         view.update(visual, |view, cx| {
             crate::connections::fixtures::put(
@@ -1885,8 +2018,12 @@ mod tests {
                 .resources
                 .begin_refresh("connection-projects", false)
                 .unwrap();
-            view.resources
-                .complete("connection-projects", generation, Ok(bookmarks("Zulu")));
+            assert!(
+                view.complete_connection_projects(
+                    generation,
+                    Ok(projects_reply(bookmarks("Zulu")))
+                )
+            );
             view.connections_state.get_mut(&server).unwrap().sort = 2;
             cx.notify();
         });
@@ -1909,8 +2046,12 @@ mod tests {
                 .resources
                 .begin_refresh("connection-projects", false)
                 .unwrap();
-            view.resources
-                .complete("connection-projects", generation, Ok(bookmarks("Alpha")));
+            assert!(
+                view.complete_connection_projects(
+                    generation,
+                    Ok(projects_reply(bookmarks("Alpha")))
+                )
+            );
             cx.notify();
         });
         frame(visual);
@@ -1936,15 +2077,24 @@ mod tests {
             })
             .collect();
         let saved: Vec<_> = (0..100)
-            .map(|i| {
-                json!({
-                    "id": format!("tunnel-{i}"), "serverId": "fixture", "direction": "local",
-                    "remotePort": 8000 + i, "localPort": 9000 + i, "remoteHost": "127.0.0.1"
-                })
+            .map(|i| configuration::Tunnel {
+                remote_host: "127.0.0.1".into(),
+                ..crate::snapshot_fixture::tunnel(
+                    uuid::Uuid::from_u128(i),
+                    crate::snapshot_fixture::SERVER,
+                    9000 + i as u16,
+                    8000 + i as u16,
+                )
             })
             .collect();
-        let prepare =
-            || newport_domain::port_grouping::group(ports.clone(), &saved, "fixture", &[]);
+        let prepare = || {
+            newport_domain::port_grouping::group(
+                ports.clone(),
+                &saved,
+                crate::snapshot_fixture::SERVER,
+                &[],
+            )
+        };
         let start = Instant::now();
         for _ in 0..30 {
             black_box(prepare());
@@ -1971,7 +2121,12 @@ mod tests {
         let mut cache = super::ProjectsCache::default();
         let ports = vec![Listener::new(8000).pid(1).member()];
         let first = cache.get([1, 2, 3], || {
-            newport_domain::port_grouping::group(ports.clone(), &[], "fixture", &[])
+            newport_domain::port_grouping::group(
+                ports.clone(),
+                &[],
+                crate::snapshot_fixture::SERVER,
+                &[],
+            )
         });
         assert_eq!(first[0].entries.len(), 1);
         let again = cache.get([1, 2, 3], || panic!("unchanged redraw must reuse grouping"));
@@ -2057,64 +2212,98 @@ mod tests {
     }
     #[test]
     fn attention_filter_checks_only_the_discovered_port_but_all_of_a_saved_range() {
-        let runtime = json!({
-            "tunnels":{"t":{"status":"connected"}},
-            "tunnelHealth":{"t":[
-                {"remotePort":8079,"status":"unavailable","message":"Connection refused"},
-                {"remotePort":8080,"status":"reachable"}
-            ]}
-        });
-        let tunnel = json!({"id":"t","remotePort":8079,"remotePortEnd":8080});
+        let runtime = forward_runtime(
+            configuration::ConnectionStatus::Connected,
+            None,
+            vec![
+                health(
+                    8079,
+                    configuration::DestinationStatus::Unavailable,
+                    Some("Connection refused"),
+                ),
+                health(8080, configuration::DestinationStatus::Reachable, None),
+            ],
+        );
+        let runtime = Some(&runtime);
+        let tunnel = configuration::Tunnel {
+            id: uuid::Uuid::parse_str(T).unwrap(),
+            remote_port: 8079,
+            remote_port_end: Some(8080),
+            ..forward(0)
+        };
         let mut row = Entry {
             addresses: vec![],
             port: Listener::new(8080).port(),
             forwards: vec![tunnel.clone()],
         };
-        assert!(!entry_needs_attention(&runtime, &row));
-        assert!(trouble(&runtime, &tunnel));
+        assert!(!entry_needs_attention(runtime, &row));
+        assert!(trouble_for(runtime, &tunnel, None));
         row.port = Listener::new(8079).port();
-        assert!(entry_needs_attention(&runtime, &row));
+        assert!(entry_needs_attention(runtime, &row));
         row.port = Listener::new(8081).port();
-        assert!(!entry_needs_attention(&runtime, &row));
+        assert!(!entry_needs_attention(runtime, &row));
         row.port = Port::saved(tunnel);
-        assert!(entry_needs_attention(&runtime, &row));
+        assert!(entry_needs_attention(runtime, &row));
     }
     #[test]
     fn attention_retains_transport_errors_and_ignores_disconnected_health() {
-        let tunnel = json!({"id":"t"});
-        let mut runtime = json!({
-            "tunnels":{"t":{"status":"reconnecting","errorMessage":"SSH connection lost"}},
-            "tunnelHealth":{"t":[{"remotePort":8079,"status":"unavailable","message":"Connection refused"}]}
-        });
-        assert!(trouble_for(&runtime, &tunnel, Some(8080)));
-        runtime["tunnels"]["t"] = json!({"status":"error"});
-        assert!(trouble_for(&runtime, &tunnel, Some(8080)));
-        runtime["tunnels"]["t"] = json!({"status":"disconnected"});
-        assert!(!trouble_for(&runtime, &tunnel, Some(8079)));
+        use configuration::{ConnectionStatus, DestinationStatus};
+        let tunnel = configuration::Tunnel {
+            id: uuid::Uuid::parse_str(T).unwrap(),
+            ..forward(0)
+        };
+        let checks = || {
+            vec![health(
+                8079,
+                DestinationStatus::Unavailable,
+                Some("Connection refused"),
+            )]
+        };
+        let lost = forward_runtime(
+            ConnectionStatus::Reconnecting,
+            Some("SSH connection lost"),
+            checks(),
+        );
+        assert!(trouble_for(Some(&lost), &tunnel, Some(8080)));
+        let failed = forward_runtime(ConnectionStatus::Error, None, checks());
+        assert!(trouble_for(Some(&failed), &tunnel, Some(8080)));
+        let stopped = forward_runtime(ConnectionStatus::Disconnected, None, checks());
+        assert!(!trouble_for(Some(&stopped), &tunnel, Some(8079)));
     }
 
     #[test]
     fn every_saved_forward_without_an_observed_destination_is_offered() {
         let ports = vec![Listener::new(3000).pid(1).member()];
-        let forward = |id: &str, remote: u16, direction: &str, host: &str| {
-            json!({
-                "id": id, "serverId": "fixture", "direction": direction, "name": "",
-                "remotePort": remote, "localPort": remote + 6000, "remoteHost": host
-            })
+        let forward = |id: u128, remote: u16, direction, host: &str| configuration::Tunnel {
+            name: String::new(),
+            direction,
+            remote_host: host.into(),
+            ..crate::snapshot_fixture::tunnel(
+                uuid::Uuid::from_u128(id),
+                crate::snapshot_fixture::SERVER,
+                remote + 6000,
+                remote,
+            )
         };
+        use configuration::Direction::{Local, Remote};
         let saved = vec![
-            forward("listening", 3000, "local", "127.0.0.1"),
-            forward("off", 4000, "local", "127.0.0.1"),
-            forward("on", 4001, "local", "localhost"),
-            forward("reverse", 4003, "remote", "127.0.0.1"),
-            forward("other-host", 4004, "local", "db.internal"),
+            forward(1, 3000, Local, "127.0.0.1"),
+            forward(2, 4000, Local, "127.0.0.1"),
+            forward(3, 4001, Local, "localhost"),
+            forward(4, 4003, Remote, "127.0.0.1"),
+            forward(5, 4004, Local, "db.internal"),
         ];
-        let groups = newport_domain::port_grouping::group(ports, &saved, "fixture", &[]);
+        let groups = newport_domain::port_grouping::group(
+            ports,
+            &saved,
+            crate::snapshot_fixture::SERVER,
+            &[],
+        );
         let ids: Vec<_> = super::unobserved_forwards(&groups)
             .iter()
-            .map(|t| t["id"].as_str().unwrap().to_owned())
+            .map(|t| t.id.as_u128())
             .collect();
-        assert_eq!(ids, ["off", "on", "other-host"]);
+        assert_eq!(ids, [2, 3, 5], "off, on and the other host");
     }
 
     #[test]
@@ -2127,24 +2316,21 @@ mod tests {
                     addresses: vec![],
                     port,
                 },
-                &json!({}),
+                None,
                 false,
             )
         };
         let mut rows = vec![
-            row(Port::saved(
-                json!({"id":"reverse-a","direction":"remote","localPort":8000}),
-            )),
+            row(Port::saved(reverse(1, 8000))),
             row(Listener::new(8080)
                 .project("/repo")
                 .checkout("/repo/feature", Some("feature"), Some(false))
                 .port()),
-            row(Port::saved(
-                json!({"id":"local","direction":"local","remotePort":9000}),
-            )),
-            row(Port::saved(
-                json!({"id":"reverse-b","direction":"remote","localPort":8001}),
-            )),
+            row(Port::saved(configuration::Tunnel {
+                remote_port: 9000,
+                ..forward(2)
+            })),
+            row(Port::saved(reverse(3, 8001))),
             row(Listener::new(8081)
                 .project("/repo")
                 .checkout("/repo", Some("main"), Some(true))

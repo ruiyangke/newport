@@ -4,7 +4,8 @@ use newport_client::{
     container_ports::{ForwardedPort, PortForwards},
     tunnel_operations::{Action as TunnelAction, Operations, Ticket},
 };
-use newport_domain::{containers::ContainerPort, model::Status};
+use newport_domain::model::Status;
+use newport_protocol::monitor::containers::{ContainerPort, PortProtocol};
 
 #[derive(Clone, PartialEq)]
 pub(super) struct PortRow {
@@ -30,7 +31,7 @@ impl ContainersPanel {
     pub(crate) fn sync_port_links(
         &mut self,
         server: &str,
-        snapshot: Option<&Value>,
+        snapshot: Option<&configuration::Snapshot>,
         operations: &Operations,
         cx: &mut Context<Self>,
     ) {
@@ -88,7 +89,7 @@ impl ContainersPanel {
     pub(crate) fn open_port_link(
         &mut self,
         server: &str,
-        connection: Value,
+        connection: Option<configuration::ConnectionScope>,
         target: &PortTarget,
         operations: &mut Operations,
         cx: &mut Context<Self>,
@@ -166,7 +167,7 @@ impl ContainersPanel {
                         .children(published.iter().enumerate().map(|(index, port)| {
                             let label = domain::port_label(port);
                             if !domain::forwardable(port) {
-                                let reason = if port.protocol != domain::PortProtocol::Tcp {
+                                let reason = if port.protocol != PortProtocol::Tcp {
                                     "SSH forwards support TCP ports.".to_owned()
                                 } else {
                                     format!(

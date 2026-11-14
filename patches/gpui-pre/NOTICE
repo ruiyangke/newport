@@ -1,0 +1,12 @@
+gpui-pre 0.3.10
+Upstream: https://github.com/zed-industries/zed (gpui-pre snapshot by https://github.com/longbridge/gpui-kit)
+License: Apache-2.0; the upstream LICENSE-APACHE is distributed with gpui-pre.
+
+Newport modifies gpui-pre for key events that keep the physical key and the
+layout's metadata for terminal input, and the window, popup, text input, file
+drop and drag hooks Newport's remote windows use on Windows. The changed files
+are src/app/test_context.rs, src/elements/div.rs, src/interactive.rs,
+src/key_dispatch.rs, src/platform.rs, src/platform/native_drag.rs,
+src/platform/test/window.rs, src/window.rs,
+src/window/native_character_tests.rs and tests/physical_key.rs. All other
+published package files remain unchanged.

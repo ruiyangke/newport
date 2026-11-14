@@ -3,7 +3,6 @@
 //! UI, IO, transport contracts, runtime ownership, and generic utilities do not.
 //! Desktop IPC contracts live in `newport_platform::ipc`.
 pub mod compose;
-pub mod connection_scope;
 pub mod connectivity;
 pub mod container_status;
 pub mod containers;

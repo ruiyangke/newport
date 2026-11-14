@@ -192,7 +192,7 @@ fn present_with_stubs(
     let profile = newport_backend::profile::directory()?;
     // Per profile, so two Newports with one bundle id each keep their stubs.
     let service_name = stubs::service_name(&host_bundle_id, &profile)?;
-    let bundles = profile.join("Remote Apps");
+    let bundles = profile.join(newport_backend::profile::LAUNCHERS);
     // Before claiming the clipboard: a failure here falls back to Newport
     // windows, which claim it themselves.
     stubs::prepare(&service_name, &stub_binary)?;

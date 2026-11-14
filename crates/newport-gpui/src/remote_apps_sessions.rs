@@ -16,7 +16,8 @@ use std::{
 /// The selected connection and installed agent, as observed by the page.
 pub(crate) struct Launch<'a> {
     pub server: &'a str,
-    pub expected_connection: serde_json::Value,
+    /// `None` before the snapshot lists the server.
+    pub expected_connection: Option<newport_protocol::desktop::configuration::ConnectionScope>,
     pub agent: &'a str,
 }
 
@@ -40,6 +41,13 @@ struct Session {
     /// Opened from outside the page, by a taskbar pin or shortcut: a launch
     /// that fails says so wherever the person is.
     announce: bool,
+}
+
+/// The connection a launch expects, as the backend checks it.
+fn scope(launch: &Launch) -> Result<shared_apps::Scope, String> {
+    let expected = newport_client::desktop_inputs::captured(launch.expected_connection.as_ref())
+        .map_err(|error| error.to_string())?;
+    shared_apps::Scope::new(launch.server, expected)
 }
 
 pub(crate) struct Sessions {
@@ -161,7 +169,7 @@ impl Sessions {
         if self.active() >= 128 {
             return Err("Close an application before opening another.".into());
         }
-        let scope = shared_apps::Scope::new(launch.server, launch.expected_connection)?;
+        let scope = scope(&launch)?;
         let application = self.shared.borrow().launch(scope, target)?;
         let id = self.record(launch.server, app_id, app_name);
         self.sessions
@@ -187,7 +195,7 @@ impl Sessions {
         if !self.available() {
             return Err("Remote apps aren’t part of this build.".into());
         }
-        let scope = shared_apps::Scope::new(launch.server, launch.expected_connection)?;
+        let scope = scope(&launch)?;
         let notices = self.notices.clone();
         self.shared.borrow().show(scope, move |result| {
             if let Err(message) = result {

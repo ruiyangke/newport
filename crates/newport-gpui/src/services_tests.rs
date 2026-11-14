@@ -7,11 +7,13 @@ use gpui_kit::{
     AppContext, Entity, KeyDownEvent, Keystroke, TestAppContext, VisualTestContext, px, size,
 };
 use newport_client::{backend::Backend, services::Services};
-use newport_domain::services::{
-    JournalEntry, JournalPage, Privilege, Scope, ServiceUnit, ServicesSnapshot, UserAvailability,
-};
 use newport_platform::ipc::Listener;
-use serde_json::{Value, json};
+use newport_protocol::{
+    desktop,
+    monitor::services::{
+        self as systemd, ActionReply, Entry, ExitKind, Privilege, Scope, Service, UnitFile,
+    },
+};
 use std::{
     path::PathBuf,
     sync::{
@@ -27,16 +29,16 @@ use std::{
 pub(crate) struct FakeBackend {
     path: PathBuf,
     calls: Arc<Mutex<Vec<Request>>>,
-    snapshot: Arc<Mutex<ServicesSnapshot>>,
+    snapshot: Arc<Mutex<systemd::Snapshot>>,
     held: Arc<Mutex<Vec<Stream>>>,
     hold: Arc<AtomicBool>,
     hold_reads: Arc<AtomicBool>,
-    pending_reads: Arc<Mutex<Vec<(String, Stream, Value)>>>,
+    pending_reads: Arc<Mutex<Vec<(String, Stream, desktop::services::Reply)>>>,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
 impl FakeBackend {
-    pub(crate) fn new(snapshot: ServicesSnapshot) -> Self {
+    pub(crate) fn new(snapshot: systemd::Snapshot) -> Self {
         let path = std::env::temp_dir().join(format!("np-services-{}.sock", uuid::Uuid::new_v4()));
         let listener = Listener::bind(&path).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -68,25 +70,32 @@ impl FakeBackend {
                 let mut stream = Stream::admit(stream);
                 let request = stream.observation();
                 assert_eq!(request.args["id"], SERVER);
+                let long_log = matches!(
+                    stream.operation(),
+                    desktop::Operation::Services(operation)
+                        if matches!(operation.as_ref(), desktop::services::Operation::Logs(args)
+                            if args.request.unit.as_deref() == Some("nixos-upgrade.service"))
+                );
                 let result = match request.method.as_str() {
-                    "services_snapshot" => serde_json::to_value(&*data.lock().unwrap()).unwrap(),
-                    "service_unit_file" => {
-                        json!({"text":"[Unit]\nDescription=Fixture service\n[Service]\nExecStart=/usr/bin/true\n"})
-                    }
-                    "service_logs" => serde_json::to_value(JournalPage {
-                        entries: (0..if request.args["unit"]=="nixos-upgrade.service" {200}else{40})
-                            .map(|i| JournalEntry {
+                    "services_snapshot" => desktop::services::Reply::Snapshot(Box::new(
+                        data.lock().unwrap().clone(),
+                    )),
+                    "service_unit_file" => desktop::services::Reply::UnitFile(Box::new(UnitFile {
+                        text: "[Unit]\nDescription=Fixture service\n[Service]\nExecStart=/usr/bin/true\n".into(),
+                    })),
+                    "service_logs" => desktop::services::Reply::Logs(Box::new(systemd::Logs {
+                        entries: (0..if long_log { 200 } else { 40 })
+                            .map(|i| Entry {
                                 at: Some(1_700_000_000_000 + i * 1000),
                                 priority: Some(if i % 3 == 0 { 3 } else { 6 }),
                                 pid: Some(99),
                                 identifier: Some("fixture".into()),
-                                message: if request.args["unit"]=="nixos-upgrade.service" {format!("Log entry {i}: {}", "/nix/store/c7f69b19837d3a1f83-server-system-runtime/bin/nixos-rebuild --upgrade --flake /etc/nixos#sample-server ".repeat(10))} else {format!("Log entry {i}")},
+                                message: if long_log {format!("Log entry {i}: {}", "/nix/store/c7f69b19837d3a1f83-server-system-runtime/bin/nixos-rebuild --upgrade --flake /etc/nixos#sample-server ".repeat(10))} else {format!("Log entry {i}")},
                             })
                             .collect(),
                         cursor: Some("tail".into()),
-                    })
-                    .unwrap(),
-                    "service_action" => json!({"ok":true}),
+                    })),
+                    "service_action" => succeeded(),
                     other => panic!("unexpected request {other}"),
                 };
                 let action = request.method == "service_action";
@@ -140,7 +149,7 @@ impl FakeBackend {
             return false;
         };
         let (_, mut stream, _) = pending.remove(index);
-        stream.reply(Err(error.into()));
+        stream.reply_typed(Err(error.into()));
         true
     }
     pub(crate) fn count(&self, method: &str) -> usize {
@@ -157,17 +166,24 @@ impl FakeBackend {
     pub(crate) fn held_actions(&self) -> usize {
         self.held.lock().unwrap().len()
     }
-    pub(crate) fn release_action(&self, result: Value) {
+    /// Completes every held action successfully.
+    pub(crate) fn release_action(&self) {
         for mut stream in self.held.lock().unwrap().drain(..) {
-            reply(&mut stream, result.clone());
+            reply(&mut stream, succeeded());
         }
     }
-    pub(crate) fn set_snapshot(&self, snapshot: ServicesSnapshot) {
+    pub(crate) fn set_snapshot(&self, snapshot: systemd::Snapshot) {
         *self.snapshot.lock().unwrap() = snapshot;
     }
 }
-fn reply(stream: &mut Stream, result: Value) {
-    stream.reply(Ok(result));
+fn reply(stream: &mut Stream, result: desktop::services::Reply) {
+    stream.reply_typed(Ok(desktop::Reply::Services(Box::new(result))));
+}
+fn succeeded() -> desktop::services::Reply {
+    desktop::services::Reply::Action(Box::new(ActionReply {
+        ok: true,
+        ..Default::default()
+    }))
 }
 
 impl Drop for FakeBackend {
@@ -184,10 +200,10 @@ impl Drop for FakeBackend {
     }
 }
 
-pub(crate) fn snapshot() -> ServicesSnapshot {
-    ServicesSnapshot {
+pub(crate) fn snapshot() -> systemd::Snapshot {
+    systemd::Snapshot {
         services: vec![
-            ServiceUnit {
+            Service {
                 name: "app.service".into(),
                 scope: Scope::System,
                 description: "Customer application".into(),
@@ -201,7 +217,7 @@ pub(crate) fn snapshot() -> ServicesSnapshot {
                 cpu: Some(2.5),
                 ..Default::default()
             },
-            ServiceUnit {
+            Service {
                 name: "worker.service".into(),
                 scope: Scope::User,
                 description: "Background jobs".into(),
@@ -211,7 +227,7 @@ pub(crate) fn snapshot() -> ServicesSnapshot {
                 enabled: Some("disabled".into()),
                 ..Default::default()
             },
-            ServiceUnit {
+            Service {
                 name: "systemd-logind.service".into(),
                 load: "loaded".into(),
                 active: "active".into(),
@@ -220,7 +236,7 @@ pub(crate) fn snapshot() -> ServicesSnapshot {
             },
         ],
         timers: vec![],
-        user: UserAvailability {
+        user: systemd::UserManager {
             available: true,
             reason: None,
         },
@@ -234,13 +250,13 @@ pub(crate) fn fixture(
 }
 fn fixture_with_snapshot(
     cx: &mut TestAppContext,
-    snapshot: ServicesSnapshot,
+    snapshot: systemd::Snapshot,
 ) -> (Entity<ServicesPanel>, &mut VisualTestContext, FakeBackend) {
     fixture_with_size(cx, snapshot, 898., 720.)
 }
 fn fixture_with_size(
     cx: &mut TestAppContext,
-    snapshot: ServicesSnapshot,
+    snapshot: systemd::Snapshot,
     width: f32,
     height: f32,
 ) -> (Entity<ServicesPanel>, &mut VisualTestContext, FakeBackend) {
@@ -248,7 +264,7 @@ fn fixture_with_size(
 }
 fn fixture_staged(
     cx: &mut TestAppContext,
-    snapshot: ServicesSnapshot,
+    snapshot: systemd::Snapshot,
     width: f32,
     height: f32,
     staged: bool,
@@ -294,10 +310,10 @@ impl Render for FixtureShell {
 
 #[gpui::test]
 fn initial_failed_service_heading_stays_inside_detail_viewport(cx: &mut TestAppContext) {
-    use newport_domain::services::TimerUnit;
+    use newport_protocol::monitor::services::Timer;
     let now = chrono::Local::now().timestamp_millis();
     let mut data = snapshot();
-    data.services = vec![ServiceUnit {
+    data.services = vec![Service {
         name: "nixos-upgrade.service".into(),
         description: "NixOS Upgrade".into(),
         load: "loaded".into(),
@@ -306,12 +322,12 @@ fn initial_failed_service_heading_stays_inside_detail_viewport(cx: &mut TestAppC
         enabled: Some("linked".into()),
         since: Some(now - 58_380_000),
         exit_code: Some(1),
-        exit_kind: Some("exited".into()),
+        exit_kind: Some(ExitKind::Exited),
         result: Some("exit-code".into()),
         triggered_by: vec!["nixos-upgrade.timer".into()],
         ..Default::default()
     }];
-    data.timers = vec![TimerUnit {
+    data.timers = vec![Timer {
         name: "nixos-upgrade.timer".into(),
         scope: Scope::System,
         description: "NixOS Upgrade Timer".into(),
@@ -439,7 +455,7 @@ fn reconnect_restores_choices_without_carrying_remote_state(cx: &mut TestAppCont
     let choices = panel.read_with(cx, |panel, cx| panel.preferences(cx));
     assert_eq!(choices.query, "worker");
     assert_eq!(choices.log_query, "entry 2");
-    let replacement = FakeBackend::new(ServicesSnapshot::default());
+    let replacement = FakeBackend::new(systemd::Snapshot::default());
     replacement.hold_reads();
     let restored = cx.update(|window, cx| {
         cx.new(|cx| {
@@ -579,12 +595,12 @@ fn destructive_action_requires_review_and_retains_one_write_owner(cx: &mut TestA
         p.start_action(
             "app.service".into(),
             Scope::System,
-            newport_domain::services::ServiceVerb::Stop,
+            newport_protocol::monitor::services::Verb::Stop,
             cx,
         )
     });
     assert_eq!(backend.count("service_action"), 1);
-    backend.release_action(json!({"ok":true}));
+    backend.release_action();
     settle(&panel, cx);
     assert!(panel.read_with(cx, |p, _| p.review.is_none()));
 }
@@ -624,7 +640,7 @@ fn groups_search_system_visibility_and_uniform_row_shape() {
         "a search opens folded groups"
     );
 
-    let empty = ServicesSnapshot::default();
+    let empty = systemd::Snapshot::default();
     for query in ["", "  "] {
         let rows = master_rows(&empty, query, false, &Default::default(), 0);
         assert_eq!(rows.len(), 1);
@@ -677,7 +693,7 @@ fn large_master_virtualizes_and_keyboard_end_reveals_selection(cx: &mut TestAppC
     let (panel, cx, backend) = fixture(cx);
     let mut data = snapshot();
     data.services = (0..1000)
-        .map(|i| ServiceUnit {
+        .map(|i| Service {
             name: format!("app-{i:04}.service"),
             load: "loaded".into(),
             active: "active".into(),
@@ -745,7 +761,7 @@ fn pending_action_keeps_other_unit_controls_usable_and_receipts_scoped(cx: &mut 
     }
     assert_eq!(backend.held_actions(), 2);
     assert_eq!(backend.count("service_action"), 2);
-    backend.release_action(json!({"ok":true}));
+    backend.release_action();
     settle(&panel, cx);
     let mut notices = notifications.borrow().clone();
     notices.sort();
@@ -925,7 +941,7 @@ fn offscreen_service_clocks_do_not_invalidate_the_visible_list(cx: &mut TestAppC
     let mut data = snapshot();
     let since = chrono::Local::now().timestamp_millis() - 10_000;
     data.services = (0..1000)
-        .map(|i| ServiceUnit {
+        .map(|i| Service {
             name: format!("app-{i:04}.service"),
             load: "loaded".into(),
             active: "active".into(),
@@ -983,7 +999,7 @@ fn hidden_service_action_delivers_one_receipt_without_repainting_panel(cx: &mut 
             }
         })
     });
-    backend.release_action(json!({"ok":true}));
+    backend.release_action();
     for _ in 0..300 {
         panel.update(cx, |panel, cx| panel.poll(false, cx));
         cx.run_until_parked();
@@ -1034,10 +1050,10 @@ impl Render for ConstrainedServicesShell {
 fn failed_service_heading_survives_real_shell_constraints_and_post_load_resize(
     cx: &mut TestAppContext,
 ) {
-    use newport_domain::services::TimerUnit;
+    use newport_protocol::monitor::services::Timer;
     let now = chrono::Local::now().timestamp_millis();
     let mut data = snapshot();
-    data.services = vec![ServiceUnit {
+    data.services = vec![Service {
         name: "nixos-upgrade.service".into(),
         description: "NixOS Upgrade".into(),
         load: "loaded".into(),
@@ -1046,12 +1062,12 @@ fn failed_service_heading_survives_real_shell_constraints_and_post_load_resize(
         enabled: Some("linked".into()),
         since: Some(now - 58_380_000),
         exit_code: Some(1),
-        exit_kind: Some("exited".into()),
+        exit_kind: Some(ExitKind::Exited),
         result: Some("exit-code".into()),
         triggered_by: vec!["nixos-upgrade.timer".into()],
         ..Default::default()
     }];
-    data.timers = vec![TimerUnit {
+    data.timers = vec![Timer {
         name: "nixos-upgrade.timer".into(),
         scope: Scope::System,
         description: "NixOS Upgrade Timer".into(),
@@ -1294,7 +1310,7 @@ fn benchmark_services_frames(cx: &mut TestAppContext) {
         let mut data = snapshot();
         let template = data.services[0].clone();
         data.services = (0..count)
-            .map(|i| ServiceUnit {
+            .map(|i| Service {
                 name: format!("app-{i:04}.service"),
                 description: format!("Application worker {i}"),
                 ..template.clone()
@@ -1366,10 +1382,10 @@ fn prepared_list_reuses_redraws_and_tracks_search_collapse_and_refresh(cx: &mut 
 
 #[test]
 fn cached_rows_keep_service_and_timer_clocks_current() {
-    use newport_domain::services::TimerUnit;
+    use newport_protocol::monitor::services::Timer;
     let mut data = snapshot();
     data.services[0].since = Some(1000);
-    data.timers.push(TimerUnit {
+    data.timers.push(Timer {
         name: "job.timer".into(),
         next: Some(61000),
         active: "active".into(),

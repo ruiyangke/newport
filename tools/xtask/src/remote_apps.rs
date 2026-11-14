@@ -18,10 +18,9 @@
 //! Servers receive binaries.
 //!
 //! Remote app windows run inside Newport's GPUI application, so the streaming
-//! crates must use this GPUI, not a second copy: their crates.io `gpui-pre`
-//! crates are patched to the revision this lockfile uses.
-//! For local fork development, NEWPORT_GPUI_DIR selects a snapshot workspace
-//! for both registry and Git consumers. CI always uses the pinned Git source.
+//! crates must use this GPUI, not a second copy: Newport's `[patch.crates-io]`
+//! gives their crates.io `gpui-pre` dependencies the patched GPUI in
+//! `vendor/`.
 pub mod full_agent;
 mod publication;
 
@@ -262,8 +261,6 @@ pub fn prepare() -> Result<Prepared> {
 pub struct Composed {
     /// Held for its drop: the crates leave the manifests with it.
     _guard: Added,
-    /// `--config` arguments for this GPUI.
-    pub patch: Vec<String>,
 }
 
 /// Add the private crates to the composition, without the agents a build
@@ -271,22 +268,13 @@ pub struct Composed {
 pub fn compose() -> Result<Composed> {
     let newport = root();
     let remote = checkout()?;
-    let (url, rev) = gpui_source(&fs::read_to_string(newport.join("Cargo.lock"))?)?;
-    let patch = gpui_patches(
-        &url,
-        &rev,
-        std::env::var_os("NEWPORT_GPUI_DIR")
-            .as_deref()
-            .map(Path::new),
-        std::env::var_os("CI").is_some(),
-    )?;
     let guard = Added::new()?;
     for name in CRATES.into_iter().filter(|name| !APP_ONLY.contains(name)) {
         check_interrupted()?;
         let mut add = command("cargo");
         add.current_dir(&newport)
             .args(["add", "--quiet", "-p", "newport-gpui", "--path"]);
-        add.arg(remote.join("crates").join(name)).args(&patch);
+        add.arg(remote.join("crates").join(name));
         util::run(&mut add)?;
     }
     for name in APP_CRATES {
@@ -295,29 +283,23 @@ pub fn compose() -> Result<Composed> {
             command("cargo")
                 .current_dir(&newport)
                 .args(["add", "--quiet", "-p", "newport-app", "--path"])
-                .arg(remote.join("crates").join(name))
-                .args(&patch),
+                .arg(remote.join("crates").join(name)),
         )?;
     }
     check_interrupted()?;
     // Resolve the added crates once, and refuse a graph that would still
     // contain a second GPUI.
-    let tree = crate::process::text(
-        command("cargo")
-            .current_dir(&newport)
-            .args([
-                "tree",
-                "--quiet",
-                "-p",
-                "newport-app",
-                "--duplicates",
-                "--depth",
-                "0",
-                "-e",
-                "normal",
-            ])
-            .args(&patch),
-    )?;
+    let tree = crate::process::text(command("cargo").current_dir(&newport).args([
+        "tree",
+        "--quiet",
+        "-p",
+        "newport-app",
+        "--duplicates",
+        "--depth",
+        "0",
+        "-e",
+        "normal",
+    ]))?;
     let duplicates: Vec<&str> = tree
         .lines()
         .filter(|line| line.starts_with("gpui-pre ") || line.starts_with("gpui-pre-platform "))
@@ -329,82 +311,7 @@ pub fn compose() -> Result<Composed> {
         );
     }
     check_interrupted()?;
-    Ok(Composed {
-        _guard: guard,
-        patch,
-    })
-}
-
-/// Patch every snapshot member at both source boundaries. Cargo patches do not
-/// chain: patching the Git source alone leaves registry consumers on a distinct
-/// GPUI identity. Nothing is persisted to the public manifest or Cargo config.
-fn gpui_patches(url: &str, rev: &str, local: Option<&Path>, ci: bool) -> Result<Vec<String>> {
-    let Some(local) = local else {
-        return Ok(["gpui-pre", "gpui-pre-platform"]
-            .iter()
-            .flat_map(|name| {
-                [
-                    format!("--config=patch.crates-io.{name}.git='{url}'"),
-                    format!("--config=patch.crates-io.{name}.rev='{rev}'"),
-                ]
-            })
-            .collect());
-    };
-    ensure!(
-        !ci,
-        "CI cannot use NEWPORT_GPUI_DIR; promote and pin the GPUI snapshot first"
-    );
-    let local = local
-        .canonicalize()
-        .context("Cannot locate NEWPORT_GPUI_DIR")?;
-    let manifest: toml::Value = toml::from_str(&fs::read_to_string(local.join("Cargo.toml"))?)?;
-    let members = manifest
-        .get("workspace")
-        .and_then(|workspace| workspace.get("members"))
-        .and_then(toml::Value::as_array)
-        .context("NEWPORT_GPUI_DIR must name a GPUI snapshot workspace")?;
-    let mut packages = std::collections::BTreeMap::new();
-    for member in members {
-        let member = member.as_str().context("Invalid GPUI workspace member")?;
-        let path = local.join(member).canonicalize()?;
-        ensure!(
-            path.starts_with(&local),
-            "GPUI workspace member escapes its snapshot"
-        );
-        let package: toml::Value = toml::from_str(&fs::read_to_string(path.join("Cargo.toml"))?)?;
-        let name = package
-            .get("package")
-            .and_then(|package| package.get("name"))
-            .and_then(toml::Value::as_str)
-            .context("GPUI member has no package name")?;
-        ensure!(
-            name == "gpui-pre" || name.starts_with("gpui-pre-"),
-            "Not a GPUI snapshot member: {name}"
-        );
-        ensure!(
-            name.bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
-            "Invalid GPUI package name"
-        );
-        ensure!(
-            packages.insert(name.to_owned(), path).is_none(),
-            "Duplicate GPUI package: {name}"
-        );
-    }
-    ensure!(
-        packages.contains_key("gpui-pre") && packages.contains_key("gpui-pre-platform"),
-        "GPUI snapshot lacks its core or platform crate"
-    );
-    let source = toml::Value::String(url.to_owned()).to_string();
-    let mut patch = Vec::new();
-    for (name, path) in packages {
-        let path = toml::Value::String(path.to_str().context("GPUI path is not UTF-8")?.to_owned())
-            .to_string();
-        for origin in ["crates-io", &source] {
-            patch.push(format!("--config=patch.{origin}.{name}.path={path}"));
-        }
-    }
-    Ok(patch)
+    Ok(Composed { _guard: guard })
 }
 
 /// Prepare full agent resources without changing desktop dependencies.
@@ -537,7 +444,6 @@ fn verify_full_provenance(
 
 impl Prepared {
     pub fn apply<'a>(&self, cargo: &'a mut Command) -> &'a mut Command {
-        cargo.args(&self.composed.patch);
         for (name, value) in &self.env {
             cargo.env(name, value);
         }
@@ -598,31 +504,6 @@ fn tagged_revision(newport: &Path) -> Result<String> {
     .with_context(|| format!("newport-remote has no tag {tag}; tag the commit this release builds"))
 }
 
-/// This GPUI's git URL and revision: `source = "git+URL?rev=REV#REV"` for
-/// gpui-pre in the lockfile. The lockfile may also list a crates.io gpui-pre
-/// that Newport doesn't build with, so take the git one.
-fn gpui_source(lock: &str) -> Result<(String, String)> {
-    let lock: toml::Value = toml::from_str(lock).context("Cannot read Cargo.lock")?;
-    let packages = lock["package"]
-        .as_array()
-        .context("Cargo.lock lists no packages")?;
-    let source = packages
-        .iter()
-        .filter(|package| package["name"].as_str() == Some("gpui-pre"))
-        .filter_map(|package| package.get("source")?.as_str())
-        .find_map(|source| source.strip_prefix("git+"))
-        .context("Cargo.lock has no git revision for gpui-pre")?;
-    let (url, rest) = source
-        .split_once("?rev=")
-        .context("gpui-pre's git source has no revision")?;
-    let rev = rest.rsplit('#').next().unwrap_or(rest);
-    ensure!(
-        !rev.is_empty() && rev.bytes().all(|b| b.is_ascii_hexdigit()),
-        "gpui-pre's git revision is not a commit: {rev}"
-    );
-    Ok((url.to_owned(), rev.to_owned()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,74 +515,6 @@ mod tests {
         for revision in ["", "v0.7.1", &commit[..39], &commit.to_uppercase()] {
             assert!(ci_revision(revision).is_err(), "{revision}");
         }
-    }
-
-    #[test]
-    fn local_gpui_uses_one_snapshot_for_registry_and_git_consumers() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("snapshot with spaces");
-        fs::create_dir(&root).unwrap();
-        let names = ["gpui-pre", "gpui-pre-platform", "gpui-pre-windows"];
-        fs::write(
-            root.join("Cargo.toml"),
-            format!("[workspace]\nmembers = {:?}\n", names),
-        )
-        .unwrap();
-        for name in names {
-            let member = root.join(name);
-            fs::create_dir(&member).unwrap();
-            fs::write(
-                member.join("Cargo.toml"),
-                format!("[package]\nname = {name:?}\nversion = '0.3.9'\n"),
-            )
-            .unwrap();
-        }
-        let source = "https://example.invalid/gpui";
-        let patches = gpui_patches(source, "abcdef", Some(&root), false).unwrap();
-        assert_eq!(patches.len(), 2 * names.len());
-        let mut seen = std::collections::BTreeMap::new();
-        for argument in patches {
-            let parsed: toml::Value =
-                toml::from_str(argument.strip_prefix("--config=").unwrap()).unwrap();
-            for (origin, packages) in parsed["patch"].as_table().unwrap() {
-                for (name, package) in packages.as_table().unwrap() {
-                    assert_eq!(package.as_table().unwrap().len(), 1);
-                    let path = PathBuf::from(package["path"].as_str().unwrap());
-                    assert_eq!(path, root.join(name).canonicalize().unwrap());
-                    seen.insert((origin.clone(), name.clone()), path);
-                }
-            }
-        }
-        for name in names {
-            assert_eq!(
-                seen[&("crates-io".into(), name.into())],
-                seen[&(source.into(), name.into())]
-            );
-        }
-    }
-
-    #[test]
-    fn ci_refuses_local_gpui_and_default_keeps_pinned_source() {
-        assert!(
-            gpui_patches(
-                "https://example.invalid/gpui",
-                "abcdef",
-                Some(Path::new("missing")),
-                true
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("CI cannot use")
-        );
-        assert_eq!(
-            gpui_patches("https://example.invalid/gpui", "abcdef", None, true).unwrap(),
-            [
-                "--config=patch.crates-io.gpui-pre.git='https://example.invalid/gpui'",
-                "--config=patch.crates-io.gpui-pre.rev='abcdef'",
-                "--config=patch.crates-io.gpui-pre-platform.git='https://example.invalid/gpui'",
-                "--config=patch.crates-io.gpui-pre-platform.rev='abcdef'",
-            ]
-        );
     }
 
     #[test]
@@ -778,25 +591,5 @@ mod tests {
                 .contains("newport-remote")
         );
         clean_at(&public).unwrap(); // Idempotent after an interrupted cleanup.
-    }
-
-    #[test]
-    fn gpui_source_takes_the_git_revision() {
-        let lock = r#"
-version = 4
-[[package]]
-name = "gpui-pre"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-[[package]]
-name = "gpui-pre"
-version = "0.2.0"
-source = "git+https://github.com/example/gpui?rev=abc123#abc123"
-"#;
-        assert_eq!(
-            gpui_source(lock).unwrap(),
-            ("https://github.com/example/gpui".into(), "abc123".into())
-        );
-        assert!(gpui_source("version = 4\n[[package]]\nname = \"gpui-pre\"\n").is_err());
     }
 }

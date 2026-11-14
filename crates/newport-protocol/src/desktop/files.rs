@@ -7,7 +7,7 @@ pub enum EntryKind {
     Other,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub name: String,
     pub path: String,
@@ -17,7 +17,7 @@ pub struct Entry {
     pub permissions: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Listing {
     pub path: String,
     pub entries: Vec<crate::desktop::files::Entry>,
@@ -29,13 +29,13 @@ pub enum PreviewKind {
     Image,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Content {
     Text(Box<String>),
     Binary(Box<bytes::Bytes>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Preview {
     pub kind: crate::desktop::files::PreviewKind,
     pub mime: String,

@@ -4,12 +4,13 @@ use gpui_kit::component::resizable::{
     ResizablePanel, ResizablePanelGroup, ResizableState, h_resizable, resizable_panel,
 };
 use gpui_kit::{prelude::*, *};
+use newport_protocol::desktop::preferences::SIDEBAR_WIDTH;
 
 pub const DEFAULT_WIDTH: f32 = 184.;
-pub const MIN_WIDTH: f32 = 176.;
+pub const MIN_WIDTH: f32 = *SIDEBAR_WIDTH.start();
 
 pub fn maximum(viewport: f32) -> f32 {
-    (viewport - 440.).clamp(MIN_WIDTH, 300.)
+    (viewport - 440.).clamp(MIN_WIDTH, *SIDEBAR_WIDTH.end())
 }
 
 fn clamp_width(width: f32, viewport: f32) -> f32 {

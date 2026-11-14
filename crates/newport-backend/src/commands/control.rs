@@ -272,7 +272,7 @@ pub async fn forward_tunnel_batch(
     server_id: Uuid,
     create: Vec<Tunnel>,
     connect: Vec<Tunnel>,
-    expected_connection: Option<serde_json::Value>,
+    expected_connection: Option<newport_protocol::desktop::configuration::ConnectionScope>,
 ) -> Result<Vec<Tunnel>, String> {
     if create.is_empty() {
         return state.connect_tunnel_batch(server_id, &connect, expected_connection.as_ref());
@@ -334,7 +334,7 @@ pub(super) fn validate_forward_owner(
 pub(super) fn validate_forward_connection(
     manager: &crate::manager::Manager,
     server_id: Uuid,
-    expected: Option<&serde_json::Value>,
+    expected: Option<&newport_protocol::desktop::configuration::ConnectionScope>,
 ) -> Result<(), String> {
     let Some(expected) = expected else {
         return Ok(());
@@ -450,7 +450,7 @@ pub async fn set_clipboard_enabled(
     desktop: crate::desktop_integration::Desktop,
     id: Uuid,
     enabled: bool,
-    expected_connection: serde_json::Value,
+    expected_connection: newport_protocol::desktop::configuration::ConnectionScope,
     access: &crate::integration_permissions::Access,
 ) -> Result<(), String> {
     set_integration_enabled(
@@ -476,7 +476,7 @@ pub async fn set_integration_enabled(
     id: Uuid,
     feature: IntegrationFeature,
     enabled: bool,
-    expected_connection: serde_json::Value,
+    expected_connection: newport_protocol::desktop::configuration::ConnectionScope,
     access: &crate::integration_permissions::Access,
 ) -> Result<(), String> {
     // Revoke live access before waiting for a profile save or unrelated work.
@@ -661,7 +661,7 @@ pub async fn open_tunnel(
     id: Uuid,
     remote_port: Option<u16>,
     expected: Option<Tunnel>,
-    expected_connection: Option<serde_json::Value>,
+    expected_connection: Option<newport_protocol::desktop::configuration::ConnectionScope>,
 ) -> Result<(), String> {
     let endpoint = state.forward_open_endpoint(
         id,
@@ -686,7 +686,7 @@ fn forward_open_endpoint(
     id: Uuid,
     remote_port: Option<u16>,
     expected: Option<&Tunnel>,
-    expected_connection: Option<&serde_json::Value>,
+    expected_connection: Option<&newport_protocol::desktop::configuration::ConnectionScope>,
 ) -> Result<std::net::SocketAddrV4, String> {
     manager.forward_open_endpoint(id, remote_port, expected, expected_connection)
 }
@@ -712,10 +712,11 @@ mod forwarding_precondition_tests {
         model::{ConnectionState, Status, Tunnel},
         profile::Store,
     };
-    use serde_json::{Value, json};
+    use newport_protocol::desktop::configuration::ConnectionScope;
+    use serde_json::json;
     use uuid::Uuid;
 
-    fn fixture() -> (tempfile::TempDir, Manager, Tunnel, Value) {
+    fn fixture() -> (tempfile::TempDir, Manager, Tunnel, ConnectionScope) {
         let directory = tempfile::tempdir().unwrap();
         let mut manager = Manager::new(Store::for_test(directory.path().into()));
         let server = Uuid::new_v4();
@@ -732,11 +733,9 @@ mod forwarding_precondition_tests {
             .unwrap()
             .tunnels
             .insert(tunnel.id, ConnectionState::new(Status::Connected));
-        let snapshot = serde_json::to_value(manager.snapshot()).unwrap();
-        let connection = newport_domain::connection_scope::connection(
-            &snapshot["config"]["servers"][0],
-            &snapshot,
-        );
+        let connection = manager
+            .connection_scope(manager.config.servers[0].id)
+            .unwrap();
         (directory, manager, tunnel, connection)
     }
 

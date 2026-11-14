@@ -19,6 +19,8 @@ pub const SERVER_LIMITS: common::Limits = common::Limits {
 };
 pub const MAX_COMMAND: usize = CLIENT_LIMITS.message - 4096;
 pub const MAX_TEXT: usize = 16 * 1024;
+/// The longest agent status a holder lists; see [`Holder::agent`].
+pub const MAX_AGENT: usize = 8 * 1024;
 pub const MAX_COMPUTER_NAME: usize = 1024;
 pub const MAX_HOLDERS: usize = 4096;
 pub const MAX_ATTACHED: usize = 256;
@@ -57,6 +59,9 @@ pub struct Holder {
     pub started: u64,
     pub name: Option<String>,
     pub title: Option<String>,
+    /// What the shell's coding agent last reported about itself, as an
+    /// OSC 7501 program status report (the text after `7501;`).
+    pub agent: Option<String>,
     pub creator: Computer,
     pub attached: Vec<Attached>,
     pub exited: Option<Exit>,
@@ -168,6 +173,7 @@ impl Holder {
             + self.creator.name.len()
             + self.name.as_ref().map_or(0, String::len)
             + self.title.as_ref().map_or(0, String::len)
+            + self.agent.as_ref().map_or(0, String::len)
             + self
                 .attached
                 .iter()
@@ -186,6 +192,9 @@ impl Holder {
                 .title
                 .as_ref()
                 .is_some_and(|title| !text(title, MAX_TEXT))
+            || self.agent.as_ref().is_some_and(|agent| {
+                agent.len() > MAX_AGENT || !agent.bytes().all(|b| b.is_ascii_graphic())
+            })
             || self.attached.len() > MAX_ATTACHED
             || self
                 .attached

@@ -292,6 +292,7 @@ impl Message for Event {
     }
 }
 #[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug))]
 enum Shape {
     Empty,
     Board,
@@ -320,21 +321,19 @@ enum Kind {
     Payload,
     Message(Shape),
 }
-fn scan(mut body: &[u8], shape: Shape) -> Result<(), Error> {
+/// How a `Board`, which is one oneof, reads its case in field `number`.
+fn board(number: u32) -> Option<Kind> {
+    Some(match number {
+        1 => Kind::Message(Shape::Empty),
+        2 => Kind::Text,
+        _ => return None,
+    })
+}
+/// The fields `shape` knows, and how it reads them.
+fn known(shape: Shape) -> &'static [(u32, Kind)] {
     use Kind::*;
     use Shape::*;
-    if matches!(shape, Board) {
-        let field = fields::single(body)?;
-        return match field.number {
-            1 => scan(field.bytes()?, Empty),
-            2 => {
-                field.bytes()?;
-                Ok(())
-            }
-            _ => Err(Invalid("board").into()),
-        };
-    }
-    let known: &[(u32, Kind)] = match shape {
+    match shape {
         Empty | Board => &[],
         Hello => &[(1, Unsigned), (2, Message(Board))],
         Publish => &[(1, Integer), (2, Integer), (3, Formats)],
@@ -351,7 +350,21 @@ fn scan(mut body: &[u8], shape: Shape) -> Result<(), Error> {
         ReadLocal | Read => &[(1, Integer), (2, Integer), (3, Text)],
         Ready => &[(1, Unsigned)],
         Snapshot => &[(1, Integer), (2, Formats), (3, Integer)],
-    };
+    }
+}
+fn scan(mut body: &[u8], shape: Shape) -> Result<(), Error> {
+    use Kind::*;
+    if matches!(shape, Shape::Board) {
+        let field = fields::single(body)?;
+        return match board(field.number).ok_or(Invalid("board"))? {
+            Message(shape) => scan(field.bytes()?, shape),
+            _ => {
+                field.bytes()?;
+                Ok(())
+            }
+        };
+    }
+    let known = known(shape);
     let mut seen = 0u16;
     let mut formats = 0;
     while !body.is_empty() {
@@ -400,11 +413,10 @@ fn scan(mut body: &[u8], shape: Shape) -> Result<(), Error> {
     }
     Ok(())
 }
-fn scan_frame(body: &[u8], command: bool) -> Result<(), Error> {
+fn frame_shape(number: u32, command: bool) -> Option<Shape> {
     use Shape::*;
-    let field = fields::single(body)?;
-    let shape = if command {
-        match field.number {
+    Some(if command {
+        match number {
             1 => Hello,
             2 => Publish,
             3 => Attach,
@@ -414,10 +426,10 @@ fn scan_frame(body: &[u8], command: bool) -> Result<(), Error> {
             7 => ReadLocal,
             8 => Id,
             9 => Empty,
-            _ => return Err(Invalid("command").into()),
+            _ => return None,
         }
     } else {
-        match field.number {
+        match number {
             1 => Ready,
             2 => Snapshot,
             3 => Published,
@@ -427,10 +439,63 @@ fn scan_frame(body: &[u8], command: bool) -> Result<(), Error> {
             8 => Demand,
             9 => LocalData,
             10 => Id,
-            _ => return Err(Invalid("event").into()),
+            _ => return None,
         }
-    };
+    })
+}
+fn scan_frame(body: &[u8], command: bool) -> Result<(), Error> {
+    let field = fields::single(body)?;
+    let shape = frame_shape(field.number, command).ok_or(Invalid(if command {
+        "command"
+    } else {
+        "event"
+    }))?;
     scan(field.bytes()?, shape)
+}
+
+#[cfg(test)]
+use crate::desktop::wire::wire_tables::{Row, Table, Wire};
+
+#[cfg(test)]
+pub(crate) fn tables() -> Vec<(Table, &'static str)> {
+    let command = |number| frame_shape(number, true).map(table);
+    let event = |number| frame_shape(number, false).map(table);
+    vec![
+        (
+            Table::dispatch("clipboard helper command", command),
+            "newport.clipboard.helper.CommandFrame",
+        ),
+        (
+            Table::dispatch("clipboard helper event", event),
+            "newport.clipboard.helper.EventFrame",
+        ),
+    ]
+}
+
+#[cfg(test)]
+fn table(shape: Shape) -> Table {
+    fn wire(kind: Kind) -> Wire {
+        match kind {
+            Kind::Integer => Wire::Varint,
+            Kind::Unsigned => Wire::Varint32,
+            Kind::Boolean => Wire::Bool,
+            Kind::Text | Kind::Formats | Kind::Payload => Wire::Len,
+            Kind::Message(child) => Wire::Message(table(child)),
+        }
+    }
+    Table::new(format!("clipboard helper {shape:?}"), move || {
+        if matches!(shape, Shape::Board) {
+            return crate::desktop::wire::wire_tables::numbers()
+                .filter_map(|number| Some(Row::new(number, wire(board(number)?)).oneof(true)))
+                .collect();
+        }
+        known(shape)
+            .iter()
+            .map(|&(number, kind)| {
+                Row::new(number, wire(kind)).repeated(matches!(kind, Kind::Formats))
+            })
+            .collect()
+    })
 }
 #[cfg(test)]
 mod tests;

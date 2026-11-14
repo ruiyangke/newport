@@ -1,6 +1,7 @@
 //! Share publication and journaling primitives; prepare repositories with Git.
 use super::super::{bootstrap, cloning};
 use super::*;
+use newport_protocol::git::code;
 use std::{ffi::OsString, path::Component};
 pub(super) fn create(
     service: &Service,
@@ -53,7 +54,7 @@ pub(super) fn create(
             Ok(()) => made.0 = Some(destination),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Err(Error::new(
-                    "DIRECTORY_REQUIRED",
+                    code::DIRECTORY_REQUIRED,
                     "Choose a folder whose parent folder exists.",
                 ));
             }
@@ -85,16 +86,16 @@ pub(super) fn create(
     if fs::symlink_metadata(root.join(leaf)).is_ok() {
         return Err(Error::new(
             if clone.is_some() {
-                "PATH_EXISTS"
+                code::PATH_EXISTS
             } else {
-                "ALREADY_REPOSITORY"
+                code::ALREADY_REPOSITORY
             },
             "The destination already exists and will not be replaced.",
         ));
     }
     if clone.is_none() && command::run(&root, &["rev-parse", "--git-dir"])?.is_some() {
         return Err(Error::new(
-            "ALREADY_REPOSITORY",
+            code::ALREADY_REPOSITORY,
             "The selected directory is already inside a repository.",
         ));
     }
@@ -155,7 +156,7 @@ pub(super) fn create(
         let current = fs::metadata(&root).map_err(io_error)?;
         if previous.dev() != current.dev() || previous.ino() != current.ino() {
             return Err(Error::new(
-                "PATH_CHANGED",
+                code::PATH_CHANGED,
                 "The destination directory changed.",
             ));
         }
@@ -175,7 +176,7 @@ pub(super) fn create(
             record.result = Some(value);
         }
         Err(e) => {
-            record.state = if e.code == "OUTCOME_UNKNOWN" {
+            record.state = if e.code == code::OUTCOME_UNKNOWN {
                 "outcome_unknown"
             } else {
                 "failed"
@@ -187,7 +188,7 @@ pub(super) fn create(
     record.seq += 1;
     journal.save(&record).map_err(|_| {
         Error::new(
-            "OUTCOME_UNKNOWN",
+            code::OUTCOME_UNKNOWN,
             "Creation completed but its outcome could not be saved.",
         )
     })?;

@@ -36,7 +36,7 @@ impl Access {
         id: uuid::Uuid,
         browser: bool,
         enabled: bool,
-        expected: &serde_json::Value,
+        expected: &newport_protocol::desktop::configuration::ConnectionScope,
     ) -> Result<
         (
             std::sync::Arc<crate::server_session::ServerSession>,

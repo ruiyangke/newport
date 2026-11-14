@@ -7,21 +7,10 @@ impl Newport {
         }
         // A refresh after a mutation keeps showing the accepted snapshot; only a
         // first read with nothing to show replaces the page with a skeleton.
-        if (self.initial_loading("snapshot") && self.snapshot.is_null())
-            || (!matches!(
-                self.page,
-                Page::Overview
-                    | Page::Ports
-                    | Page::Projects
-                    | Page::Services
-                    | Page::Containers
-                    | Page::Files
-                    | Page::RemoteApps
-            ) && self.initial_loading("page"))
-        {
+        if self.initial_loading("snapshot") && self.snapshot.is_none() {
             return loading::page(self.page, self.content_width);
         }
-        if self.snapshot.is_null() {
+        if self.snapshot.is_none() {
             return empty::pane(
                 IconName::ServerOff,
                 "Connection unavailable",

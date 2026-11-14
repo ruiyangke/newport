@@ -2,7 +2,8 @@
 //! signed-in menu. The backend owns the sign-in; this row only asks for it.
 use super::*;
 use gpui_kit::{Anchor, component::spinner::Spinner};
-use newport_client::account::{Action as AccountAction, License, NoticeAction, NoticeKind, Phase};
+use newport_client::account::Action as AccountAction;
+use newport_protocol::desktop::account::{License, NoticeAction, NoticeKind, Phase};
 
 // Menus fit their content; a long name or email truncates at this width.
 const MENU_MAX_WIDTH: f32 = 320.;
@@ -140,7 +141,7 @@ impl Newport {
         // The row and its initial lead with the person's name when there is one.
         let shown = name.clone().unwrap_or_else(|| email.clone());
         let plan = plan(status.license.as_ref(), chrono::Utc::now());
-        let (leading, label, tooltip): (AnyElement, SharedString, SharedString) = match status.phase
+        let (leading, label, tooltip): (AnyElement, SharedString, SharedString) = match status.state
         {
             // Hold the row's place so the sidebar doesn't shift when it loads.
             Phase::Loading => return div().h(height).flex_shrink_0().into_any_element(),
@@ -166,8 +167,8 @@ impl Newport {
                 shown.clone(),
             ),
         };
-        let waiting = status.phase == Phase::Waiting;
-        let signed_in = status.phase == Phase::SignedIn;
+        let waiting = status.state == Phase::Waiting;
+        let signed_in = status.state == Phase::SignedIn;
         let button = crate::controls::button("account")
             .accessibility_label(tooltip.clone())
             .disabled(disabled)
@@ -233,7 +234,7 @@ impl Newport {
             .when(waiting && !compact, |button| button.pr(px(40.)))
             .when(!compact, |button| button.justify_start());
         let weak = cx.entity().downgrade();
-        let row = match status.phase {
+        let row = match status.state {
             Phase::SignedOut => button
                 .on_click(cx.listener(|this, _, _, cx| this.run_account(AccountAction::SignIn, cx)))
                 .into_any_element(),
@@ -487,50 +488,53 @@ fn plan(license: Option<&License>, now: chrono::DateTime<chrono::Utc>) -> Plan {
         })
     };
     let trial_days = license
-        .filter(|license| license.state == "trial")
+        .filter(|license| license.state.as_deref() == Some("trial"))
         .and_then(|license| parse(&license.ends_at))
         .map(|ends| (ends.with_timezone(&chrono::Utc) - now).num_hours())
         .map(|hours| ((hours + 23) / 24).max(1));
     let free_seat = license.is_some_and(|license| license.seat.as_deref() == Some("free"));
-    let (tier, detail) = match license.map(|license| (license.state.as_str(), license)) {
-        Some(("active" | "grace", _)) if free_seat => {
-            (Tier::FreeSeat, "Pro is on your other computers".to_owned())
-        }
-        // A trial's seat can't move, so this computer can only upgrade.
-        Some(("trial", _)) if free_seat => {
-            (Tier::Free, "Your trial is on another computer".to_owned())
-        }
-        Some(("active" | "grace", license)) if license.plan.as_deref() == Some("comp") => {
-            (Tier::Pro, "Complimentary".to_owned())
-        }
-        // The last payment failed: Pro runs until the grace period ends,
-        // then stops unless the payment goes through.
-        Some(("grace", license)) => (
-            Tier::Pro,
-            date(&license.valid_until)
-                .map(|stops| format!("Payment failed · Pro stops {stops}"))
-                .unwrap_or_else(|| "Payment failed".to_owned()),
-        ),
-        Some(("active", license)) => (
-            Tier::Pro,
-            // A renewing plan needs no date; one that won't renew says when it stops.
-            date(&license.ends_at)
-                .map(|ends| format!("Ends {ends}"))
-                .unwrap_or_default(),
-        ),
-        Some(("trial", _)) => (
-            Tier::Trial,
-            match trial_days {
-                Some(1) => "1 day left".to_owned(),
-                Some(days) => format!("{days} days left"),
-                None => String::new(),
-            },
-        ),
-        Some(("expired" | "revoked", _)) => (Tier::Free, "Newport Pro ended".to_owned()),
-        _ => (Tier::Free, String::new()),
-    };
+    let (tier, detail) =
+        match license.map(|license| (license.state.as_deref().unwrap_or_default(), license)) {
+            Some(("active" | "grace", _)) if free_seat => {
+                (Tier::FreeSeat, "Pro is on your other computers".to_owned())
+            }
+            // A trial's seat can't move, so this computer can only upgrade.
+            Some(("trial", _)) if free_seat => {
+                (Tier::Free, "Your trial is on another computer".to_owned())
+            }
+            Some(("active" | "grace", license)) if license.plan.as_deref() == Some("comp") => {
+                (Tier::Pro, "Complimentary".to_owned())
+            }
+            // The last payment failed: Pro runs until the grace period ends,
+            // then stops unless the payment goes through.
+            Some(("grace", license)) => (
+                Tier::Pro,
+                date(&license.valid_until)
+                    .map(|stops| format!("Payment failed · Pro stops {stops}"))
+                    .unwrap_or_else(|| "Payment failed".to_owned()),
+            ),
+            Some(("active", license)) => (
+                Tier::Pro,
+                // A renewing plan needs no date; one that won't renew says when it stops.
+                date(&license.ends_at)
+                    .map(|ends| format!("Ends {ends}"))
+                    .unwrap_or_default(),
+            ),
+            Some(("trial", _)) => (
+                Tier::Trial,
+                match trial_days {
+                    Some(1) => "1 day left".to_owned(),
+                    Some(days) => format!("{days} days left"),
+                    None => String::new(),
+                },
+            ),
+            Some(("expired" | "revoked", _)) => (Tier::Free, "Newport Pro ended".to_owned()),
+            _ => (Tier::Free, String::new()),
+        };
     let payment_failed = license.is_some_and(|license| {
-        license.state == "grace" && license.plan.as_deref() != Some("comp") && !free_seat
+        license.state.as_deref() == Some("grace")
+            && license.plan.as_deref() != Some("comp")
+            && !free_seat
     });
     Plan {
         tier,
@@ -551,7 +555,7 @@ mod tests {
         ends: Option<&str>,
     ) -> License {
         License {
-            state: state.into(),
+            state: Some(state.into()),
             plan: plan.map(Into::into),
             renews_at: renews.map(Into::into),
             ends_at: ends.map(Into::into),
@@ -632,34 +636,58 @@ mod tests {
             base::test_support::snapshots, px, size,
         };
         use newport_client::account::Account;
-        use serde_json::{Value, json};
+        use newport_protocol::desktop::account::{License, Phase, Status};
         use std::{cell::RefCell, rc::Rc};
 
         /// `free` is a signed-in account without Newport Pro; `named` is a
         /// Pro account whose sign-in provider gave a name.
-        fn status(phase: &str) -> Value {
+        fn status(phase: &str) -> Status {
             let free = phase == "free";
             let named = phase == "named";
             let trial = phase == "trial";
             let grace = phase == "grace";
             let signed_in = free || named || trial || grace || phase == "signedIn";
             let license = if free {
-                json!({"state":"none","plan":null})
+                License {
+                    state: Some("none".into()),
+                    ..Default::default()
+                }
             } else if trial {
-                json!({"state":"trial","plan":"trial","seat":"trial","endsAt":"2027-10-02T12:00:00Z"})
+                License {
+                    state: Some("trial".into()),
+                    plan: Some("trial".into()),
+                    seat: Some("trial".into()),
+                    ends_at: Some("2027-10-02T12:00:00Z".into()),
+                    ..Default::default()
+                }
             } else if grace {
-                json!({"state":"grace","plan":"pro","seat":"pro","validUntil":"2027-10-02T12:00:00Z"})
+                License {
+                    state: Some("grace".into()),
+                    plan: Some("pro".into()),
+                    seat: Some("pro".into()),
+                    valid_until: Some("2027-10-02T12:00:00Z".into()),
+                    ..Default::default()
+                }
             } else {
-                json!({"state":"active","plan":"pro","renewsAt":"2027-10-02T12:00:00Z"})
+                License {
+                    state: Some("active".into()),
+                    plan: Some("pro".into()),
+                    renews_at: Some("2027-10-02T12:00:00Z".into()),
+                    ..Default::default()
+                }
             };
-            json!({
-                "status": if signed_in { "signedIn" } else { phase },
-                "email": signed_in.then_some("ada@example.com"),
-                "name": named.then_some("Ada Lovelace"),
-                "license": signed_in.then_some(license),
-                "signingOut": false,
-                "notice": null,
-            })
+            Status {
+                state: match phase {
+                    _ if signed_in => Phase::SignedIn,
+                    "signedOut" => Phase::SignedOut,
+                    "waiting" => Phase::Waiting,
+                    _ => Phase::Loading,
+                },
+                email: signed_in.then(|| "ada@example.com".into()),
+                name: named.then(|| "Ada Lovelace".into()),
+                license: signed_in.then_some(license),
+                ..Default::default()
+            }
         }
 
         type Calls = Rc<RefCell<Vec<newport_protocol::desktop::Kind>>>;

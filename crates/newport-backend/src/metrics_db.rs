@@ -11,6 +11,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// The history database in the profile folder. SQLite keeps its journal files
+/// beside it, named with this prefix.
+pub const FILE: &str = "metrics.sqlite3";
 const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const SCHEMA: &str = include_str!("../migrations/001_metrics.sql");
 // Persisted endpoint identity: changing the salt orphans saved history.

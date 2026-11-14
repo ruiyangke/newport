@@ -3,10 +3,8 @@ use super::*;
 use crate::{log_line, selectable_log::SelectableLog};
 use gpui_kit::{base::Selectable, component::spinner::Spinner};
 use newport_client::compose_activity::ActivityData;
-use newport_domain::{
-    compose::{self, ComposeJob},
-    containers_log::Severity,
-};
+use newport_domain::{compose, containers_log::Severity};
+use newport_protocol::monitor::compose::{Job, State};
 
 #[cfg(test)]
 #[path = "compose_activity_tests.rs"]
@@ -171,7 +169,7 @@ impl ContainersPanel {
         cx.notify();
         true
     }
-    pub(crate) fn running_compose_job(&self) -> Option<&ComposeJob> {
+    pub(crate) fn running_compose_job(&self) -> Option<&Job> {
         let project = self.client.selected_project()?;
         compose::running_job(self.activity.data.jobs(), project).filter(|job| {
             self.activity
@@ -334,7 +332,7 @@ impl ContainersPanel {
             .when(data.jobs().len()>1, |v|v.child(self.activity_history(now,cx)))
             .into_any_element()
     }
-    fn activity_header(&self, job: &ComposeJob, now: i64, cx: &mut Context<Self>) -> AnyElement {
+    fn activity_header(&self, job: &Job, now: i64, cx: &mut Context<Self>) -> AnyElement {
         let project = job.project.clone();
         let id = job.job.clone();
         let cancelling = self.client.compose_cancelling(&id);
@@ -470,7 +468,7 @@ impl ContainersPanel {
     }
 }
 
-fn activity_job_state(job: &ComposeJob, now: i64, id: String, cx: &App) -> AnyElement {
+fn activity_job_state(job: &Job, now: i64, id: String, cx: &App) -> AnyElement {
     let status = compose::job_status(job, now);
     let icon_id = format!("{id}-icon");
     div()
@@ -494,7 +492,7 @@ fn activity_job_state(job: &ComposeJob, now: i64, id: String, cx: &App) -> AnyEl
                         .color(tone_color(status.tone, cx))
                         .into_any_element()
                 } else {
-                    Icon::new(if job.state == compose::JobState::Succeeded {
+                    Icon::new(if job.state == State::Succeeded {
                         IconName::CircleCheck
                     } else {
                         IconName::CircleX

@@ -1,5 +1,6 @@
 //! Commit identity and message presentation shared by historical inspections.
 use super::*;
+use newport_protocol::git::{Commit, ObjectId};
 use std::{cell::Cell, rc::Rc};
 
 #[derive(Default)]
@@ -24,9 +25,8 @@ fn split_message(message: &str) -> (&str, &str) {
     )
 }
 
-pub(super) fn history_subject(entry: &Value) -> String {
-    let message = entry["message"]["display"].as_str().unwrap_or_default();
-    let (subject, _) = split_message(message);
+pub(super) fn history_subject(entry: &Commit) -> String {
+    let (subject, _) = split_message(&entry.message.display);
     if subject.is_empty() {
         "Empty commit message".into()
     } else {
@@ -34,10 +34,7 @@ pub(super) fn history_subject(entry: &Value) -> String {
     }
 }
 
-pub(super) fn relative_time(value: &Value, now: i64) -> String {
-    let Some(seconds) = value.as_i64() else {
-        return "Date unavailable".into();
-    };
+pub(super) fn relative_time(seconds: i64, now: i64) -> String {
     let Some(millis) = seconds.checked_mul(1000) else {
         return "Date unavailable".into();
     };
@@ -64,15 +61,15 @@ pub(super) fn relative_time(value: &Value, now: i64) -> String {
     }
 }
 
-pub(super) fn history_subtitle(entry: &Value) -> String {
+pub(super) fn history_subtitle(entry: &Commit) -> String {
     format!(
         "{} · {} · {}",
-        text(&entry["author"], "name"),
-        relative_time(&entry["time"], chrono::Utc::now().timestamp()),
-        short_oid(&text(&entry["oid"], "hex"))
+        entry.author.name,
+        relative_time(entry.time, chrono::Utc::now().timestamp()),
+        short_oid(&entry.oid.hex)
     )
 }
-pub(super) fn history_row_identity(entry: &Value, cx: &App) -> Div {
+pub(super) fn history_row_identity(entry: &Commit, cx: &App) -> Div {
     div()
         .flex()
         .items_center()
@@ -82,17 +79,13 @@ pub(super) fn history_row_identity(entry: &Value, cx: &App) -> Div {
         .text_size(px(crate::ui::FONT_SIZE))
         .line_height(px(17.))
         .text_color(cx.theme().muted_foreground)
+        .child(div().min_w_0().truncate().child(entry.author.name.clone()))
+        .child(div().flex_shrink_0().child("·"))
         .child(
             div()
-                .min_w_0()
-                .truncate()
-                .child(text(&entry["author"], "name")),
+                .flex_shrink_0()
+                .child(relative_time(entry.time, chrono::Utc::now().timestamp())),
         )
-        .child(div().flex_shrink_0().child("·"))
-        .child(div().flex_shrink_0().child(relative_time(
-            &entry["time"],
-            chrono::Utc::now().timestamp(),
-        )))
         .child(
             div()
                 .debug_selector(|| "history-row-oid".into())
@@ -101,7 +94,7 @@ pub(super) fn history_row_identity(entry: &Value, cx: &App) -> Div {
                 .flex_shrink_0()
                 .font_family(cx.theme().mono_font_family.clone())
                 .text_size(px(crate::ui::FONT_SIZE))
-                .child(short_oid(&text(&entry["oid"], "hex"))),
+                .child(short_oid(&entry.oid.hex)),
         )
 }
 fn short_oid(oid: &str) -> String {
@@ -157,34 +150,34 @@ fn message_body(body: String, state: &State, background: Hsla) -> Div {
 impl Newport {
     pub(super) fn git_commit_header(
         &self,
-        detail: &Value,
-        parents: &[Value],
+        detail: &Commit,
+        parents: &[ObjectId],
         parent: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let workspace = self.code_workspace().is_some();
-        let message = text(&detail["message"], "display");
+        let message = detail.message.display.clone();
         let (subject, body) = split_message(&message);
-        let oid = text(&detail["oid"], "hex");
+        let oid = detail.oid.hex.clone();
         let copied = self.git.history.header.copied(&oid, Instant::now());
-        let exact = detail["time"]
-            .as_i64()
-            .and_then(|n| n.checked_mul(1000))
+        let exact = detail
+            .time
+            .checked_mul(1000)
             .map(crate::localized_time::full_date)
             .unwrap_or_else(|| "Date unavailable".into());
-        let email = text(&detail["author"], "email");
+        let email = detail.author.email.clone();
         let parents = if parents.is_empty() {
-            rows(&detail["parents"])
+            detail.parents.clone()
         } else {
             parents.to_vec()
         };
         let parent_label = parents
             .get(parent)
-            .map(|p| format!("Compared with parent {}", short_oid(&text(p, "hex"))))
+            .map(|p| format!("Compared with parent {}", short_oid(&p.hex)))
             .unwrap_or_else(|| "Initial commit · compared with an empty tree".into());
         let selected_parent = parents
             .get(parent)
-            .map(|p| short_oid(&text(p, "hex")))
+            .map(|p| short_oid(&p.hex))
             .unwrap_or_default();
         let multiple_parents = parents.len() > 1;
         div()
@@ -282,7 +275,7 @@ impl Newport {
                                 )
                             })
                             .when(
-                                detail["messageTruncated"] == true
+                                detail.message_truncated
                                     && (!workspace || self.git.history.header.expanded),
                                 |view| {
                                     view.child(project_loading::picker_detail(
@@ -315,9 +308,9 @@ impl Newport {
                         div()
                             .id("git-commit-author")
                             .role(accesskit::Role::Label)
-                            .aria_label(format!("{} · {}", text(&detail["author"], "name"), email))
+                            .aria_label(format!("{} · {}", detail.author.name, email))
                             .text_color(cx.theme().foreground)
-                            .child(text(&detail["author"], "name"))
+                            .child(detail.author.name.clone())
                             .hover_hint(email.clone()),
                     )
                     .child(
@@ -325,10 +318,7 @@ impl Newport {
                             .id("git-commit-date")
                             .role(accesskit::Role::Label)
                             .aria_label(exact.clone())
-                            .child(relative_time(
-                                &detail["time"],
-                                chrono::Utc::now().timestamp(),
-                            ))
+                            .child(relative_time(detail.time, chrono::Utc::now().timestamp()))
                             .hover_hint(exact.clone()),
                     )
                     .child(
@@ -394,7 +384,7 @@ impl Newport {
                                 .accessibility_label("Compare with parent")
                                 .dropdown_menu({
                                     let weak = cx.entity().downgrade();
-                                    let owner = text(&detail["oid"], "hex");
+                                    let owner = detail.oid.hex.clone();
                                     move |mut menu, _, _| {
                                         for (index, parent) in parents.iter().enumerate() {
                                             let weak = weak.clone();
@@ -403,7 +393,7 @@ impl Newport {
                                                 PopupMenuItem::new(format!(
                                                     "Parent {} · {}",
                                                     index + 1,
-                                                    short_oid(&text(parent, "hex"))
+                                                    short_oid(&parent.hex)
                                                 ))
                                                 .on_click(move |_, _, cx| {
                                                     let _ = weak.update(cx, |this, cx| {
@@ -436,7 +426,6 @@ impl Newport {
 mod tests {
     use super::{State, message_body, relative_time, split_message};
     use gpui_kit::{self as gpui, Context, IntoElement, Render, Window, div, prelude::*, px};
-    use serde_json::json;
     #[test]
     fn copy_feedback_expires_even_while_history_is_suspended() {
         let now = std::time::Instant::now();
@@ -468,14 +457,10 @@ mod tests {
             (86_400, "yesterday"),
             (172_800, "2 days ago"),
         ] {
-            assert_eq!(relative_time(&json!(now - ago), now), expected);
+            assert_eq!(relative_time(now - ago, now), expected);
         }
-        assert_eq!(relative_time(&json!(null), now), "Date unavailable");
-        assert_eq!(relative_time(&json!(i64::MAX), now), "Date unavailable");
-        assert_ne!(
-            relative_time(&json!(now - 10 * 86_400), now),
-            "Date unavailable"
-        );
+        assert_eq!(relative_time(i64::MAX, now), "Date unavailable");
+        assert_ne!(relative_time(now - 10 * 86_400, now), "Date unavailable");
     }
 
     struct Body {

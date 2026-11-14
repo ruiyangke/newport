@@ -276,6 +276,9 @@ fn event_message(event: Event) -> anyhow::Result<dto::TerminalEvent> {
         })),
         Event::Active(active) => dto::TerminalEvent::Active(Box::new(dto::Active { active })),
         Event::NotHeld(reason) => dto::TerminalEvent::NotHeld(Box::new(dto::NotHeld { reason })),
+        Event::Size { columns, rows } => {
+            dto::TerminalEvent::Size(Box::new(dto::Resize { columns, rows }))
+        }
         Event::Data(_) | Event::Restore { .. } => anyhow::bail!("Terminal data is not an event"),
     })
 }
@@ -334,6 +337,7 @@ mod tests {
         Active(bool),
         DisplayLost,
         NotHeld(String),
+        Size(u16, u16),
     }
     #[derive(Debug, PartialEq)]
     enum ToApp {
@@ -434,6 +438,7 @@ mod tests {
                 dto::TerminalEvent::Active(value) => TestEvent::Active(value.active),
                 dto::TerminalEvent::DisplayLost(_) => TestEvent::DisplayLost,
                 dto::TerminalEvent::NotHeld(value) => TestEvent::NotHeld(value.reason),
+                dto::TerminalEvent::Size(value) => TestEvent::Size(value.columns, value.rows),
             }),
         })
     }

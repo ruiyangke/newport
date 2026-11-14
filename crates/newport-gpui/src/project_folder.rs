@@ -38,17 +38,51 @@ fn chosen_path(directory: &str, leaf: Option<&str>) -> Option<String> {
         _ => None,
     }
 }
-fn folders(list: &Value, hidden: bool) -> Vec<Value> {
-    let mut entries = rows(&list["entries"]);
+fn folders(list: Option<&desktop::files::Listing>, hidden: bool) -> Vec<desktop::files::Entry> {
+    let mut entries = list.map_or_else(Vec::new, |list| list.entries.clone());
     entries.retain(|entry| {
-        entry["kind"] == "directory"
-            && (hidden || !text(entry, "name").starts_with('.'))
-            && chosen_path(&text(entry, "path"), None).is_some()
+        entry.kind == desktop::files::EntryKind::Directory
+            && (hidden || !entry.name.starts_with('.'))
+            && chosen_path(&entry.path, None).is_some()
     });
-    entries.sort_by_cached_key(|entry| text(entry, "name").to_lowercase());
+    entries.sort_by_cached_key(|entry| entry.name.to_lowercase());
     entries
 }
 impl Newport {
+    /// The folder chooser's listing, while its read shows it.
+    fn project_folder_listing(&self) -> Option<&desktop::files::Listing> {
+        self.owned("project-folder", &self.project_folder_listing)
+    }
+    /// The settled listing's directory, once read without an error.
+    fn project_folder_directory(&self) -> Option<&str> {
+        self.resources
+            .get("project-folder")
+            .filter(|r| !r.pending && r.error.is_none())
+            .and(self.project_folder_listing())
+            .map(|listing| listing.path.as_str())
+    }
+    /// Settles the folder chooser's listing.
+    pub(super) fn complete_project_folder(
+        &mut self,
+        generation: u64,
+        result: Result<desktop::Reply, newport_client::request_error::RequestError>,
+    ) -> bool {
+        let result = result
+            .and_then(|reply| match reply {
+                desktop::Reply::Files(reply) => match *reply {
+                    desktop::files::Reply::List(listing) => Ok(*listing),
+                    _ => Err("The backend answered a folder listing with another reply.".into()),
+                },
+                _ => Err("The backend answered a folder listing with another reply.".into()),
+            })
+            .map(|listing| {
+                let changed = self.project_folder_listing.as_ref() != Some(&listing);
+                (listing, changed)
+            });
+        self.complete_owned("project-folder", generation, result, |this| {
+            &mut this.project_folder_listing
+        })
+    }
     pub(super) fn begin_project_folder(
         &mut self,
         target: Entity<InputState>,
@@ -142,11 +176,9 @@ impl Newport {
             return;
         }
         let Some(path) = self
-            .resources
-            .get("project-folder")
-            .filter(|r| !r.pending && r.error.is_none())
-            .map(|r| text(&r.value, "path"))
+            .project_folder_directory()
             .filter(|path| path.starts_with('/'))
+            .map(str::to_owned)
         else {
             return;
         };
@@ -213,7 +245,7 @@ impl Newport {
         chooser.scroll = UniformListScrollHandle::new();
         let operation = uuid::Uuid::new_v4();
         chooser.operation = Some(operation);
-        self.request_result(
+        self.request_typed(
             "project-folder",
             desktop_server(&self.server).map(|server| {
                 desktop::Operation::Files(Box::new(desktop::files::Operation::List(Box::new(
@@ -234,21 +266,14 @@ impl Newport {
         let Some(chooser) = self.project_folder.as_ref() else {
             return;
         };
-        let Some(resource) = self
-            .resources
-            .get("project-folder")
-            .filter(|r| !r.pending && r.error.is_none())
-        else {
+        let Some(directory) = self.project_folder_directory() else {
             return;
         };
         if chooser.server != self.server {
             return;
         }
         let leaf = chooser.leaf.read(cx).value();
-        let Some(path) = chosen_path(
-            &text(&resource.value, "path"),
-            chooser.child.then_some(leaf.as_str()),
-        ) else {
+        let Some(path) = chosen_path(directory, chooser.child.then_some(leaf.as_str())) else {
             return;
         };
         chooser
@@ -261,16 +286,13 @@ impl Newport {
         let Some(chooser) = &self.project_folder else {
             return div().into_any_element();
         };
-        let listing = self.value("project-folder");
-        let directory = text(&listing, "path");
-        let ready = self
-            .resources
-            .get("project-folder")
-            .is_some_and(|r| !r.pending && r.error.is_none());
+        let listing = self.project_folder_listing();
+        let directory = listing.map_or_else(String::new, |listing| listing.path.clone());
+        let ready = self.project_folder_directory().is_some();
         let leaf = chooser.leaf.read(cx).value();
         let valid =
             ready && chosen_path(&directory, chooser.child.then_some(leaf.as_str())).is_some();
-        let entries = folders(&listing, chooser.hidden);
+        let entries = folders(listing, chooser.hidden);
         div()
             .flex()
             .flex_col()
@@ -297,8 +319,11 @@ impl Newport {
                             .label("Up")
                             .disabled(!ready || directory == "/")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                let p =
-                                    parent(&text(&this.value("project-folder"), "path")).to_owned();
+                                let p = parent(
+                                    this.project_folder_listing()
+                                        .map_or("", |listing| listing.path.as_str()),
+                                )
+                                .to_owned();
                                 this.navigate_project_folder(p, window, cx);
                             })),
                     )
@@ -349,10 +374,10 @@ impl Newport {
                     cx.processor(move |_, range: std::ops::Range<usize>, _, cx| {
                         range
                             .map(|i| {
-                                let path = text(&entries[i], "path");
+                                let path = entries[i].path.clone();
                                 div().h(px(32.)).child(
                                     Button::new(("folder", i))
-                                        .accessibility_label(text(&entries[i], "name"))
+                                        .accessibility_label(entries[i].name.clone())
                                         .child(
                                             div()
                                                 .w_full()
@@ -365,7 +390,7 @@ impl Newport {
                                                         .flex_1()
                                                         .min_w_0()
                                                         .truncate()
-                                                        .child(text(&entries[i], "name")),
+                                                        .child(entries[i].name.clone()),
                                                 ),
                                         )
                                         .w_full()
@@ -414,7 +439,7 @@ impl Newport {
 #[cfg(test)]
 mod tests {
     use super::{chosen_path, folders, parent};
-    use serde_json::json;
+    use newport_protocol::desktop::files::{Entry, EntryKind, Listing};
     #[test]
     fn folder_selection_preserves_unicode_and_rejects_traversal_or_invalid_paths() {
         assert_eq!(
@@ -428,8 +453,24 @@ mod tests {
         assert!(chosen_path("relative", None).is_none());
         assert_eq!(parent("/home/é/"), "/home");
         assert_eq!(parent("/"), "/");
-        let list = json!({"entries":[{"kind":"directory","name":".hidden","path":"/.hidden"},{"kind":"file","name":"file","path":"/file"},{"kind":"directory","name":"app","path":"/app"}]});
-        assert_eq!(folders(&list, false).len(), 1);
-        assert_eq!(folders(&list, true).len(), 2);
+        let entry = |kind, name: &str| Entry {
+            name: name.into(),
+            path: format!("/{name}"),
+            kind,
+            size: None,
+            modified: None,
+            permissions: None,
+        };
+        let list = Listing {
+            path: "/".into(),
+            entries: vec![
+                entry(EntryKind::Directory, ".hidden"),
+                entry(EntryKind::File, "file"),
+                entry(EntryKind::Directory, "app"),
+            ],
+        };
+        assert_eq!(folders(Some(&list), false).len(), 1);
+        assert_eq!(folders(Some(&list), true).len(), 2);
+        assert!(folders(None, true).is_empty());
     }
 }

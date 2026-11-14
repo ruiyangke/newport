@@ -7,7 +7,36 @@ use gpui::{
     Window, div, px, size,
 };
 use gpui_kit as gpui;
-use serde_json::json;
+use newport_protocol::desktop::{configuration, connection};
+
+/// An importable SSH config host on port 22.
+fn host(id: uuid::Uuid, alias: &str, host: &str) -> connection::ConfigHost {
+    connection::ConfigHost {
+        id,
+        alias: alias.into(),
+        host: host.into(),
+        user: "ops".into(),
+        port: 22,
+        identity_file: None,
+        proxy: None,
+        through: Vec::new(),
+        importable: true,
+        suggested: false,
+        note: None,
+    }
+}
+/// Settles the SSH config read with `hosts`.
+fn config_read(view: &mut Newport, key: &str, generation: u64, hosts: Vec<connection::ConfigHost>) {
+    crate::snapshot_fixture::settle_connection(
+        view,
+        key,
+        generation,
+        connection::Reply::SshConfigHosts(Box::new(connection::ConfigHosts {
+            path: "~/.ssh/config".into(),
+            hosts,
+        })),
+    );
+}
 
 struct ScreenHost(Entity<Newport>);
 impl Render for ScreenHost {
@@ -29,7 +58,7 @@ fn a_host_that_cant_be_imported_shows_its_whole_reason(cx: &mut TestAppContext) 
         let entity = cx.new(|cx| {
             let mut v = owner(window, cx);
             v.server.clear();
-            v.snapshot["config"]["servers"] = json!([]);
+            v.snapshot_mut().config.servers.clear();
             v
         });
         view = Some(entity.clone());
@@ -45,14 +74,17 @@ fn a_host_that_cant_be_imported_shows_its_whole_reason(cx: &mut TestAppContext) 
     let hosts = requests.try_recv().unwrap();
     assert_eq!(kind(&hosts), Some(Kind::ConnectionSshConfigHosts));
     view.update(visual, |v, cx| {
-        v.resources.complete(
+        config_read(
+            v,
             &hosts.key,
             hosts.generation,
-            Ok(json!({"path": "~/.ssh/config", "hosts": [{
-                "alias": "orb", "user": "default", "host": "127.0.0.1", "port": 32222,
-                "importable": false, "suggested": false,
-                "note": "Uses a ProxyCommand, which Newport doesn’t support yet",
-            }]})),
+            vec![connection::ConfigHost {
+                user: "default".into(),
+                port: 32222,
+                importable: false,
+                note: Some("Uses a ProxyCommand, which Newport doesn’t support yet".into()),
+                ..host(uuid::Uuid::new_v4(), "orb", "127.0.0.1")
+            }],
         );
         v.poll_welcome();
         cx.notify();
@@ -92,7 +124,7 @@ fn an_empty_ssh_config_never_shows_the_import_card(cx: &mut TestAppContext) {
         let entity = cx.new(|cx| {
             let mut v = owner(window, cx);
             v.server.clear();
-            v.snapshot["config"]["servers"] = json!([]);
+            v.snapshot_mut().config.servers.clear();
             v
         });
         view = Some(entity.clone());
@@ -110,11 +142,7 @@ fn an_empty_ssh_config_never_shows_the_import_card(cx: &mut TestAppContext) {
     frame(visual);
     assert!(visual.debug_bounds("welcome-import").is_none());
     view.update(visual, |v, cx| {
-        v.resources.complete(
-            &hosts.key,
-            hosts.generation,
-            Ok(json!({"path": "~/.ssh/config", "hosts": []})),
-        );
+        config_read(v, &hosts.key, hosts.generation, Vec::new());
         v.poll_welcome();
         cx.notify();
     });
@@ -140,7 +168,7 @@ fn a_chosen_host_is_imported_after_the_jump_host_it_connects_through(cx: &mut Te
         let entity = cx.new(|cx| {
             let mut v = owner(window, cx);
             v.server.clear();
-            v.snapshot["config"]["servers"] = json!([]);
+            v.snapshot_mut().config.servers.clear();
             v
         });
         view = Some(entity.clone());
@@ -156,17 +184,22 @@ fn a_chosen_host_is_imported_after_the_jump_host_it_connects_through(cx: &mut Te
     let bastion = uuid::Uuid::new_v4();
     let inner = uuid::Uuid::new_v4();
     view.update(visual, |v, _| {
-        v.resources.complete(
+        config_read(
+            v,
             &hosts.key,
             hosts.generation,
-            Ok(json!({"path": "~/.ssh/config", "hosts": [
-                {"id": bastion, "alias": "ops@bastion.example.com", "user": "ops",
-                 "host": "bastion.example.com", "port": 22, "proxy": null, "through": [],
-                 "importable": true, "suggested": false, "note": "Jump host for inner"},
-                {"id": inner, "alias": "inner", "user": "ops", "host": "10.1.0.2", "port": 22,
-                 "proxy": {"jump": bastion}, "through": ["ops@bastion.example.com"],
-                 "importable": true, "suggested": true, "note": null},
-            ]})),
+            vec![
+                connection::ConfigHost {
+                    note: Some("Jump host for inner".into()),
+                    ..host(bastion, "ops@bastion.example.com", "bastion.example.com")
+                },
+                connection::ConfigHost {
+                    proxy: Some(configuration::Proxy::Jump(Box::new(bastion))),
+                    through: vec!["ops@bastion.example.com".into()],
+                    suggested: true,
+                    ..host(inner, "inner", "10.1.0.2")
+                },
+            ],
         );
         v.poll_welcome();
         v.import_chosen();
@@ -185,8 +218,7 @@ fn a_chosen_host_is_imported_after_the_jump_host_it_connects_through(cx: &mut Te
     assert_eq!(first_args.server.id, bastion);
     assert!(first_args.server.proxy.is_none());
     view.update(visual, |v, _| {
-        v.resources
-            .complete(&first.key, first.generation, Ok(json!(null)));
+        crate::snapshot_fixture::acknowledge(v, &first.key, first.generation);
         v.poll_welcome();
     });
     let second = requests.try_recv().unwrap();

@@ -1,5 +1,6 @@
-# crates.io releases Newport patches: patches/<name>.patch applies to each,
-# and `cargo xtask` generates the result into patches/<name>/.
+# crates.io releases Newport patches: patches/<crate>/NNN-<subject>.patch
+# apply to each in order, and `cargo xtask` generates the result into
+# vendor/<crate>/.
 
 # Per-channel flow control and close confirmations.
 [russh]
@@ -10,3 +11,45 @@ sha256 = "3bb77a4b259312b2abbc541bca1c13cb4e9b61c560a7fd894068c3b92e0c9dc3"
 [tree-sitter-proto]
 version = "0.6.0"
 sha256 = "9c93b6f1ed20de442e900eb636f2176af6063953dfaa9f76bf168dd3b490a3a1"
+
+# GPUI Kit's snapshot of Zed's GPUI (zed 08cbb88): key metadata for terminal
+# input and the Windows hooks for remote windows.
+[gpui-pre]
+version = "0.3.10"
+sha256 = "df4b5f8d0c278308df2f11e0bfe0212dd77d7848ce1bdc4b9d513334414396f6"
+
+# GPUI's macOS platform: key metadata and redrawing a window shown again.
+[gpui-pre-macos]
+version = "0.3.10"
+sha256 = "7e07a5e5c84f0b2160c194a1c852cc89d1942db66867938ceabcd7f763cb4386"
+
+# GPUI's Windows platform: key metadata and the hooks for remote windows.
+[gpui-pre-windows]
+version = "0.3.10"
+sha256 = "80670f987b920fba019917b2e222ecf2b377f2a6d77872010c7d284c235837b3"
+
+# GPUI's Linux platform: key metadata.
+[gpui-pre-linux]
+version = "0.3.10"
+sha256 = "7c6ffd2dce7b75cce0bb3382994912f84c2a05389a4a236bb8bd72cb098fc083"
+
+# GPUI's web platform: key metadata.
+[gpui-pre-web]
+version = "0.3.10"
+sha256 = "1acd86af2347f0dd8b63c441a5dbd43b3fcd7dac69b340827c3497da5a13d6fb"
+
+# GPUI Kit's base: key event fields and exact text selection.
+[gpui-base]
+version = "0.8.1"
+sha256 = "d862bc8f2e27710039013d075ac4995892e9687ff207fa530f880cbcd513936f"
+
+# GPUI Kit's components: dialogs, menus, pickers, sizing, text and search.
+[gpui-component]
+version = "0.8.1"
+sha256 = "46ce53430332e30f303364eaabfa10ed2aa23dfaf2a147e04370e0e9c423578b"
+
+# GPUI Kit's facade crate: key event fields in its test helpers, pickers and
+# search.
+[gpui-kit]
+version = "0.8.1"
+sha256 = "25210f6e59ea9ffac3a033dbce9edafe5ff0dd2900f894fd1316f54da2fe2b89"

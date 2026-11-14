@@ -160,7 +160,7 @@ impl State {
             worker.into(),
             Grant {
                 worker: worker.into(),
-                producer: service == "integration",
+                producer: service == newport_protocol::runtime::service::INTEGRATION,
                 token: token.clone(),
                 cancelled: Arc::new(AtomicBool::new(false)),
                 connections: Default::default(),

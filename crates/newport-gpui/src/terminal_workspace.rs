@@ -13,7 +13,7 @@ use newport_domain::terminal::MAX_TERMINALS;
 pub(crate) struct RestoredTabs(pub std::collections::HashMap<String, SavedTerminals>);
 impl Global for RestoredTabs {}
 
-/// Where server workspaces save their tabs.
+/// Where server workspaces and project editors save their tabs.
 pub(crate) struct TabsSaver(pub crate::ui_state::Writer);
 impl Global for TabsSaver {}
 
@@ -55,7 +55,7 @@ struct TerminalTab {
 struct HeldClose {
     id: usize,
     terminal: uuid::Uuid,
-    connection: Value,
+    connection: Option<configuration::ConnectionScope>,
     keyboard: bool,
 }
 
@@ -71,13 +71,23 @@ pub struct Workspace {
     project_root: Option<String>,
     immersive: bool,
     server: String,
-    connection: Value,
+    connection: Option<configuration::ConnectionScope>,
     tabs: Vec<TerminalTab>,
     active: usize,
     next: usize,
     rename: Option<Rename>,
     context_tab: Option<usize>,
+    /// The tab being dragged to a new place, while a drag is active.
+    dragging: Option<usize>,
+    /// Where the pointer is across the tab strip while a tab is dragged.
+    drag_pointer: Option<(Pixels, Bounds<Pixels>)>,
+    /// Scrolls the tab strip while a dragged tab is held near its edge.
+    _drag_scroll: Option<Task<()>>,
     tab_scroll: ScrollHandle,
+    /// The width the tab row leaves free after the last tab, as last drawn.
+    /// The strip is only as wide as its tabs, so it can't say how wide a tab
+    /// may grow: the strip and this space together can.
+    tab_spare: std::rc::Rc<std::cell::Cell<Pixels>>,
     revealed_tab: Option<(usize, Pixels, Pixels, Pixels)>,
     /// A server's own workspace, whose tabs' shells outlive Newport and are
     /// restored when it opens again. A project's terminals are its own.
@@ -87,6 +97,10 @@ pub struct Workspace {
     /// Waiting for the server's first list, which decides the tabs, with
     /// the shell this Mac had selected there.
     pending: Option<Option<uuid::Uuid>>,
+    /// The order this Mac last left the server's shells in, for the first list.
+    restored_order: Vec<uuid::Uuid>,
+    /// The agents' finishes this Mac had seen, by terminal, for the first list.
+    restored_seen: std::collections::BTreeMap<uuid::Uuid, String>,
     /// Shells this Mac ended, until they leave the server's list: they must
     /// not come back as tabs meanwhile.
     ended: Vec<uuid::Uuid>,
@@ -170,7 +184,12 @@ impl Workspace {
             cx.notify();
         }
     }
-    pub fn sync_connection(&mut self, connection: Value, endpoint: String, cx: &mut Context<Self>) {
+    pub fn sync_connection(
+        &mut self,
+        connection: Option<configuration::ConnectionScope>,
+        endpoint: String,
+        cx: &mut Context<Self>,
+    ) {
         self.endpoint = endpoint;
         if self.connection == connection {
             return;
@@ -183,6 +202,36 @@ impl Workspace {
     }
     pub(super) fn menu_state(&self, cx: &App) -> Option<(usize, bool, bool, bool)> {
         self.tab_menu_state(self.tabs.get(self.active)?.id, cx)
+    }
+    /// Whether tab `id` can move left and right.
+    pub(super) fn tab_moves(&self, id: usize) -> (bool, bool) {
+        let index = self.tabs.iter().position(|tab| tab.id == id);
+        (
+            index.is_some_and(|index| index > 0),
+            index.is_some_and(|index| index + 1 < self.tabs.len()),
+        )
+    }
+    /// Moves tab `id` one place, unless it is already at that end.
+    pub(super) fn move_tab_by_one(&mut self, id: usize, forward: bool, cx: &mut Context<Self>) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        if let Some(to) = if forward {
+            index.checked_add(1)
+        } else {
+            index.checked_sub(1)
+        } {
+            self.move_tab(id, to, cx);
+        }
+    }
+    /// Moves the selected tab one place.
+    pub(super) fn move_active_tab(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.rename.is_some() {
+            return;
+        }
+        if let Some(id) = self.tabs.get(self.active).map(|tab| tab.id) {
+            self.move_tab_by_one(id, forward, cx);
+        }
     }
     pub(super) fn tab_menu_state(&self, id: usize, cx: &App) -> Option<(usize, bool, bool, bool)> {
         if self.rename.is_some() {
@@ -351,7 +400,7 @@ impl Workspace {
     }
     pub fn new(
         server: String,
-        connection: Value,
+        connection: Option<configuration::ConnectionScope>,
         endpoint: String,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -374,12 +423,14 @@ impl Workspace {
         let Ok(server) = uuid::Uuid::parse_str(&self.server) else {
             return false;
         };
-        let selected = cx
+        let saved = cx
             .has_global::<RestoredTabs>()
             .then(|| cx.global_mut::<RestoredTabs>().0.remove(&self.server))
             .flatten()
-            .and_then(|saved| saved.selected);
-        self.pending = Some(selected);
+            .unwrap_or_default();
+        self.pending = Some(saved.selected);
+        self.restored_order = saved.order;
+        self.restored_seen = saved.seen;
         self._list = Some(cx.spawn(async move |this, cx| {
             loop {
                 let listed = cx.background_spawn(async move { source(server) }).await;
@@ -426,9 +477,19 @@ impl Workspace {
             }
             return;
         };
-        // Every Mac shows the server's shells in the order they started.
+        // The server's shells open in the order this Mac left them, and
+        // shells it hasn't shown follow in the order they started.
         shells.sort_by_key(|shell| (shell.started, shell.terminal));
         let first = self.pending.take();
+        if first.is_some() {
+            let order = std::mem::take(&mut self.restored_order);
+            shells.sort_by_key(|shell| {
+                order
+                    .iter()
+                    .position(|terminal| *terminal == shell.terminal)
+                    .unwrap_or(usize::MAX)
+            });
+        }
         self.send_names(cx);
         self.ended
             .retain(|ended| shells.iter().any(|shell| shell.terminal == *ended));
@@ -464,6 +525,11 @@ impl Workspace {
                 // selection, and attaches when it is first shown.
                 let (empty, active) = (self.tabs.is_empty(), self.active);
                 self.add_held(shell.terminal, cx);
+                if let Some(report) = self.restored_seen.remove(&shell.terminal) {
+                    self.tabs[self.active]
+                        .view
+                        .update(cx, |view, _| view.remember_seen(report));
+                }
                 if !empty {
                     self.active = active;
                 }
@@ -471,6 +537,8 @@ impl Workspace {
             }
         }
         if let Some(selected) = first {
+            // Finishes seen on shells that are gone are forgotten.
+            self.restored_seen.clear();
             if self.tabs.is_empty() {
                 self.add(cx);
             } else if count == 0 {
@@ -493,9 +561,10 @@ impl Workspace {
                 continue;
             };
             // A tab attaches only when first shown; until then the list has its title.
-            changed |= tab
-                .view
-                .update(cx, |view, _| view.show_listed_title(shell.title.as_deref()));
+            changed |= tab.view.update(cx, |view, _| {
+                let title = view.show_listed_title(shell.title.as_deref());
+                view.show_listed_agent(shell.agent.as_deref()) || title
+            });
             let name = shell.name.as_deref().and_then(custom_name);
             let settled = tab.unsent_name.is_none()
                 && (name == tab.custom
@@ -524,14 +593,122 @@ impl Workspace {
         }
     }
 
-    /// The server's held shell this Mac has selected.
+    /// The server's held shell this Mac has selected, and the order of its tabs.
     fn saved_tabs(&self, cx: &App) -> SavedTerminals {
         SavedTerminals {
             selected: self
                 .tabs
                 .get(self.active)
                 .and_then(|tab| tab.view.read(cx).held()),
+            order: self
+                .tabs
+                .iter()
+                .filter_map(|tab| tab.view.read(cx).held())
+                .collect(),
+            seen: self
+                .tabs
+                .iter()
+                .filter_map(|tab| {
+                    let view = tab.view.read(cx);
+                    Some((view.held()?, view.seen_finish()?))
+                })
+                .collect(),
         }
+    }
+
+    /// Starts dragging tab `id`, which selects it as a press on it would.
+    fn start_drag(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_rename(true, false, window, cx);
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        self.dragging = Some(id);
+        self.active = index;
+        self.tabs[index]
+            .view
+            .read(cx)
+            .focus
+            .clone()
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    /// Follows the pointer across the tab strip, at `strip`, while a tab is
+    /// dragged: the tab takes the place under it, and the strip scrolls while
+    /// the pointer is held near either edge.
+    fn drag_over_strip(&mut self, pointer: Pixels, strip: Bounds<Pixels>, cx: &mut Context<Self>) {
+        self.drag_pointer = Some((pointer, strip));
+        self.reorder_dragged(cx);
+        if self._drag_scroll.is_none()
+            && crate::project_workspace::drag_scroll_step(pointer, strip) != px(0.)
+        {
+            self._drag_scroll = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(16))
+                        .await;
+                    let scrolling = this.update(cx, |this, cx| this.drag_scroll(cx));
+                    if !matches!(scrolling, Ok(true)) {
+                        break;
+                    }
+                }
+            }));
+        }
+    }
+
+    /// One step of scrolling the strip under a dragged tab. False once the
+    /// drag ends or the pointer leaves the edges.
+    fn drag_scroll(&mut self, cx: &mut Context<Self>) -> bool {
+        let step = self
+            .drag_pointer
+            .filter(|_| self.dragging.is_some() && cx.has_active_drag())
+            .map(|(pointer, strip)| crate::project_workspace::drag_scroll_step(pointer, strip))
+            .unwrap_or(px(0.));
+        if step == px(0.) {
+            self._drag_scroll = None;
+            return false;
+        }
+        if crate::project_workspace::scroll_strip(&self.tab_scroll, step) {
+            self.reorder_dragged(cx);
+            cx.notify();
+        }
+        true
+    }
+
+    /// Moves the dragged tab to the place under the pointer.
+    fn reorder_dragged(&mut self, cx: &mut Context<Self>) {
+        let (Some(id), Some((pointer, _))) = (self.dragging, self.drag_pointer) else {
+            return;
+        };
+        let Some(from) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        let middles = crate::project_workspace::tab_middles(&self.tab_scroll, 0, self.tabs.len());
+        if let Some(to) = crate::project_workspace::dragged_tab_target(from, &middles, pointer) {
+            self.move_tab(id, to, cx);
+        }
+    }
+
+    /// Moves tab `id` to `index`, keeping the selection on the same tab.
+    fn move_tab(&mut self, id: usize, index: usize, cx: &mut Context<Self>) {
+        let Some(from) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        if from == index || index >= self.tabs.len() {
+            return;
+        }
+        let selected = self.tabs.get(self.active).map(|tab| tab.id);
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(index, tab);
+        if let Some(selected) = selected {
+            self.active = self
+                .tabs
+                .iter()
+                .position(|tab| tab.id == selected)
+                .unwrap_or(self.active);
+        }
+        self.save(cx);
+        cx.notify();
     }
 
     /// Writes this server's tabs when they changed.
@@ -550,7 +727,7 @@ impl Workspace {
 
     pub(super) fn for_project(
         server: String,
-        connection: Value,
+        connection: Option<configuration::ConnectionScope>,
         root: String,
         cx: &mut Context<Self>,
     ) -> Result<Self, String> {
@@ -564,7 +741,7 @@ impl Workspace {
     /// A first handover is the initial tab, not an extra tab beside a blank shell.
     pub(super) fn with_command(
         server: String,
-        connection: Value,
+        connection: Option<configuration::ConnectionScope>,
         endpoint: String,
         draft: CommandDraft,
         cx: &mut Context<Self>,
@@ -577,7 +754,7 @@ impl Workspace {
 
     pub(super) fn with_shell(
         server: String,
-        connection: Value,
+        connection: Option<configuration::ConnectionScope>,
         endpoint: String,
         draft: CommandDraft,
         title: String,
@@ -626,12 +803,17 @@ impl Workspace {
         view: Entity<TerminalView>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut workspace = Self::empty(server, Value::Null, "fixture@invalid".into(), cx);
+        let mut workspace = Self::empty(server, None, "fixture@invalid".into(), cx);
         workspace.push(view, cx);
         workspace
     }
 
-    fn empty(server: String, connection: Value, endpoint: String, cx: &mut Context<Self>) -> Self {
+    fn empty(
+        server: String,
+        connection: Option<configuration::ConnectionScope>,
+        endpoint: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
         crate::connectivity::observe(cx, |this: &Self| &this.server, |_, cx| cx.notify()).detach();
         Self {
             endpoint,
@@ -644,11 +826,17 @@ impl Workspace {
             next: 0,
             rename: None,
             context_tab: None,
+            dragging: None,
+            drag_pointer: None,
+            _drag_scroll: None,
             tab_scroll: ScrollHandle::new(),
+            tab_spare: Default::default(),
             revealed_tab: None,
             holdable: false,
             saved: None,
             pending: None,
+            restored_order: Vec::new(),
+            restored_seen: Default::default(),
             ended: Vec::new(),
             closing: Vec::new(),
             _list: None,
@@ -1073,6 +1261,35 @@ fn session_tab(id: usize, active: bool, cx: &App) -> crate::project_workspace::D
     )
 }
 
+/// The mark before a tab's title while an agent in it works, waits for the
+/// person, has finished unseen or stopped with an error.
+fn agent_mark(id: usize, mark: crate::terminal_agent::AgentMark, cx: &App) -> AnyElement {
+    use crate::terminal_agent::AgentMark;
+    let dark = cx.theme().is_dark();
+    let mark_element = match mark {
+        AgentMark::Working => gpui_kit::component::spinner::Spinner::new()
+            .with_size(px(crate::ui::DOT_SIZE + 2.))
+            .color(cx.theme().muted_foreground)
+            .into_any_element(),
+        AgentMark::NeedsYou => {
+            crate::controls::status_dot(Some(crate::theme::warning(dark)), cx).into_any_element()
+        }
+        AgentMark::Done => {
+            crate::controls::status_dot(Some(crate::theme::success(dark)), cx).into_any_element()
+        }
+        AgentMark::Failed => {
+            crate::controls::status_dot(Some(crate::theme::error(dark)), cx).into_any_element()
+        }
+    };
+    div()
+        .debug_selector(move || format!("terminal-tab-{id}-agent-{mark:?}"))
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .child(mark_element)
+        .into_any_element()
+}
+
 /// What Close warns about, if anything: a running command, and other Macs
 /// the shell is open on, where it ends too.
 fn close_warning(running: bool, elsewhere: &[String]) -> Option<String> {
@@ -1136,6 +1353,10 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.close_exited_tabs(window, cx);
         self.save(cx);
+        if !cx.has_active_drag() {
+            self.dragging = None;
+            self.drag_pointer = None;
+        }
         for (index, tab) in self.tabs.iter().enumerate() {
             if index != self.active {
                 tab.view.update(cx, |view, cx| view.deactivate(window, cx));
@@ -1143,7 +1364,7 @@ impl Render for Workspace {
         }
         let current = self.tabs.get(self.active).map(|tab| tab.view.clone());
         let state = current.as_ref().map(|view| view.read(cx).status.clone());
-        let transport_wait = crate::connectivity::for_scope(&self.connection, cx)
+        let transport_wait = crate::connectivity::for_scope(self.connection.as_ref(), cx)
             .filter(|connection| connection.phase != crate::connectivity::Phase::Connected)
             .filter(|_| {
                 state
@@ -1168,7 +1389,9 @@ impl Render for Workspace {
             .and_then(|view| view.read(cx).not_held.clone())
             .filter(|_| error.is_none());
         let reveal = cx.entity().downgrade();
-        let tab_width = self.tab_scroll.bounds().size.width;
+        // The most a tab may take: the strip and the row's free space after it.
+        let tab_width = self.tab_scroll.bounds().size.width + self.tab_spare.get();
+        let tab_spare = self.tab_spare.clone();
         let menu_view = cx.entity().downgrade();
         // Only windowed immersive mode shares this row with the native Mac
         // window controls. Fullscreen hides those controls.
@@ -1200,6 +1423,13 @@ impl Render for Workspace {
                     .h_full()
                     .overflow_x_scroll()
                     .track_scroll(&self.tab_scroll)
+                    .on_drag_move(cx.listener(
+                        |this, event: &DragMoveEvent<crate::project_workspace::DraggedTab<usize>>, _, cx| {
+                            if event.drag(cx).strip == cx.entity_id() {
+                                this.drag_over_strip(event.event.position.x, event.bounds, cx);
+                            }
+                        },
+                    ))
                     .children(self.tabs.iter().enumerate().map(|(index, tab)| {
                         let id = tab.id;
                         let number = tab.number;
@@ -1248,7 +1478,16 @@ impl Render for Workspace {
                             .is_some_and(|terminal| self.closing.contains(&terminal));
                         let elsewhere = list_names(&tab.elsewhere)
                             .map(|macs| format!("Also open on {macs}"));
-                        let hint = startup_exit.clone().or(elsewhere).or_else(|| {
+                        let agent = tab.view.read(cx).agent();
+                        let hint = startup_exit.clone().or_else(|| {
+                            let hints: Vec<_> = agent
+                                .as_ref()
+                                .map(|agent| agent.hint.clone())
+                                .into_iter()
+                                .chain(elsewhere)
+                                .collect();
+                            (!hints.is_empty()).then(|| hints.join("\n"))
+                        }).or_else(|| {
                             (tab.custom.is_none() && title != remote_title && remote_title.contains('@') && remote_title.contains(':'))
                                 .then(|| remote_title.clone())
                         });
@@ -1258,9 +1497,10 @@ impl Render for Workspace {
                             // needs its own leading edge.
                             .when(index == 0 && inset, |tab| tab.border_l_1())
                             .set_position(index + 1, self.tabs.len())
-                            .accessibility_label(match &startup_exit {
-                                Some(exit) => format!("{title}, {exit}"),
-                                None => title.clone(),
+                            .accessibility_label(match (&startup_exit, &agent) {
+                                (Some(exit), _) => format!("{title}, {exit}"),
+                                (None, Some(agent)) => format!("{title}, {}", agent.mark.label()),
+                                (None, None) => title.clone(),
                             })
                             .when_some(hint, |tab, hint| tab.hover_hint(hint))
                             .debug_selector(move || format!("terminal-tab-{id}"))
@@ -1272,6 +1512,22 @@ impl Render for Workspace {
                                 }),
                             )
                             .focus_handle(tab.focus.clone().tab_stop(index == self.active))
+                            .on_drag(
+                                crate::project_workspace::DraggedTab {
+                                    strip: cx.entity_id(),
+                                    id,
+                                    title: title.clone().into(),
+                                    icon: Some(IconName::Terminal),
+                                },
+                                {
+                                    let owner = cx.entity().downgrade();
+                                    move |tab, _, window, cx| {
+                                        let _ = owner.update(cx, |this, cx| this.start_drag(tab.id, window, cx));
+                                        cx.new(|_| crate::project_workspace::DraggedTabView::new(tab, window))
+                                    }
+                                },
+                            )
+                            .when(self.dragging == Some(id), |tab| tab.opacity(0.4))
                             .on_key_down(cx.listener(
                                 move |this, event: &KeyDownEvent, window, cx| {
                                     this.tab_key(id, event, window, cx)
@@ -1309,6 +1565,9 @@ impl Render for Workspace {
                                     }
                                 },
                             ))
+                            .when_some(agent.map(|agent| agent.mark), |tab, mark| {
+                                tab.child(agent_mark(id, mark, cx))
+                            })
                             .child(crate::project_workspace::document_tab_title(title.clone()))
                             .when_some(startup_exit, |tab, exit| {
                                 tab.child(
@@ -1379,6 +1638,17 @@ impl Render for Workspace {
                     .debug_selector(|| "terminal-drag-region".into())
                     .flex_1()
                     .h_full()
+                    .child(
+                        canvas(
+                            move |bounds, window, _| {
+                                if tab_spare.replace(bounds.size.width) != bounds.size.width {
+                                    window.request_animation_frame();
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .size_full(),
+                    )
                     .when(self.immersive, |spacer| {
                         spacer.window_control_area(WindowControlArea::Drag)
                     }),
@@ -1452,6 +1722,20 @@ impl Render for Workspace {
             .min_h_0()
             .flex()
             .flex_col()
+            .on_action(
+                cx.listener(|this, _: &crate::project_editor::MoveTabLeft, window, cx| {
+                    if !window.has_active_dialog(cx) {
+                        this.move_active_tab(false, cx);
+                    }
+                }),
+            )
+            .on_action(cx.listener(
+                |this, _: &crate::project_editor::MoveTabRight, window, cx| {
+                    if !window.has_active_dialog(cx) {
+                        this.move_active_tab(true, cx);
+                    }
+                },
+            ))
             .child(tab_row)
             .when_some(error, |root, error| {
                 root.child(
@@ -1556,6 +1840,7 @@ mod tests {
             terminal,
             name: name.map(str::to_owned),
             title: None,
+            agent: None,
             creator: mac("studio", "Studio"),
             attached: attached
                 .iter()
@@ -1587,7 +1872,12 @@ mod tests {
         cx.update(|cx| {
             let (live, gone) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
             let workspace = cx.new(|cx| {
-                let mut workspace = Workspace::new("server".into(), json!({}), "e".into(), cx);
+                let mut workspace = Workspace::new(
+                    "server".into(),
+                    Some(crate::snapshot_fixture::scope("fixture")),
+                    "e".into(),
+                    cx,
+                );
                 workspace.tabs[0]
                     .view
                     .update(cx, |view, _| view.attach_to(live));
@@ -1621,7 +1911,12 @@ mod tests {
     /// with the shell this Mac last had selected there.
     fn opening(selected: Option<uuid::Uuid>, cx: &mut App) -> Entity<Workspace> {
         cx.new(|cx| {
-            let mut workspace = Workspace::empty("server".into(), json!({}), "e".into(), cx);
+            let mut workspace = Workspace::empty(
+                "server".into(),
+                Some(crate::snapshot_fixture::scope("fixture")),
+                "e".into(),
+                cx,
+            );
             workspace.holdable = true;
             workspace.pending = Some(selected);
             workspace
@@ -1673,6 +1968,145 @@ mod tests {
     }
 
     #[gpui::test]
+    fn restored_tabs_show_their_agents_status_until_their_shell_replays_its_own(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::terminal_agent::AgentMark;
+        use newport_gpui::terminal_transport::Event;
+        init(cx);
+        cx.update(|cx| {
+            let (older, newer) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+            let reporting = |terminal, started, agent: Option<&str>| {
+                let mut shell = shell(terminal, None, &[]);
+                shell.started = started;
+                shell.agent = agent.map(str::to_owned);
+                shell
+            };
+            let workspace = opening(Some(newer), cx);
+            workspace.update(cx, |workspace, cx| {
+                let mark = |workspace: &Workspace, cx: &App| {
+                    workspace.tabs[0]
+                        .view
+                        .read(cx)
+                        .agent()
+                        .map(|agent| agent.mark)
+                };
+                workspace.reconcile(
+                    listed(vec![
+                        reporting(older, 1, Some("state=done:app=claude-code")),
+                        reporting(newer, 2, None),
+                    ]),
+                    cx,
+                );
+                assert_eq!(workspace.tabs[0].view.read(cx).session_id(), None);
+                assert_eq!(mark(workspace, cx), Some(AgentMark::Done));
+
+                workspace.reconcile(
+                    listed(vec![
+                        reporting(older, 1, Some("state=bogus")),
+                        reporting(newer, 2, None),
+                    ]),
+                    cx,
+                );
+                assert_eq!(
+                    mark(workspace, cx),
+                    None,
+                    "an unreadable report shows nothing"
+                );
+
+                workspace.reconcile(
+                    listed(vec![
+                        reporting(older, 1, Some("state=blocked:kind=permission")),
+                        reporting(newer, 2, None),
+                    ]),
+                    cx,
+                );
+                assert_eq!(mark(workspace, cx), Some(AgentMark::NeedsYou));
+
+                // The shell's own replay, which reports nothing now, wins.
+                workspace.tabs[0].view.update(cx, |view, _| {
+                    view.receive_for_test(Event::Restore {
+                        state: b"$ ".to_vec(),
+                        prompted: true,
+                    })
+                });
+                assert_eq!(mark(workspace, cx), None);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_finish_seen_before_quitting_shows_as_seen_after_a_restart(cx: &mut TestAppContext) {
+        use crate::terminal_agent::AgentMark;
+        init(cx);
+        cx.update(|cx| {
+            let (seen, unseen, rerun) = (
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4(),
+            );
+            let done = "state=done:app=claude-code";
+            let finished = |terminal, started, agent: &str| {
+                let mut shell = shell(terminal, None, &[]);
+                shell.started = started;
+                shell.agent = Some(agent.to_owned());
+                shell
+            };
+            let shells = || {
+                listed(vec![
+                    finished(seen, 1, done),
+                    finished(unseen, 2, done),
+                    finished(rerun, 3, "state=done:app=claude-code:msg=QWdhaW4="),
+                ])
+            };
+            let marks = |workspace: &Entity<Workspace>, cx: &App| -> Vec<_> {
+                workspace
+                    .read(cx)
+                    .tabs
+                    .iter()
+                    .map(|tab| tab.view.read(cx).agent().map(|agent| agent.mark))
+                    .collect()
+            };
+            // Before quitting, this Mac looked at the first and third tabs.
+            let workspace = opening(None, cx);
+            workspace.update(cx, |workspace, cx| {
+                workspace.reconcile(
+                    listed(vec![
+                        finished(seen, 1, done),
+                        finished(unseen, 2, done),
+                        finished(rerun, 3, done),
+                    ]),
+                    cx,
+                );
+                for index in [0, 2] {
+                    workspace.tabs[index].view.update(cx, |view, cx| {
+                        view.see_for_test();
+                        cx.notify();
+                    });
+                }
+            });
+            let saved = workspace.read(cx).saved_tabs(cx);
+            assert_eq!(
+                saved.seen,
+                [(seen, done.to_owned()), (rerun, done.to_owned())].into()
+            );
+
+            // After a restart, the first is still seen; the third's agent
+            // has finished again since.
+            let workspace = opening(None, cx);
+            workspace.update(cx, |workspace, cx| {
+                workspace.restored_seen = saved.seen.clone();
+                workspace.reconcile(shells(), cx);
+            });
+            assert_eq!(
+                marks(&workspace, cx),
+                [None, Some(AgentMark::Done), Some(AgentMark::Done)]
+            );
+            assert!(workspace.read(cx).restored_seen.is_empty(), "taken once");
+        });
+    }
+
+    #[gpui::test]
     fn a_server_opens_on_its_own_shells_in_start_order(cx: &mut TestAppContext) {
         init(cx);
         cx.update(|cx| {
@@ -1702,7 +2136,7 @@ mod tests {
                     .collect()
             };
 
-            // Every Mac lists them by when they started, and none is new.
+            // Without an order of this Mac's own, by when they started, and none is new.
             let workspace = opening(Some(newer), cx);
             assert!(workspace.read(cx).tabs.is_empty(), "it waits for the list");
             workspace.update(cx, |workspace, cx| workspace.reconcile(shells(), cx));
@@ -1750,11 +2184,260 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_server_opens_on_its_shells_in_the_order_this_mac_left_them(cx: &mut TestAppContext) {
+        init(cx);
+        cx.update(|cx| {
+            let terminals: Vec<_> = (0..4).map(|_| uuid::Uuid::new_v4()).collect();
+            let shells = || {
+                listed(
+                    terminals
+                        .iter()
+                        .zip(1..)
+                        .map(|(terminal, at)| {
+                            let mut shell = shell(*terminal, None, &[]);
+                            shell.started = at;
+                            shell
+                        })
+                        .collect(),
+                )
+            };
+            let held = |workspace: &Entity<Workspace>, cx: &App| -> Vec<_> {
+                let workspace = workspace.read(cx);
+                workspace
+                    .tabs
+                    .iter()
+                    .filter_map(|tab| tab.view.read(cx).held())
+                    .collect()
+            };
+            let workspace = opening(Some(terminals[1]), cx);
+            workspace.update(cx, |workspace, cx| {
+                workspace.reconcile(shells(), cx);
+                // The selected second tab is dragged to the end.
+                let (dragged, last) = (workspace.tabs[1].id, workspace.tabs.len() - 1);
+                workspace.move_tab(dragged, last, cx);
+                assert_eq!(
+                    workspace.tabs[workspace.active].id, dragged,
+                    "still selected"
+                );
+                // Later lists keep it there.
+                workspace.reconcile(shells(), cx);
+            });
+            let order = vec![terminals[0], terminals[2], terminals[3], terminals[1]];
+            assert_eq!(held(&workspace, cx), order);
+            let saved = workspace.read(cx).saved_tabs(cx);
+            assert_eq!(saved.order, order);
+
+            // The next launch opens them in that order; a shell this Mac
+            // hasn't shown, and one that has gone, don't disturb it.
+            let gone = order[0];
+            let newer = uuid::Uuid::new_v4();
+            let workspace = opening(saved.selected, cx);
+            workspace.update(cx, |workspace, cx| {
+                workspace.restored_order = saved.order.clone();
+                let mut list = shells();
+                let shells = list.shells.as_mut().unwrap();
+                shells.retain(|shell| shell.terminal != gone);
+                let mut new = shell(newer, None, &[]);
+                new.started = 0;
+                shells.push(new);
+                workspace.reconcile(list, cx);
+            });
+            assert_eq!(
+                held(&workspace, cx),
+                [terminals[2], terminals[3], terminals[1], newer]
+            );
+            assert_eq!(workspace.read(cx).active, 2, "what this Mac had selected");
+        });
+    }
+
+    #[test]
+    fn a_dragged_tab_takes_a_tabs_place_once_past_its_middle() {
+        use crate::project_workspace::dragged_tab_target as target;
+        // Tabs 100 wide, the last not laid out.
+        let middles = [Some(px(50.)), Some(px(150.)), Some(px(250.)), None];
+        // Dragged rightward, past one middle or two.
+        assert_eq!(target(0, &middles, px(149.)), None);
+        assert_eq!(target(0, &middles, px(151.)), Some(1));
+        assert_eq!(target(0, &middles, px(251.)), Some(2));
+        // Dragged leftward.
+        assert_eq!(target(2, &middles, px(151.)), None);
+        assert_eq!(target(2, &middles, px(149.)), Some(1));
+        assert_eq!(target(2, &middles, px(10.)), Some(0));
+        // Over its own place, or toward a tab not laid out, it stays.
+        assert_eq!(target(1, &middles, px(120.)), None);
+        assert_eq!(target(2, &middles, px(400.)), None);
+    }
+
+    #[test]
+    fn a_tab_strip_scrolls_only_while_a_dragged_tab_is_near_its_edges() {
+        use crate::project_workspace::drag_scroll_step as step;
+        let strip = gpui::Bounds::new(gpui::point(px(100.), px(0.)), size(px(400.), px(36.)));
+        assert_eq!(step(px(300.), strip), px(0.));
+        assert!(step(px(110.), strip) > px(0.), "toward the start");
+        assert!(step(px(490.), strip) < px(0.), "toward the end");
+        assert!(
+            step(px(101.), strip) > step(px(125.), strip),
+            "faster nearer the edge"
+        );
+        assert_eq!(
+            step(px(20.), strip),
+            step(px(100.), strip),
+            "no faster beyond it"
+        );
+    }
+
+    #[gpui::test]
+    fn dragging_a_tab_selects_it_and_moves_it_along_the_row(cx: &mut TestAppContext) {
+        let (workspace, cx) = visual_fixture(cx);
+        let ids = |cx: &mut VisualTestContext| -> Vec<usize> {
+            workspace.read_with(cx, |workspace, _| {
+                workspace.tabs.iter().map(|tab| tab.id).collect()
+            })
+        };
+        assert_eq!(ids(cx), [0, 1, 2]);
+        let start = cx.debug_bounds("terminal-tab-0").unwrap().center();
+        let last = cx.debug_bounds("terminal-tab-2").unwrap();
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(px(6.), px(0.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        draw(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.dragging, Some(0));
+            assert_eq!(
+                workspace.tabs[workspace.active].id, 0,
+                "the dragged tab is selected"
+            );
+        });
+        // Well below the row, only the pointer's horizontal place counts.
+        let end = gpui::point(last.right() - px(4.), last.bottom() + px(80.));
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+        draw(cx);
+        cx.simulate_mouse_move(
+            end + gpui::point(px(1.), px(0.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        draw(cx);
+        assert_eq!(ids(cx), [1, 2, 0]);
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        draw(cx);
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.dragging, None);
+            assert!(workspace.rename.is_none(), "a drag is not a click");
+            assert_eq!(workspace.tabs[workspace.active].id, 0);
+        });
+        assert_eq!(ids(cx), [1, 2, 0]);
+    }
+
+    #[gpui::test]
+    fn the_selected_tab_moves_one_place_from_the_menus(cx: &mut TestAppContext) {
+        let (workspace, cx) = visual_fixture(cx);
+        let ids = |cx: &mut VisualTestContext| -> Vec<usize> {
+            workspace.read_with(cx, |workspace, _| {
+                workspace.tabs.iter().map(|tab| tab.id).collect()
+            })
+        };
+        let dispatch = |cx: &mut VisualTestContext, action: Box<dyn gpui::Action>| {
+            cx.update(|window, cx| window.dispatch_action(action, cx));
+            draw(cx);
+        };
+        assert_eq!(
+            workspace.read_with(cx, |w, _| w.tab_moves(0)),
+            (false, true)
+        );
+        dispatch(cx, Box::new(crate::project_editor::MoveTabRight));
+        assert_eq!(ids(cx), [1, 0, 2]);
+        assert_eq!(
+            workspace.read_with(cx, |w, _| w.tabs[w.active].id),
+            0,
+            "still selected"
+        );
+        dispatch(cx, Box::new(crate::project_editor::MoveTabLeft));
+        dispatch(cx, Box::new(crate::project_editor::MoveTabLeft));
+        assert_eq!(ids(cx), [0, 1, 2], "the first tab stays first");
+        // The tab menu moves the tab it was opened on, which needn't be selected.
+        assert_eq!(
+            workspace.read_with(cx, |w, _| w.tab_moves(2)),
+            (true, false)
+        );
+        workspace.update(cx, |w, cx| w.move_tab_by_one(2, false, cx));
+        assert_eq!(ids(cx), [0, 2, 1]);
+        assert_eq!(workspace.read_with(cx, |w, _| w.tabs[w.active].id), 0);
+    }
+
+    #[gpui::test]
+    fn a_tab_held_at_the_strips_edge_scrolls_it_to_reach_tabs_out_of_view(cx: &mut TestAppContext) {
+        let (workspace, cx) = visual_fixture(cx);
+        workspace.update(cx, |w, cx| {
+            for _ in 0..7 {
+                w.add(cx);
+            }
+            w.active = 0;
+            for tab in &w.tabs {
+                tab.view.update(cx, |view, _| view.close());
+            }
+        });
+        draw(cx);
+        let strip = cx.debug_bounds("terminal-tab-bar").unwrap();
+        let visible = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, _| {
+                (0..w.tabs.len())
+                    .filter(|&index| {
+                        w.tab_scroll.bounds_for_item(index).is_some_and(|tab| {
+                            tab.right() + w.tab_scroll.offset().x <= strip.right()
+                        })
+                    })
+                    .count()
+            })
+        };
+        let shown = visible(cx);
+        assert!(shown < 10, "the tabs overflow the strip");
+        let start = cx.debug_bounds("terminal-tab-0").unwrap().center();
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(px(6.), px(0.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        draw(cx);
+        let edge = gpui::point(strip.right() - px(4.), start.y);
+        cx.simulate_mouse_move(edge, Some(MouseButton::Left), Modifiers::default());
+        for _ in 0..200 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            draw(cx);
+        }
+        workspace.read_with(cx, |w, _| {
+            assert!(w.tab_scroll.offset().x < px(0.), "the strip scrolled");
+            assert_eq!(w.tabs.last().unwrap().id, 0, "the tab reached the end");
+        });
+        cx.simulate_mouse_up(edge, MouseButton::Left, Modifiers::default());
+        draw(cx);
+        let offset = workspace.read_with(cx, |w, _| w.tab_scroll.offset().x);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        draw(cx);
+        assert_eq!(
+            workspace.read_with(cx, |w, _| w.tab_scroll.offset().x),
+            offset,
+            "scrolling stops with the drag"
+        );
+    }
+
+    #[gpui::test]
     fn only_a_held_shell_is_saved_as_the_selection(cx: &mut TestAppContext) {
         init(cx);
         cx.update(|cx| {
             let workspace = cx.new(|cx| {
-                let mut workspace = Workspace::new("server".into(), json!({}), "e".into(), cx);
+                let mut workspace = Workspace::new(
+                    "server".into(),
+                    Some(crate::snapshot_fixture::scope("fixture")),
+                    "e".into(),
+                    cx,
+                );
                 workspace.add(cx);
                 workspace.add(cx);
                 workspace
@@ -1781,7 +2464,12 @@ mod tests {
             let mine = uuid::Uuid::new_v4();
             let theirs = uuid::Uuid::new_v4();
             let workspace = cx.new(|cx| {
-                let workspace = Workspace::new("server".into(), json!({}), "e".into(), cx);
+                let workspace = Workspace::new(
+                    "server".into(),
+                    Some(crate::snapshot_fixture::scope("fixture")),
+                    "e".into(),
+                    cx,
+                );
                 workspace.tabs[0]
                     .view
                     .update(cx, |view, _| view.attach_to(mine));
@@ -1825,7 +2513,14 @@ mod tests {
     fn a_shell_closed_here_stays_closed_while_the_server_still_lists_it(cx: &mut TestAppContext) {
         init(cx);
         let cx = cx.add_empty_window();
-        let workspace = cx.new(|cx| Workspace::new("server".into(), json!({}), "e".into(), cx));
+        let workspace = cx.new(|cx| {
+            Workspace::new(
+                "server".into(),
+                Some(crate::snapshot_fixture::scope("fixture")),
+                "e".into(),
+                cx,
+            )
+        });
         let closing = uuid::Uuid::new_v4();
         cx.update(|window, cx| {
             workspace.update(cx, |workspace, cx| {
@@ -1860,7 +2555,14 @@ mod tests {
     ) {
         init(cx);
         let cx = cx.add_empty_window();
-        let workspace = cx.new(|cx| Workspace::new("server".into(), json!({}), "e".into(), cx));
+        let workspace = cx.new(|cx| {
+            Workspace::new(
+                "server".into(),
+                Some(crate::snapshot_fixture::scope("fixture")),
+                "e".into(),
+                cx,
+            )
+        });
         let first = uuid::Uuid::new_v4();
         let second = uuid::Uuid::new_v4();
         cx.update(|window, cx| {
@@ -1918,7 +2620,14 @@ mod tests {
             (None, "The terminal worker closed early."),
         ] {
             let cx = cx.add_empty_window();
-            let workspace = cx.new(|cx| Workspace::new("server".into(), json!({}), "e".into(), cx));
+            let workspace = cx.new(|cx| {
+                Workspace::new(
+                    "server".into(),
+                    Some(crate::snapshot_fixture::scope("fixture")),
+                    "e".into(),
+                    cx,
+                )
+            });
             let held = uuid::Uuid::new_v4();
             cx.update(|window, cx| {
                 workspace.update(cx, |workspace, cx| {
@@ -1960,7 +2669,12 @@ mod tests {
         cx.update(|cx| {
             let held = uuid::Uuid::new_v4();
             let workspace = cx.new(|cx| {
-                let workspace = Workspace::new("server".into(), json!({}), "e".into(), cx);
+                let workspace = Workspace::new(
+                    "server".into(),
+                    Some(crate::snapshot_fixture::scope("fixture")),
+                    "e".into(),
+                    cx,
+                );
                 workspace.tabs[0]
                     .view
                     .update(cx, |view, _| view.attach_to(held));
@@ -2004,9 +2718,22 @@ mod tests {
     fn only_a_servers_own_tabs_may_outlive_newport(cx: &mut TestAppContext) {
         init(cx);
         cx.update(|cx| {
-            let server = cx.new(|cx| Workspace::new("server".into(), json!({}), "e".into(), cx));
+            let server = cx.new(|cx| {
+                Workspace::new(
+                    "server".into(),
+                    Some(crate::snapshot_fixture::scope("fixture")),
+                    "e".into(),
+                    cx,
+                )
+            });
             let project = cx.new(|cx| {
-                Workspace::for_project("server".into(), json!({}), "/repo".into(), cx).unwrap()
+                Workspace::for_project(
+                    "server".into(),
+                    Some(crate::snapshot_fixture::scope("fixture")),
+                    "/repo".into(),
+                    cx,
+                )
+                .unwrap()
             });
             assert!(server.read(cx).holdable);
             assert!(!project.read(cx).holdable);
@@ -2022,7 +2749,7 @@ mod tests {
             let workspace = cx.new(|cx| {
                 Workspace::for_project(
                     "fixture".into(),
-                    json!(["scope"]),
+                    Some(crate::snapshot_fixture::scope("scope")),
                     "/repo/worktree".into(),
                     cx,
                 )
@@ -2049,7 +2776,7 @@ mod tests {
             let workspace = cx.new(|cx| {
                 Workspace::for_project(
                     "fixture".into(),
-                    json!(["scope"]),
+                    Some(crate::snapshot_fixture::scope("scope")),
                     "/repo/worktree".into(),
                     cx,
                 )
@@ -2083,7 +2810,7 @@ mod tests {
             let workspace = cx.new(|cx| {
                 Workspace::new(
                     "fixture".into(),
-                    json!({"scope":"fixture"}),
+                    Some(crate::snapshot_fixture::scope("fixture")),
                     "fixture@unconnected.invalid".into(),
                     cx,
                 )
@@ -2110,7 +2837,7 @@ mod tests {
             let workspace = cx.new(|cx| {
                 Workspace::with_command(
                     "fixture".into(),
-                    json!({"scope":"fixture"}),
+                    Some(crate::snapshot_fixture::scope("fixture")),
                     "fixture@unconnected.invalid".into(),
                     CommandDraft::new("sudo systemctl restart app.service".into()).unwrap(),
                     cx,
@@ -2135,7 +2862,7 @@ mod tests {
             let workspace = cx.new(|cx| {
                 Workspace::new(
                     "fixture".into(),
-                    json!({"scope":"fixture"}),
+                    Some(crate::snapshot_fixture::scope("fixture")),
                     "fixture@unconnected.invalid".into(),
                     cx,
                 )
@@ -2229,7 +2956,7 @@ mod tests {
             let workspace = cx.new(|cx| {
                 Workspace::with_shell(
                     "fixture".into(),
-                    json!({"scope":"fixture"}),
+                    Some(crate::snapshot_fixture::scope("fixture")),
                     "fixture@unconnected.invalid".into(),
                     CommandDraft::container_shell("docker exec -it -- abcdef sh".into()).unwrap(),
                     "web · Shell".into(),
@@ -2339,7 +3066,7 @@ mod tests {
             let entity = cx.new(|cx| {
                 let mut workspace = Workspace::new(
                     "no-transport-fixture".into(),
-                    json!({}),
+                    Some(crate::snapshot_fixture::scope("fixture")),
                     "fixture@invalid".into(),
                     cx,
                 );
@@ -2365,25 +3092,35 @@ mod tests {
         use crate::terminal_view::input_tests::{Peer, attached, settle, wait};
         use gpui_kit::component::combobox::ComboboxEvent;
         init(cx);
+        use crate::snapshot_fixture as fixture;
         let peers = [Peer::new(), Peer::new()];
+        let (alpha, beta) = (fixture::SERVER.to_string(), fixture::SECOND.to_string());
+        let (alpha, beta) = (alpha.as_str(), beta.as_str());
         let mut parts = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             let newport = cx.new(|cx| {
                 let mut view = crate::page_perf_tests::owner(window, cx);
-                view.snapshot = json!({"config":{"servers":[
-                    {"id":"alpha","name":"Alpha","setupComplete":true,"sshHost":"alpha","sshUser":"u"},
-                    {"id":"beta","name":"Beta","setupComplete":true,"sshHost":"beta","sshUser":"u"}
-                ],"tunnels":[]}});
-                view.server = "alpha".into();
+                let server = |id, name: &str| {
+                    let mut server = fixture::server(id, name);
+                    server.ssh_host = name.to_lowercase();
+                    server.ssh_user = "u".into();
+                    server.agent_install_approved = false;
+                    server
+                };
+                view.snapshot = Some(fixture::snapshot(vec![
+                    server(fixture::SERVER, "Alpha"),
+                    server(fixture::SECOND, "Beta"),
+                ]));
+                view.server = alpha.into();
                 view.page = crate::Page::Terminal;
                 view
             });
-            let terminals = ["alpha", "beta"].map(|server| {
-                let peer = &peers[usize::from(server == "beta")];
+            let terminals = [alpha, beta].map(|server| {
+                let peer = &peers[usize::from(server == beta)];
                 cx.new(|cx| attached(peer, server, cx))
             });
             newport.update(cx, |view, cx| {
-                for (server, terminal) in ["alpha", "beta"].into_iter().zip(&terminals) {
+                for (server, terminal) in [alpha, beta].into_iter().zip(&terminals) {
                     let workspace =
                         cx.new(|cx| Workspace::showing(server.into(), terminal.clone(), cx));
                     view.terminals.insert(server.into(), workspace);
@@ -2413,9 +3150,7 @@ mod tests {
         };
         // Someone types on each server in turn; each holder makes its tab
         // the active one.
-        for (round, (server, index)) in [("alpha", 0), ("beta", 1), ("alpha", 0)]
-            .into_iter()
-            .enumerate()
+        for (round, (server, index)) in [(alpha, 0), (beta, 1), (alpha, 0)].into_iter().enumerate()
         {
             switch(server, index, cx);
             settle(&terminals[index], cx);
@@ -2507,7 +3242,7 @@ mod tests {
         let owner = owner.unwrap();
         cx.simulate_resize(size(px(1100.), px(700.)));
         draw(cx);
-        let workspace = owner.read_with(cx, |owner, _| owner.terminals["fixture"].clone());
+        let workspace = owner.read_with(cx, |owner, _| owner.terminals[&owner.server].clone());
         let terminal = workspace.read_with(cx, |workspace, _| workspace.tabs[0].view.clone());
         let notice = format!(
             "{}. {}",
@@ -2550,7 +3285,7 @@ mod tests {
         let owner = owner.unwrap();
         cx.simulate_resize(size(px(1100.), px(700.)));
         draw(cx);
-        let workspace = owner.read_with(cx, |owner, _| owner.terminals["fixture"].clone());
+        let workspace = owner.read_with(cx, |owner, _| owner.terminals[&owner.server].clone());
         let terminal = workspace.read_with(cx, |workspace, _| workspace.tabs[0].view.clone());
         for _ in 0..2 {
             for (label, immersive) in [
@@ -2723,6 +3458,34 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_tab_grows_when_its_short_title_gets_longer(cx: &mut TestAppContext) {
+        let (workspace, cx) = visual_fixture(cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.tabs.truncate(1);
+            cx.notify();
+        });
+        cx.simulate_resize(size(px(1100.), px(400.)));
+        let title = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext, title: &str| {
+            workspace.update(cx, |workspace, cx| {
+                for tab in &workspace.tabs {
+                    tab.view.update(cx, |view, cx| {
+                        view.title = title.into();
+                        cx.notify();
+                    });
+                }
+            });
+            draw(cx);
+            cx.debug_bounds("terminal-tab-0").unwrap().size.width
+        };
+        let short = title(&workspace, cx, "~");
+        let long = title(&workspace, cx, "a title long enough to need room");
+        assert!(
+            long > short + px(100.),
+            "the tab kept its short width: {short:?} → {long:?}"
+        );
+    }
+
+    #[gpui::test]
     fn terminal_tabs_stay_inside_the_row_above_its_border(cx: &mut TestAppContext) {
         let (workspace, cx) = visual_fixture(cx);
         workspace.update(cx, |w, cx| {
@@ -2876,6 +3639,62 @@ mod tests {
             8,
             "terminal events cannot override server connectivity"
         );
+    }
+
+    #[gpui::test]
+    fn a_tab_shows_what_its_agent_reports_and_clears_done_once_looked_at(cx: &mut TestAppContext) {
+        use newport_gpui::terminal_transport::Event;
+        let (workspace, cx) = visual_fixture(cx);
+        let hidden = workspace.read_with(cx, |workspace, _| workspace.tabs[1].view.clone());
+        let id = workspace.read_with(cx, |workspace, _| workspace.tabs[1].id);
+        let report = |state: &str| {
+            Event::Data(format!("\x1b]7501;state={state}:app=claude-code\x07").into_bytes())
+        };
+        let mark = |cx: &mut VisualTestContext, mark: &str| {
+            cx.debug_bounds(Box::leak(
+                format!("terminal-tab-{id}-agent-{mark}").into_boxed_str(),
+            ))
+            .is_some()
+        };
+
+        hidden.update(cx, |view, _| {
+            view.receive_for_test(report("blocked:kind=permission"))
+        });
+        draw(cx);
+        assert!(mark(cx, "NeedsYou"), "a hidden tab shows its agent waiting");
+
+        hidden.update(cx, |view, _| view.receive_for_test(report("working")));
+        draw(cx);
+        assert!(mark(cx, "Working"));
+        assert!(!mark(cx, "NeedsYou"));
+
+        hidden.update(cx, |view, _| view.receive_for_test(report("done")));
+        draw(cx);
+        assert!(mark(cx, "Done"), "nobody has looked at it yet");
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.active = 1;
+            cx.notify();
+        });
+        draw(cx);
+        assert!(
+            !cx.update(|window, _| window.is_window_active()),
+            "the fixture's window starts in the background"
+        );
+        assert!(
+            mark(cx, "Done"),
+            "a background window isn't being looked at"
+        );
+
+        cx.update(|window, _| window.activate_window());
+        draw(cx);
+        assert!(!mark(cx, "Done"), "looking at the tab sees the finish");
+
+        hidden.update(cx, |view, _| view.receive_for_test(report("idle")));
+        draw(cx);
+        for state in ["Working", "NeedsYou", "Done", "Failed"] {
+            assert!(!mark(cx, state), "an idle agent shows nothing");
+        }
     }
 
     #[gpui::test]
@@ -3217,7 +4036,11 @@ mod tests {
         let (workspace, cx) = visual_fixture(cx);
         workspace.update(cx, |workspace, cx| {
             workspace.tabs[1].custom = Some("Background work".into());
-            workspace.sync_connection(json!({"scope":"replacement"}), "fixture@invalid".into(), cx);
+            workspace.sync_connection(
+                Some(crate::snapshot_fixture::scope("replacement")),
+                "fixture@invalid".into(),
+                cx,
+            );
             for tab in &workspace.tabs {
                 let view = tab.view.read(cx);
                 assert_eq!(view.status.label(), "Disconnected");

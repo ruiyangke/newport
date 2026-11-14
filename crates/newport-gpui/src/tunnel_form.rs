@@ -3,6 +3,7 @@ use super::*;
 use gpui_kit::base::{Toggle, ToggleGroup};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ThemeStyled as _, input::InputEvent};
+use newport_domain::model::{Direction, Tunnel};
 
 /// Always on reconnects until an error needs the person, such as a refused
 /// sign-in or a changed host key.
@@ -146,9 +147,9 @@ impl Render for DirectionSelector {
 
 struct Form {
     owner: WeakEntity<Newport>,
-    value: Value,
+    tunnel: Tunnel,
     /// Original configuration is immutable even as checkbox/project values change.
-    expected: Option<Value>,
+    expected: Option<Tunnel>,
     fields: Vec<Entity<InputState>>,
     direction: Entity<DirectionSelector>,
     projects: Vec<(String, String)>,
@@ -158,9 +159,26 @@ struct Form {
     _subscriptions: Vec<Subscription>,
 }
 impl Newport {
+    /// The forward a new editor starts from.
+    fn new_forward(server: uuid::Uuid) -> Tunnel {
+        Tunnel {
+            id: uuid::Uuid::new_v4(),
+            name: String::new(),
+            server_id: server,
+            local_port: 8000,
+            local_port_end: None,
+            remote_host: "127.0.0.1".into(),
+            remote_port: 8000,
+            remote_port_end: None,
+            auto_connect: false,
+            auto_reconnect: false,
+            direction: Direction::Local,
+            project: None,
+        }
+    }
     pub(super) fn edit_tunnel(
         &mut self,
-        value: Option<Value>,
+        value: Option<Tunnel>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -170,7 +188,7 @@ impl Newport {
 
     pub(super) fn open_tunnel_form(
         &mut self,
-        value: Option<Value>,
+        value: Option<Tunnel>,
         existing: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -178,7 +196,15 @@ impl Newport {
         if window.has_active_dialog(cx) || self.server.is_empty() {
             return;
         }
-        let value = value.unwrap_or_else(|| json!({"id":uuid::Uuid::new_v4(),"serverId":self.server,"name":"","localPort":8000,"remotePort":8000,"remoteHost":"127.0.0.1","direction":"local","autoConnect":false,"autoReconnect":false,"project":null}));
+        let value = match value {
+            Some(value) => value,
+            None => {
+                let Ok(server) = self.server.parse() else {
+                    return;
+                };
+                Self::new_forward(server)
+            }
+        };
         let mut projects: Vec<_> = self
             .connection_projects()
             .into_iter()
@@ -186,7 +212,7 @@ impl Newport {
             .map(|p| (p.key, p.name))
             .collect();
         // Keep an assigned project editable even when discovery no longer sees it.
-        if let Some(project) = value["project"].as_str().filter(|p| !p.is_empty())
+        if let Some(project) = value.project.as_deref().filter(|p| !p.is_empty())
             && !projects.iter().any(|(key, _)| key == project)
         {
             projects.push((project.to_owned(), project.to_owned()));
@@ -201,21 +227,21 @@ impl Newport {
 impl Form {
     fn new(
         owner: WeakEntity<Newport>,
-        value: Value,
+        value: Tunnel,
         existing: bool,
         projects: Vec<(String, String)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let range = |start: &str, end: &str| match value[end].as_u64() {
-            Some(end) => format!("{}-{end}", value[start]),
-            None => text(&value, start),
+        let range = |start: u16, end: Option<u16>| match end {
+            Some(end) => format!("{start}-{end}"),
+            None => start.to_string(),
         };
         let fields: Vec<_> = [
-            text(&value, "name"),
-            range("localPort", "localPortEnd"),
-            range("remotePort", "remotePortEnd"),
-            text(&value, "remoteHost"),
+            value.name.clone(),
+            range(value.local_port, value.local_port_end),
+            range(value.remote_port, value.remote_port_end),
+            value.remote_host.clone(),
         ]
         .into_iter()
         .zip([
@@ -232,7 +258,8 @@ impl Form {
             })
         })
         .collect();
-        let direction = cx.new(|cx| DirectionSelector::new(value["direction"] == "remote", cx));
+        let direction =
+            cx.new(|cx| DirectionSelector::new(value.direction == Direction::Remote, cx));
         let mut subscriptions: Vec<_> = fields
             .iter()
             .map(|input| {
@@ -246,17 +273,15 @@ impl Form {
         subscriptions.push(cx.observe(&direction, |_, _, cx| cx.notify()));
         let scroll = modal::FormScroll::new(6 + usize::from(!projects.is_empty()), window, cx);
         let expected = existing.then(|| value.clone());
-        let mut value = value;
+        let mut tunnel = value;
         // Always on is one intent. Forwards opened from a discovered port are
         // saved with reconnect on and startup off, so the startup flag decides
         // both. Keep `expected` untouched for optimistic concurrency on save.
-        let always_on = value["autoConnect"] == true;
-        value["autoConnect"] = json!(always_on);
-        value["autoReconnect"] = json!(always_on);
+        tunnel.auto_reconnect = tunnel.auto_connect;
         Self {
             owner,
             expected,
-            value,
+            tunnel,
             fields,
             direction,
             projects,
@@ -373,7 +398,7 @@ impl Form {
             .iter()
             .map(|input| input.read(cx).value().trim().to_owned())
             .collect();
-        let parsed = (|| -> Result<Value, FormError> {
+        let parsed = (|| -> Result<Tunnel, FormError> {
             let (local, local_end) = newport_domain::forwarding::parse_port_range(&values[1])
                 .map_err(|message| FormError {
                     message,
@@ -384,25 +409,25 @@ impl Form {
                     message,
                     input: Some(2),
                 })?;
-            let mut value = self.value.clone();
-            value["direction"] = json!(if self.direction.read(cx).selected == 1 {
-                "remote"
-            } else {
-                "local"
-            });
-            value["name"] = json!(values[0]);
-            value["remoteHost"] = json!(values[3]);
-            value["localPort"] = json!(local);
-            value["localPortEnd"] = json!(local_end);
-            value["remotePort"] = json!(remote);
-            value["remotePortEnd"] = json!(remote_end);
-            let tunnel: newport_domain::model::Tunnel = serde_json::from_value(value.clone())
-                .map_err(|e| FormError::general(e.to_string()))?;
+            let tunnel = Tunnel {
+                direction: if self.direction.read(cx).selected == 1 {
+                    Direction::Remote
+                } else {
+                    Direction::Local
+                },
+                name: values[0].clone(),
+                remote_host: values[3].clone(),
+                local_port: local,
+                local_port_end: local_end,
+                remote_port: remote,
+                remote_port_end: remote_end,
+                ..self.tunnel.clone()
+            };
             tunnel.pairs().map_err(FormError::general)?;
-            Ok(value)
+            Ok(tunnel)
         })();
-        let value = match parsed {
-            Ok(value) => value,
+        let tunnel = match parsed {
+            Ok(tunnel) => tunnel,
             Err(error) => {
                 self.show_error(error, window, cx);
                 return;
@@ -411,13 +436,10 @@ impl Form {
         let result = self
             .owner
             .update(cx, |owner, cx| {
-                let tunnel =
-                    serde_json::from_value(value).map_err(|e| format!("Invalid forward: {e}"))?;
                 let action = match &self.expected {
                     Some(expected) => newport_client::tunnel_operations::Action::Update {
                         tunnel,
-                        expected: serde_json::from_value(expected.clone())
-                            .map_err(|e| format!("Invalid original forward: {e}"))?,
+                        expected: expected.clone(),
                     },
                     None => newport_client::tunnel_operations::Action::Save(tunnel),
                 };
@@ -587,7 +609,7 @@ impl Form {
 impl Render for Form {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let reverse = self.direction.read(cx).selected == 1;
-        let project = self.value["project"].as_str().unwrap_or("").to_owned();
+        let project = self.tunnel.project.clone().unwrap_or_default();
         let choices = self.projects.clone();
         let project_name = self
             .projects
@@ -692,11 +714,8 @@ impl Render for Form {
                                             move |_, _, cx| {
                                                 let _ = owner.update(cx, |form, cx| {
                                                     if !form.pending {
-                                                        form.value["project"] = if key.is_empty() {
-                                                            Value::Null
-                                                        } else {
-                                                            json!(key)
-                                                        };
+                                                        form.tunnel.project = (!key.is_empty())
+                                                            .then(|| key.clone());
                                                         cx.notify();
                                                     }
                                                 });
@@ -713,7 +732,7 @@ impl Render for Form {
                 .accessibility_label("Always on")
                 .gap(px(9.))
                 .line_height(relative(1.6))
-                .checked(self.value["autoConnect"] == true)
+                .checked(self.tunnel.auto_connect)
                 .disabled(self.pending)
                 .child(
                     div().child("Always on").child(div().mt(px(3.)).child(hint(
@@ -723,8 +742,8 @@ impl Render for Form {
                 )
                 .on_click(cx.listener(|this, value: &bool, _, cx| {
                     if !this.pending {
-                        this.value["autoConnect"] = json!(value);
-                        this.value["autoReconnect"] = json!(value);
+                        this.tunnel.auto_connect = *value;
+                        this.tunnel.auto_reconnect = *value;
                         cx.notify();
                     }
                 }))))
@@ -747,7 +766,7 @@ impl Render for Form {
 
 #[cfg(test)]
 mod tests {
-    use super::{ALWAYS_ON_HINT, DirectionSelector, Form, FormError};
+    use super::{ALWAYS_ON_HINT, Direction, DirectionSelector, Form, FormError, Tunnel};
     use gpui::{
         AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
         KeyDownEvent, KeyUpEvent, Keystroke, ParentElement, Render, Styled, TestAppContext,
@@ -787,12 +806,20 @@ mod tests {
         cx.simulate_resize(gpui::size(px(500.), px(400.)));
         let form = cx.update(|window, cx| {
             window.activate_window();
-            let value = serde_json::json!({
-                "id":uuid::Uuid::new_v4(), "serverId":uuid::Uuid::new_v4(),
-                "name":"Application", "direction":"local", "localPort":8000,
-                "remotePort":8000, "remoteHost":"127.0.0.1",
-                "autoConnect":auto_connect, "autoReconnect":auto_reconnect, "project":null
-            });
+            let value = Tunnel {
+                id: uuid::Uuid::new_v4(),
+                name: "Application".into(),
+                server_id: uuid::Uuid::new_v4(),
+                local_port: 8000,
+                local_port_end: None,
+                remote_host: "127.0.0.1".into(),
+                remote_port: 8000,
+                remote_port_end: None,
+                auto_connect,
+                auto_reconnect,
+                direction: Direction::Local,
+                project: None,
+            };
             let projects = if projects {
                 vec![("/app".into(), "Application".into())]
             } else {
@@ -887,11 +914,11 @@ mod tests {
             cx.simulate_resize(gpui::size(px(1000.), px(900.)));
             draw_editor(cx);
             form.read_with(cx, |form, _| {
-                assert_eq!(form.value["autoConnect"], auto_connect);
-                assert_eq!(form.value["autoReconnect"], auto_connect);
+                assert_eq!(form.tunnel.auto_connect, auto_connect);
+                assert_eq!(form.tunnel.auto_reconnect, auto_connect);
                 let original = form.expected.as_ref().unwrap();
-                assert_eq!(original["autoConnect"], auto_connect);
-                assert_eq!(original["autoReconnect"], auto_reconnect);
+                assert_eq!(original.auto_connect, auto_connect);
+                assert_eq!(original.auto_reconnect, auto_reconnect);
             });
             let checkbox = cx.update(|window, _| {
                 let snapshots = gpui_kit::base::test_support::snapshots(window);
@@ -910,10 +937,10 @@ mod tests {
                 cx.simulate_click(checkbox, Default::default());
                 draw_editor(cx);
                 form.read_with(cx, |form, _| {
-                    assert_eq!(form.value["autoConnect"], enabled);
-                    assert_eq!(form.value["autoReconnect"], enabled);
+                    assert_eq!(form.tunnel.auto_connect, enabled);
+                    assert_eq!(form.tunnel.auto_reconnect, enabled);
                     assert_eq!(
-                        form.expected.as_ref().unwrap()["autoReconnect"],
+                        form.expected.as_ref().unwrap().auto_reconnect,
                         auto_reconnect
                     );
                 });

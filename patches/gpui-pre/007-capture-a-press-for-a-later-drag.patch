@@ -1,0 +1,149 @@
+gpui_windows: Capture a press for a later drag
+
+`Window::capture_native_drag_gesture` keeps the left-button press being
+dispatched, and `NativeDragGesture::claim` later turns it into tracking
+authority after the platform checks that the same press is still held by
+this window. A release, capture loss, deactivation, a new press or the
+window closing invalidates it. Constructed GPUI mouse events cannot
+create one.
+
+Newport needs it for Remote apps on Windows: a Linux app starts a drag
+after its press has been forwarded, and Newport then starts the outgoing
+OLE drag from that press.
+
+capture_native_drag_gesture has a default.
+
+Remove when upstream GPUI can start a native drag from an earlier press.
+
+diff --git a/src/platform.rs b/src/platform.rs
+index 6e63030..a0207b8 100644
+--- a/src/platform.rs
++++ b/src/platform.rs
+@@ -2,6 +2,8 @@ mod app_menu;
+ mod keyboard;
+ mod keystroke;
+ mod platform_info;
++#[cfg(windows)]
++mod native_drag;
+ 
+ #[cfg(all(target_os = "linux", feature = "wayland"))]
+ #[expect(missing_docs)]
+@@ -82,6 +84,8 @@ use uuid::Uuid;
+ pub use app_menu::*;
+ pub use keyboard::*;
+ pub use keystroke::*;
++#[cfg(windows)]
++pub use native_drag::{NativeDragGesture, NativeDragTracking};
+ 
+ /// Whether the platform is presenting a window's frames.
+ ///
+@@ -1326,6 +1330,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+     #[cfg(windows)]
+     fn set_native_file_drop_enabled(&self, _enabled: bool) {}
+ 
++    /// Capture one genuine Windows left-button press during its native dispatch.
++    #[cfg(windows)]
++    fn capture_native_drag_gesture(&self) -> Option<NativeDragGesture> {
++        None
++    }
++
+     fn scale_factor(&self) -> f32;
+     fn appearance(&self) -> WindowAppearance;
+     fn display(&self) -> Option<Rc<dyn PlatformDisplay>>;
+diff --git a/src/platform/native_drag.rs b/src/platform/native_drag.rs
+new file mode 100644
+index 0000000..826ad36
+--- /dev/null
++++ b/src/platform/native_drag.rs
+@@ -0,0 +1,72 @@
++//! Native Windows drag authority, separate from GPUI's rendered drag payload.
++
++/// A single-use native left-button gesture captured by its source window.
++///
++/// It remains pending while an application prepares a drag. Native release,
++/// capture loss, deactivation, a new press, or source retirement invalidates it.
++/// Constructed GPUI mouse events cannot create this authority.
++pub struct NativeDragGesture {
++    claim: Box<dyn FnOnce() -> Option<NativeDragTracking>>,
++}
++
++impl NativeDragGesture {
++    /// Claim this press after its input dispatch has returned. The platform
++    /// rechecks the live native owner, foreground, capture and held button.
++    ///
++    /// This does not start OLE, release capture, or enter a native modal loop.
++    /// The caller must enter such a loop outside GPUI App/window updates.
++    pub fn claim(self) -> Option<NativeDragTracking> {
++        (self.claim)()
++    }
++
++    /// Construct authority supplied by the native platform implementation.
++    ///
++    /// # Safety
++    /// The closure must consume a single, actual native press; reject expired
++    /// or still-dispatching presses; and recheck native ownership at claim.
++    #[doc(hidden)]
++    pub unsafe fn from_platform(
++        claim: impl FnOnce() -> Option<NativeDragTracking> + 'static,
++    ) -> Self {
++        Self { claim: Box::new(claim) }
++    }
++}
++
++/// Claimed native drag authority owned by the caller's tracking operation.
++///
++/// Capture transfer, button release and target activation are normal during
++/// OLE tracking. They do not revoke this authority; source retirement does.
++/// Remote-session cancellation and native drop-result policy remain the caller's
++/// responsibility. This handle does not keep an HWND alive or delay destruction.
++pub struct NativeDragTracking {
++    current: Box<dyn Fn() -> bool>,
++    finish: Option<Box<dyn FnOnce()>>,
++}
++
++impl NativeDragTracking {
++    /// Whether the native source still permits this tracking operation.
++    pub fn is_current(&self) -> bool {
++        (self.current)()
++    }
++
++    /// Construct a tracking lifetime supplied by the native platform.
++    ///
++    /// # Safety
++    /// `current` must reject source retirement and never revive an expired
++    /// operation. `finish` must release only this operation's ownership.
++    #[doc(hidden)]
++    pub unsafe fn from_platform(
++        current: impl Fn() -> bool + 'static,
++        finish: impl FnOnce() + 'static,
++    ) -> Self {
++        Self { current: Box::new(current), finish: Some(Box::new(finish)) }
++    }
++}
++
++impl Drop for NativeDragTracking {
++    fn drop(&mut self) {
++        if let Some(finish) = self.finish.take() {
++            finish();
++        }
++    }
++}
+diff --git a/src/window.rs b/src/window.rs
+index f24758d..f8f41c4 100644
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -3094,6 +3094,14 @@ impl Window {
+         self.platform_window.set_native_file_drop_enabled(enabled);
+     }
+ 
++    /// Retain one genuine Windows left-button press from its mouse-down handler.
++    /// Later claim it outside the input handler, after asynchronous drag preparation.
++    /// This does not start a native drag or change GPUI's active drag.
++    #[cfg(windows)]
++    pub fn capture_native_drag_gesture(&self) -> Option<crate::NativeDragGesture> {
++        self.platform_window.capture_native_drag_gesture()
++    }
++
+     /// Toggle zoom on the window.
+     pub fn zoom_window(&self) {
+         self.platform_window.zoom();

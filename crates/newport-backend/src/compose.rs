@@ -1,4 +1,4 @@
-//! Compose operations through the monitor service, projected into UI replies.
+//! Compose operations through the monitor service.
 use crate::{monitor, server_session::ServerSession};
 use newport_protocol::monitor::compose::Reply;
 use newport_protocol::monitor::compose::{Action, Request};

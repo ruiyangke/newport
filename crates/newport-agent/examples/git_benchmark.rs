@@ -116,7 +116,7 @@ impl Agent {
                 ServerMessage::Response(response) => {
                     response.validate_for(&call)?;
                     let reply = response.result?;
-                    let result = serde_json::to_value(reply.projection(&call.request))?;
+                    let result = serde_json::to_value(&reply)?;
                     let sample = json!({"elapsedMs":start.elapsed().as_secs_f64()*1000.,"requestBytes":sent,"responseBytes":received,"responseFrames":frames,"acknowledgementFrames":chunks,"rows":result["entries"].as_array().map(Vec::len)});
                     return Ok((result, sample));
                 }

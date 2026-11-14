@@ -160,26 +160,22 @@ pub(super) fn compact(content_width: f32, tab: usize) -> bool {
 
 impl git::Workspace {
     fn detail_title(&self) -> Option<String> {
-        if !self.selected.is_object() {
-            return None;
-        }
-        Some(match self.tab {
-            0 => self.selected["path"]["display"]
-                .as_str()
-                .or_else(|| self.selected["oldPath"]["display"].as_str())
-                .unwrap_or("Selected file")
-                .to_owned(),
-            1 => git_commit_header::history_subject(&self.selected),
-            3 => self.selected["message"]
-                .as_str()
+        use git_listing::Entry;
+        Some(match (self.tab, self.selected.as_ref()?) {
+            (0, Entry::Change(entry)) => entry.path.display.clone(),
+            (1, Entry::Commit(commit)) => git_commit_header::history_subject(commit),
+            (3, Entry::Stash(stash)) => Some(stash.message.as_str())
                 .filter(|message| !message.is_empty())
                 .unwrap_or("Unnamed stash")
                 .lines()
                 .next()
                 .unwrap_or("Unnamed stash")
                 .to_owned(),
-            4 => text(&self.selected["name"], "display"),
-            6 => text(&self.selected, "name"),
+            (4, Entry::Tag(tag)) => tag
+                .name
+                .as_ref()
+                .map_or_else(|| "—".into(), |name| name.display.clone()),
+            (6, Entry::Remote(remote)) => remote.name.clone(),
             _ => return None,
         })
     }
@@ -249,7 +245,6 @@ mod tests {
         self as gpui, Context, IntoElement, Render, TestAppContext, Window, div, prelude::*, px,
         size,
     };
-    use serde_json::json;
 
     struct PickerRow {
         highlighted: bool,
@@ -436,8 +431,15 @@ mod tests {
         let mut view = git::Workspace::default();
         view.resume_detail();
         assert!(!view.detail_open);
-        view.selected = json!({"path":{"display":"src/main.rs"},"entryId":"entry"});
-        view.diff = json!({"snapshot":"review", "nextCursor":"next", "entries":[1,2]});
+        view.selected = Some(crate::git_listing::Entry::Change(
+            crate::git_fixture::status_entry("entry", "src/main.rs"),
+        ));
+        view.diff = Some(crate::git_fixture::diff_page(
+            "review",
+            crate::git_fixture::working_metadata("status", "entry"),
+            vec![crate::git_fixture::file(0, "src/main.rs", vec![])],
+            Some("next"),
+        ));
         view.diff_staged = true;
         let diff = view.diff.clone();
         view.resume_detail();
@@ -445,7 +447,7 @@ mod tests {
         assert_eq!(view.detail_title().as_deref(), Some("src/main.rs"));
         assert_eq!(view.diff, diff);
         assert!(view.diff_staged);
-        assert_eq!(view.selected["entryId"], "entry");
+        assert_eq!(view.entry().unwrap().entry_id, "entry");
         assert!(compact(699., 0));
         assert!(compact(699., 1));
         assert!(!compact(700., 0));

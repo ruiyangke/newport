@@ -1,7 +1,7 @@
 //! Session registration and lifetime leases on a private local socket. An
 //! executable match alone is insufficient to join a running runtime.
 use crate::{local_socket::Endpoint, transport::Cancellation};
-use newport_protocol::runtime::{self as protocol, wire};
+use newport_protocol::runtime::{self as protocol, service, wire};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
@@ -172,7 +172,7 @@ impl Broker {
                 if let Ok(update) = incoming.try_recv() {
                     let result = if let Some(index) = active
                         .iter()
-                        .position(|w| w.id == update.worker && w.service == "integration")
+                        .position(|w| w.id == update.worker && w.service == service::INTEGRATION)
                     {
                         let worker = &mut active[index];
                         let request = protocol::WorkerPermissions {
@@ -482,7 +482,7 @@ impl Lease {
                         stream: &mut watch,
                         deadline: Instant::now() + Duration::from_secs(1),
                     })?;
-                    if request.service != "integration"
+                    if request.service != service::INTEGRATION
                         || update.runtime_id != request.runtime_id
                         || update.worker_id != request.worker_id
                         || update.permissions.revision == 0

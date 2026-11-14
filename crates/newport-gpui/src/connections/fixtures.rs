@@ -202,15 +202,15 @@ pub(crate) fn observation(listeners: impl IntoIterator<Item = Listener>) -> Port
 
 pub(crate) fn put(view: &mut crate::Newport, observation: PortsObservation) {
     let server = view.server.clone();
-    let scope = crate::terminal_scope::connection(view.selected_server().unwrap(), &view.snapshot);
+    let scope = view.selected_connection().unwrap();
     let previous = view
         .connections_state
         .get(&server)
         .and_then(|state| state.reading.as_ref());
     let reading = newport_client::discovery::Reading::prepare(Ok(observation), previous);
     assert!(reading.view().is_some() || reading.status().error.is_none());
-    view.resources.invalidate("page");
-    let generation = view.resources.begin_refresh("page", false).unwrap();
+    view.resources.invalidate("ports");
+    let generation = view.resources.begin_refresh("ports", false).unwrap();
     assert!(view.complete_connections_reading(
         &server,
         generation,

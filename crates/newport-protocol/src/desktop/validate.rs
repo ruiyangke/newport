@@ -1411,7 +1411,7 @@ impl crate::desktop::preferences::WindowPatch {
 
         if self
             .sidebar_width
-            .is_some_and(|v| !(176.0..=300.0).contains(&v))
+            .is_some_and(|v| !crate::desktop::preferences::SIDEBAR_WIDTH.contains(&v))
         {
             return Err(Invalid("sidebar width"));
         }
@@ -2444,6 +2444,9 @@ impl crate::desktop::stream::TerminalEvent {
             }
             Self::DisplayLost(_) => {}
             Self::NotHeld(v) => {
+                v.validate()?;
+            }
+            Self::Size(v) => {
                 v.validate()?;
             }
         }

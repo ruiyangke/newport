@@ -1,0 +1,26 @@
+text: Copy selections exactly and keep fractional line heights
+
+- Copying a window text selection no longer trims it. Indentation, a lone
+  tab and selected spaces are text. Copying only whitespace used to write
+  nothing, leaving the previous clipboard contents in place.
+- SelectableText::paint_selection is public, so virtualized plain-text
+  views can paint selections with the same wrapped-line geometry.
+- Inputs keep fractional line heights. Layout, hit testing, scrolling and
+  painting share one value instead of rounding every row.
+
+Remove when upstream copies selections verbatim and keeps fractional rows.
+
+diff --git a/src/input/editor.rs b/src/input/editor.rs
+index f69d6de..1fd0c5a 100644
+--- a/src/input/editor.rs
++++ b/src/input/editor.rs
+@@ -225,7 +225,8 @@ mod tests {
+     #[gpui::test]
+     fn the_rows_follow_the_font_size(cx: &mut TestAppContext) {
+         // With nothing set, the theme's monospace size, not the ambient one.
+-        assert_eq!(line_height(cx, None), px(20.));
++        // Rows keep the fractional line height rather than rounding to 20px.
++        assert_eq!(line_height(cx, None), px(19.5));
+         // A text style set on the editor refines over that, rows and all.
+         assert_eq!(line_height(cx, Some(px(24.))), px(36.));
+         assert_eq!(line_height(cx, Some(px(40.))), px(60.));

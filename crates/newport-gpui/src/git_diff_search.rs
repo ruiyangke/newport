@@ -19,7 +19,7 @@ pub(super) struct Model {
     case: bool,
     word: bool,
     regex: bool,
-    identity: Value,
+    identity: git_diff_text::Key,
     rows: Vec<Vec<Option<String>>>,
     matches: Vec<Match>,
     active: usize,
@@ -33,10 +33,14 @@ impl Model {
     }
     pub(super) fn clear_rows(&mut self) {
         if !self.rows.is_empty() {
-            self.set_rows(Value::Null, vec![]);
+            self.set_rows(git_diff_text::Key::default(), vec![]);
         }
     }
-    pub(super) fn set_rows(&mut self, identity: Value, rows: Vec<Vec<Option<String>>>) {
+    pub(super) fn set_rows(
+        &mut self,
+        identity: git_diff_text::Key,
+        rows: Vec<Vec<Option<String>>>,
+    ) {
         let retain = self.identity == identity;
         self.identity = identity;
         self.rows = rows;
@@ -169,12 +173,12 @@ impl Newport {
             || !(self.git.tab == 0 || self.git_is_inspection())
             || self.git.remote_refs.is_some()
             || !(if self.git_is_inspection() {
-                self.git.history.path["bytesB64"].is_string()
+                self.git.history.path.is_some()
             } else {
-                self.git.selected["entryId"].is_string()
+                self.git.entry().is_some()
             })
-            || self.git.selected["conflicted"] == true
-            || self.diff_page()["snapshot"].is_null()
+            || self.git.entry().is_some_and(|entry| entry.conflicted)
+            || self.diff_page().is_none()
         {
             return;
         }
@@ -364,14 +368,16 @@ impl Newport {
 #[cfg(test)]
 mod tests {
     use super::{MAX_MATCHES, Model};
-    use serde_json::json;
     fn model(rows: &[Option<&str>]) -> Model {
         let mut m = Model {
             open: true,
             ..Default::default()
         };
         m.set_rows(
-            json!("first"),
+            crate::git_diff_text::Key {
+                path: "first".into(),
+                ..Default::default()
+            },
             vec![rows.iter().map(|r| r.map(str::to_owned)).collect()],
         );
         m
@@ -423,12 +429,21 @@ mod tests {
         m.step(false);
         assert_eq!(m.active, 1);
         m.set_rows(
-            json!("first"),
+            crate::git_diff_text::Key {
+                path: "first".into(),
+                ..Default::default()
+            },
             vec![vec![Some("needle needle".into()), Some("needle".into())]],
         );
         assert_eq!(m.active, 1);
         assert_eq!(m.matches.len(), 3);
-        m.set_rows(json!("second"), vec![vec![Some("needle needle".into())]]);
+        m.set_rows(
+            crate::git_diff_text::Key {
+                path: "second".into(),
+                ..Default::default()
+            },
+            vec![vec![Some("needle needle".into())]],
+        );
         assert_eq!(m.active, 0);
         m.clear_rows();
         assert!(m.matches.is_empty());
@@ -440,7 +455,10 @@ mod tests {
             ..Default::default()
         };
         m.set_rows(
-            json!("split"),
+            crate::git_diff_text::Key {
+                path: "split".into(),
+                ..Default::default()
+            },
             vec![
                 vec![None, Some("old".into()), None],
                 vec![None, None, Some("new".into())],

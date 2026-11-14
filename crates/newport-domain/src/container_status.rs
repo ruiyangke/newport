@@ -1,6 +1,7 @@
 //! Readable container lifecycle and failure context.
-use crate::containers::{
-    Container, ContainerHealth, ContainerInspect, ContainerState, ContainerVerb, problem_reason,
+use crate::containers::problem_reason;
+use newport_protocol::monitor::containers::{
+    Container, ContainerHealth, ContainerInspect, ContainerState, ContainerVerb,
 };
 
 pub fn action_progress(verb: ContainerVerb) -> &'static str {
@@ -82,7 +83,7 @@ pub fn problem_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::containers::HealthResult;
+    use newport_protocol::monitor::containers::HealthResult;
 
     #[test]
     fn lifecycle_distinguishes_exact_running_state_and_observed_exit() {

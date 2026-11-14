@@ -21,6 +21,11 @@ pub const SMALL_ICON: f32 = 14.;
 /// Status dots in rows, headers and pickers.
 pub const DOT_SIZE: f32 = 7.;
 
+/// Digits of one width, so changing numbers don't shift what's beside them.
+pub fn tabular_figures() -> gpui_kit::FontFeatures {
+    gpui_kit::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]))
+}
+
 /// A fixed pane header; the rule overlays its bottom edge to preserve alignment.
 pub fn header() -> Div {
     div()

@@ -1,26 +1,26 @@
 //! Typed discovery rows alongside the existing saved-forward configuration.
 use super::Worktree;
 use crate::{port_context, port_discovery as d};
-use serde_json::Value;
+use newport_protocol::desktop::configuration::{Direction, Tunnel};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Port {
     Observed(d::Row),
     Saved {
-        definition: Value,
+        definition: Tunnel,
         worktree: Option<Worktree>,
     },
 }
 
 impl Port {
-    pub fn saved(definition: Value) -> Self {
+    pub fn saved(definition: Tunnel) -> Self {
         Self::Saved {
             definition,
             worktree: None,
         }
     }
-    pub fn definition(&self) -> Option<&Value> {
+    pub fn definition(&self) -> Option<&Tunnel> {
         match self {
             Self::Saved { definition, .. } => Some(definition),
             Self::Observed(_) => None,
@@ -34,18 +34,16 @@ impl Port {
     }
     pub fn reverse(&self) -> bool {
         self.definition()
-            .is_some_and(|value| value["direction"] == "remote")
+            .is_some_and(|value| value.direction == Direction::Remote)
     }
     pub fn number(&self) -> Option<u16> {
         match self {
             Self::Observed(row) => row.members.first().map(|member| member.endpoint.port),
-            Self::Saved { definition, .. } => definition[if self.reverse() {
-                "localPort"
+            Self::Saved { definition, .. } => Some(if self.reverse() {
+                definition.local_port
             } else {
-                "remotePort"
-            }]
-            .as_u64()
-            .and_then(|port| u16::try_from(port).ok()),
+                definition.remote_port
+            }),
         }
     }
     pub fn worktree(&self) -> Option<Worktree> {
@@ -231,17 +229,12 @@ impl Port {
                 definition,
                 worktree,
             } => {
-                let mut parts: Vec<_> = ["name", "localPort", "remotePort", "remoteHost"]
-                    .iter()
-                    .filter_map(|field| definition.get(field))
-                    .filter(|value| !value.is_null())
-                    .map(|value| {
-                        value
-                            .as_str()
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| value.to_string())
-                    })
-                    .collect();
+                let mut parts = vec![
+                    definition.name.clone(),
+                    definition.local_port.to_string(),
+                    definition.remote_port.to_string(),
+                    definition.remote_host.clone(),
+                ];
                 if let Some(worktree) = worktree {
                     parts.push(worktree.path.clone());
                     parts.extend(worktree.branch.iter().cloned());
@@ -252,7 +245,7 @@ impl Port {
     }
     pub fn key(&self) -> String {
         match self {
-            Self::Saved { definition, .. } => definition["id"].as_str().unwrap_or_default().into(),
+            Self::Saved { definition, .. } => definition.id.to_string(),
             Self::Observed(row) => row
                 .members
                 .iter()

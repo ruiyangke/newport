@@ -5,7 +5,7 @@ use gpui::{
     point, px,
 };
 use gpui_kit as gpui;
-use newport_domain::containers::{ContainerLogPage, LogStream};
+use newport_protocol::monitor::containers::{ContainerLogPage, LogStream};
 
 fn entry(message: &str) -> ContainerLogEntry {
     ContainerLogEntry {

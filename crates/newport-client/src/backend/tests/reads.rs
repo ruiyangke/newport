@@ -281,9 +281,7 @@ fn diff_request(working: bool) -> git::Request {
     }
 }
 fn diff_page(working: bool) -> git::Page<git::FileFragment, git::DiffMetadata> {
-    // Reuse the existing UI diff fixture, lowered once to the actual shared DTO.
-    // Only the protobuf encoder sends it; JSON is not a transport fixture.
-    serde_json::from_value(crate::git_diff_page::tests::page(working)).unwrap()
+    crate::git_diff_page::tests::page(working)
 }
 fn page_cases() -> Vec<(git::Request, git::Reply)> {
     let mut cases = vec![
@@ -446,12 +444,13 @@ fn all_git_page_reads_validate_the_wire_envelope_before_publishing() {
         });
         let mut resources = crate::resources::Resources::default();
         let generation = resources.begin("page").unwrap();
-        assert!(resources.complete_detailed(
+        assert!(resources.complete_git(
             "page",
             generation,
-            backend.request_git(server(), request.clone(), false)
+            backend.git(server(), request.clone(), false)
         ));
-        let accepted = resources.get("page").unwrap().value.clone();
+        let accepted = resources.get("page").unwrap().git().cloned();
+        assert!(accepted.is_some(), "{}", request.method());
         assert!(
             resources.get("page").unwrap().error.is_none(),
             "{}: {:?}",
@@ -459,13 +458,13 @@ fn all_git_page_reads_validate_the_wire_envelope_before_publishing() {
             resources.get("page").unwrap().error
         );
         let generation = resources.begin("page").unwrap();
-        assert!(resources.complete_detailed(
+        assert!(resources.complete_git(
             "page",
             generation,
-            backend.request_git(server(), request.clone(), false)
+            backend.git(server(), request.clone(), false)
         ));
         let failed = resources.get("page").unwrap();
-        assert_eq!(failed.value, accepted, "{}", request.method());
+        assert_eq!(failed.git(), accepted.as_ref(), "{}", request.method());
         assert!(!failed.pending);
         assert_eq!(failed.error_code.as_deref(), Some("PROTOCOL_ERROR"));
         task.join().unwrap();
@@ -477,6 +476,11 @@ fn malformed_diff_content_keeps_the_accepted_page_and_ends_loading() {
     for working in [true, false] {
         let host = Host::new();
         let backend = Backend::at_path(host.path.clone());
+        let accepted = if working {
+            git::Reply::DiffPage(Box::new(diff_page(working)))
+        } else {
+            git::Reply::CommitDiffPage(Box::new(diff_page(working)))
+        };
         let task = thread::spawn(move || {
             let mut peer = host.receive();
             let mut malformed = diff_page(working);
@@ -490,16 +494,15 @@ fn malformed_diff_content_keeps_the_accepted_page_and_ends_loading() {
         });
         let mut resources = crate::resources::Resources::default();
         let generation = resources.begin("diff").unwrap();
-        let accepted = crate::git_diff_page::tests::page(working);
-        assert!(resources.complete_detailed("diff", generation, Ok(accepted.clone())));
+        assert!(resources.complete_git("diff", generation, Ok(accepted.clone())));
         let generation = resources.begin("diff").unwrap();
-        assert!(resources.complete_detailed(
+        assert!(resources.complete_git(
             "diff",
             generation,
-            backend.request_git(server(), diff_request(working), false)
+            backend.git(server(), diff_request(working), false)
         ));
         let failed = resources.get("diff").unwrap();
-        assert_eq!(failed.value, accepted);
+        assert_eq!(failed.git(), Some(&accepted));
         assert!(!failed.pending);
         assert_eq!(failed.error_code.as_deref(), Some("PROTOCOL_ERROR"));
         task.join().unwrap();
@@ -555,18 +558,15 @@ fn git_envelope_validation_preserves_nonpage_replies_and_typed_errors() {
     for (request, reply) in cases {
         let host = Host::new();
         let backend = Backend::at_path(host.path.clone());
-        let expected = serde_json::to_value(reply.projection(&request)).unwrap();
+        let expected = reply.clone();
         let task = thread::spawn(move || {
             let mut peer = host.receive();
             peer.git_reply(reply);
         });
-        assert_eq!(
-            backend.request_git(server(), request, false).unwrap(),
-            expected
-        );
+        assert_eq!(backend.git(server(), request, false).unwrap(), expected);
         task.join().unwrap();
     }
-    // Collected diff is its own typed result, not a page or an arbitrary map.
+    // No reader takes a collected diff: it is refused, not read as a reply.
     for working in [true, false] {
         let host = Host::new();
         let backend = Backend::at_path(host.path.clone());
@@ -605,7 +605,6 @@ fn git_envelope_validation_preserves_nonpage_replies_and_typed_errors() {
             total_units: Some(0),
             has_omissions: Some(false),
         };
-        let expected = json!({"snapshot":"diff-snapshot", "diff":diff});
         let task = thread::spawn(move || {
             let mut peer = host.receive();
             peer.reply(desktop::Reply::Git(Box::new(desktop::git::Reply::Request(
@@ -617,10 +616,8 @@ fn git_envelope_validation_preserves_nonpage_replies_and_typed_errors() {
                 ))),
             ))));
         });
-        assert_eq!(
-            backend.request_git(server(), request, false).unwrap(),
-            expected
-        );
+        let error = backend.git(server(), request, false).unwrap_err();
+        assert_eq!(error.code.as_deref(), Some("PROTOCOL_ERROR"));
         task.join().unwrap();
     }
     let host = Host::new();
@@ -630,7 +627,7 @@ fn git_envelope_validation_preserves_nonpage_replies_and_typed_errors() {
         peer.fail("STALE_SNAPSHOT", "Refresh the repository");
     });
     let error = backend
-        .request_git(server(), diff_request(true), false)
+        .git(server(), diff_request(true), false)
         .unwrap_err();
     assert_eq!(error.code.as_deref(), Some("STALE_SNAPSHOT"));
     assert_eq!(error.message, "Refresh the repository");
@@ -642,10 +639,7 @@ fn repository_settings_invalid_response_is_retryable_and_keeps_protocol_errors()
     let host = Host::new();
     let backend = Backend::at_path(host.path.clone());
     let valid = git::Reply::Remotes(Box::new(remotes()));
-    let expected = serde_json::to_value(valid.projection(&git::Request::Remotes {
-        repo_id: "repo".into(),
-    }))
-    .unwrap();
+    let expected = valid.clone();
     let task = thread::spawn(move || {
         for step in 0..3 {
             let mut peer = host.receive();
@@ -668,23 +662,23 @@ fn repository_settings_invalid_response_is_retryable_and_keeps_protocol_errors()
     });
     let mut resources = crate::resources::Resources::default();
     let generation = resources.begin("settings").unwrap();
-    assert!(resources.complete_detailed(
+    assert!(resources.complete_git(
         "settings",
         generation,
         backend.repository_settings(SERVER, "repo")
     ));
     let failed = resources.get("settings").unwrap();
     assert!(!failed.pending);
-    assert!(failed.value.is_null());
+    assert!(!failed.has_value());
     assert!(failed.error.as_ref().unwrap().contains("Retry settings"));
     let generation = resources.begin("settings").unwrap();
-    assert!(resources.complete_detailed(
+    assert!(resources.complete_git(
         "settings",
         generation,
         backend.repository_settings(SERVER, "repo")
     ));
     let ready = resources.get("settings").unwrap();
-    assert_eq!(ready.value, expected);
+    assert_eq!(ready.git(), Some(&expected));
     assert!(ready.error.is_none());
     let error = backend.repository_settings(SERVER, "repo").unwrap_err();
     assert_eq!(error.code.as_deref(), Some("REPOSITORY_CLOSED"));
@@ -708,7 +702,7 @@ fn detailed_reads_preserve_protocol_codes_without_parsing_messages() {
             host.no_request();
         });
         let error = backend
-            .request_git(server(), diff_request(true), false)
+            .git(server(), diff_request(true), false)
             .unwrap_err();
         assert_eq!(error.code.as_deref(), Some(code));
         assert_eq!(error.message, message);
@@ -1004,8 +998,12 @@ fn remote_picker_reads_only_one_names_page_and_selected_configuration() {
         .unwrap();
     assert_eq!(names.entries, ["backup-21"]);
     assert_eq!(
-        backend.git_remote(SERVER, "repo", "backup-21").unwrap()["pushUrl"],
-        "/push"
+        backend
+            .git_remote(SERVER, "repo", "backup-21")
+            .unwrap()
+            .push_url
+            .as_deref(),
+        Some("/push")
     );
     worker.join().unwrap();
 }

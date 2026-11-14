@@ -6,7 +6,6 @@ use newport_protocol::{
     desktop::{self, wire},
     git,
 };
-use serde_json::{Value, json};
 use std::{
     fs,
     io::{Read, Write},

@@ -1,4 +1,6 @@
 use super::*;
+use git_listing::{Entry, Listing, StatusPage};
+use newport_protocol::git::StatusEntry;
 use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,8 +23,9 @@ fn navigation_identity(key: &ReviewKey) -> String {
 #[derive(Clone)]
 pub(super) struct ReviewDocument {
     pub key: ReviewKey,
-    pub entry: Value,
-    pub status: Arc<Value>,
+    pub entry: Entry,
+    /// The page the entry was listed on.
+    pub status: Option<Arc<Listing>>,
     pub preview: bool,
 }
 impl ReviewDocument {
@@ -63,14 +66,20 @@ impl Documents {
         self.reviews.push(document);
     }
     /// Follow a working comparison when staging moves it to the other index side.
-    pub fn reconcile_file(&mut self, entry: Value, status: Value, staged: bool) -> bool {
-        let status = Arc::new(status);
+    pub fn reconcile_file(
+        &mut self,
+        entry: StatusEntry,
+        status: Option<Listing>,
+        staged: bool,
+    ) -> bool {
+        let status = status.map(Arc::new);
         let Some(ReviewKey::File { path, .. }) = self.active.clone() else {
             return false;
         };
-        if text(&entry["path"], "display") != path {
+        if entry.path.display != path {
             return false;
         }
+        let entry = Entry::Change(entry);
         let Some(index) = self
             .reviews
             .iter()
@@ -133,11 +142,11 @@ impl Documents {
 
 #[derive(Clone)]
 pub(super) enum Event {
-    Open(ReviewDocument),
+    Open(Box<ReviewDocument>),
     CloseRepository,
     Stage {
         snapshot: String,
-        entries: Vec<Value>,
+        entries: Vec<StatusEntry>,
         stage: bool,
     },
 }
@@ -146,7 +155,7 @@ impl EventEmitter<Event> for project_editor::CodeWorkspace {}
 #[derive(Default)]
 pub(super) struct Collection {
     // Replace through set_page so the immutable snapshot and row indices agree.
-    page: Arc<Value>,
+    page: Option<Arc<Listing>>,
     groups: [Arc<[usize]>; 4],
     pub loading: bool,
     pub error: Option<String>,
@@ -177,15 +186,15 @@ impl ChangeGroup {
             Self::Untracked => "Untracked",
         }
     }
-    fn matches(self, entry: &Value) -> bool {
-        if entry["conflicted"] == true {
+    fn matches(self, entry: &StatusEntry) -> bool {
+        if entry.conflicted {
             return self == Self::Conflicts;
         }
         match self {
             Self::Conflicts => false,
-            Self::Staged => entry["staged"] == true,
-            Self::Unstaged => entry["unstaged"] == true && entry["untracked"] != true,
-            Self::Untracked => entry["untracked"] == true,
+            Self::Staged => entry.staged,
+            Self::Unstaged => entry.unstaged && !entry.untracked,
+            Self::Untracked => entry.untracked,
         }
     }
 }
@@ -261,13 +270,19 @@ impl NavigationRows {
 }
 
 impl Collection {
-    pub fn page(&self) -> &Arc<Value> {
-        &self.page
+    pub fn page(&self) -> Option<&Arc<Listing>> {
+        self.page.as_ref()
     }
-    pub fn set_page(&mut self, page: Value) {
-        self.page = Arc::new(page);
+    /// The status page a Changes collection shows.
+    pub fn status(&self) -> Option<&StatusPage> {
+        self.page.as_deref().and_then(Listing::status)
+    }
+    pub fn set_page(&mut self, page: Listing) {
+        self.page = Some(Arc::new(page));
         self.groups = std::array::from_fn(|group| {
-            self.entries()
+            self.status()
+                .map(|page| page.entries.as_slice())
+                .unwrap_or_default()
                 .iter()
                 .enumerate()
                 .filter_map(|(index, entry)| {
@@ -277,11 +292,11 @@ impl Collection {
                 .into()
         });
     }
-    fn entries(&self) -> &[Value] {
-        self.page["entries"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default()
+    fn len(&self) -> usize {
+        self.page.as_deref().map_or(0, Listing::len)
+    }
+    fn next_cursor(&self) -> Option<&str> {
+        self.page.as_deref().and_then(Listing::next_cursor)
     }
     fn display_rows(
         &self,
@@ -291,7 +306,7 @@ impl Collection {
         NavigationRows {
             groups: self.groups.clone(),
             collapsed: std::array::from_fn(|i| collapsed.contains(ChangeGroup::ALL[i].title())),
-            history_count: history.then(|| self.entries().len()),
+            history_count: history.then(|| self.len()),
         }
     }
 }
@@ -319,38 +334,42 @@ impl Navigator {
             collection.loading = false;
         }
     }
-    pub fn can_stage(&self, snapshot: &str, entries: &[Value]) -> bool {
-        let status = &self.collections[0];
+    pub fn can_stage(&self, snapshot: &str, entries: &[StatusEntry]) -> bool {
+        let collection = &self.collections[0];
+        let Some(status) = collection.status() else {
+            return false;
+        };
         let ready = self.writable
             && !self.invalidated
             && self.filter_changed.is_none()
-            && !status.loading
-            && status.error.is_none()
+            && !collection.loading
+            && collection.error.is_none()
             && !snapshot.is_empty()
-            && status.page["snapshot"].as_str() == Some(snapshot)
+            && status.snapshot == snapshot
             && !entries.is_empty();
         if !ready {
             return false;
         }
         let current: std::collections::HashMap<_, _> = status
-            .entries()
+            .entries
             .iter()
-            .filter_map(|entry| entry["entryId"].as_str().map(|id| (id, entry)))
+            .map(|entry| (entry.entry_id.as_str(), entry))
             .collect();
         entries.iter().all(|entry| {
-            entry["conflicted"] != true
-                && entry["entryId"].as_str().is_some_and(|id| {
-                    !id.is_empty() && current.get(id).is_some_and(|value| *value == entry)
-                })
+            !entry.conflicted
+                && !entry.entry_id.is_empty()
+                && current
+                    .get(entry.entry_id.as_str())
+                    .is_some_and(|value| *value == entry)
         })
     }
 }
 
-fn change_mark(entry: &Value, staged: bool) -> &'static str {
-    let flags = entry["flags"].as_u64().unwrap_or(0);
-    if entry["conflicted"] == true {
+fn change_mark(entry: &StatusEntry, staged: bool) -> &'static str {
+    let flags = entry.flags;
+    if entry.conflicted {
         "!"
-    } else if entry["untracked"] == true {
+    } else if entry.untracked {
         "?"
     } else if flags & if staged { 4 } else { 512 } != 0 {
         "D"
@@ -392,7 +411,7 @@ impl project_editor::CodeWorkspace {
         if panel == 0 {
             self.focus_tree(window, cx);
         }
-        if matches!(panel, 1 | 2) && self.navigator.collections[panel - 1].page.is_null() {
+        if matches!(panel, 1 | 2) && self.navigator.collections[panel - 1].page.is_none() {
             self.load_collection(panel - 1, false, window, cx);
         }
         cx.notify();
@@ -412,7 +431,11 @@ impl project_editor::CodeWorkspace {
         }
         let previous = self.navigator.collections[index].page.clone();
         let cursor = more
-            .then(|| previous["nextCursor"].as_str().map(str::to_owned))
+            .then(|| {
+                self.navigator.collections[index]
+                    .next_cursor()
+                    .map(str::to_owned)
+            })
             .flatten();
         if more && cursor.is_none() {
             return;
@@ -438,12 +461,11 @@ impl project_editor::CodeWorkspace {
                 message_bytes: Some(512),
             }
         };
-        let operation = self.git_request(request);
         self.navigator.collections[index].generation += 1;
         let generation = self.navigator.collections[index].generation;
         self.navigator.collections[index].loading = true;
         self.navigator.collections[index].error = None;
-        self.rpc(operation, window, cx, move |this, result, _, _| {
+        self.git_rpc(request, window, cx, move |this, result, _, _| {
             if this.navigator.repo != repo
                 || this.navigator.collections[index].generation != generation
             {
@@ -452,11 +474,13 @@ impl project_editor::CodeWorkspace {
             let collection = &mut this.navigator.collections[index];
             collection.loading = false;
             collection.read_at = Some(Instant::now());
-            let result = result.and_then(|page| {
-                if let Some(cursor) = cursor {
-                    newport_client::git_page::merge(&previous, page, &cursor)
-                } else {
-                    newport_client::git_page::validate(&page).map(|_| page)
+            let result = result.and_then(|reply| {
+                let page = Listing::from_reply(&reply)
+                    .ok_or_else(|| "Invalid repository page. Refresh to retry.".to_owned())?;
+                match (cursor, previous) {
+                    (Some(cursor), Some(previous)) => previous.merge(page, &cursor),
+                    (Some(_), None) => Err("Invalid repository page. Refresh to retry.".into()),
+                    (None, _) => Ok(page),
                 }
             });
             match result {
@@ -475,14 +499,14 @@ impl project_editor::CodeWorkspace {
             return;
         }
         self.show_review(cx);
-        cx.emit(Event::Open(document));
+        cx.emit(Event::Open(Box::new(document)));
     }
     pub(super) fn close_review(&mut self, key: &ReviewKey, cx: &mut Context<Self>) {
         let active = self.navigator.documents.active.as_ref() == Some(key) && self.reviewing;
         let next = self.navigator.documents.close(key);
         if active {
             if let Some(document) = next {
-                cx.emit(Event::Open(document));
+                cx.emit(Event::Open(Box::new(document)));
             } else {
                 self.reviewing = false;
             }
@@ -493,7 +517,11 @@ impl project_editor::CodeWorkspace {
         let index = self.navigator.panel.saturating_sub(1).min(1);
         let collection = &self.navigator.collections[index];
         let display = collection.display_rows(index == 1, &self.navigator.collapsed);
-        let snapshot = text(&collection.page, "snapshot");
+        let snapshot = collection
+            .page
+            .as_deref()
+            .map(|page| page.snapshot().to_owned())
+            .unwrap_or_else(|| "—".into());
         let writable = self.navigator.writable
             && !collection.loading
             && collection.error.is_none()
@@ -547,14 +575,14 @@ impl project_editor::CodeWorkspace {
                             && display.has_entries()
                             && !collection.loading && collection.error.is_none()
                             && !this.navigator.invalidated && this.navigator.filter_changed.is_none()
-                            && let Some(cursor) = collection.page["nextCursor"].as_str().map(str::to_owned)
+                            && let Some(cursor) = collection.next_cursor().map(str::to_owned)
                         {
                             let generation = collection.generation;
                             cx.defer_in(window, move |this, window, cx| {
                                 let collection = &this.navigator.collections[index];
                                 if this.navigator.panel == index + 1
                                     && collection.generation == generation
-                                    && collection.page["nextCursor"].as_str() == Some(cursor.as_str())
+                                    && collection.next_cursor() == Some(cursor.as_str())
                                     && !collection.loading && collection.error.is_none()
                                     && !this.navigator.invalidated && this.navigator.filter_changed.is_none()
                                 {
@@ -592,7 +620,8 @@ impl project_editor::CodeWorkspace {
                                                     .accessibility_label(format!("{} {}", if staged { "Unstage shown" } else { "Stage shown" }, title))
                                                     .disabled(!writable || count == 0)
                                                     .on_click(cx.listener(move |_, checked: &bool, _, cx| {
-                                                        let entries = group_page["entries"].as_array().into_iter().flatten()
+                                                        let entries = group_page.as_deref().and_then(Listing::status).into_iter()
+                                                            .flat_map(|page| &page.entries)
                                                             .filter(|entry| group.matches(entry)).cloned().collect();
                                                         cx.emit(Event::Stage { snapshot: snapshot.clone(), entries, stage: *checked });
                                                     }))
@@ -600,15 +629,19 @@ impl project_editor::CodeWorkspace {
                                         .into_any_element();
                                 }
                                 let NavigationRow::Entry { index: entry_index, staged } = row else { unreachable!() };
-                                let entry = &status["entries"][entry_index];
-                                let title = if index == 0 { text(&entry["path"], "display") } else { git_commit_header::history_subject(entry) };
-                                let key = if index == 0 {
-                                    ReviewKey::File {
-                                        path: title.clone(),
-                                        staged,
+                                let Some(entry) = status.as_deref().and_then(|page| page.entry(entry_index)) else {
+                                    return div().into_any_element();
+                                };
+                                let (title, key) = match &entry {
+                                    Entry::Change(change) => {
+                                        let title = change.path.display.clone();
+                                        (title.clone(), ReviewKey::File { path: title, staged })
                                     }
-                                } else {
-                                    ReviewKey::Commit(text(&entry["oid"], "hex"))
+                                    Entry::Commit(commit) => (
+                                        git_commit_header::history_subject(commit),
+                                        ReviewKey::Commit(commit.oid.hex.clone()),
+                                    ),
+                                    _ => return div().into_any_element(),
                                 };
                                 let selected = this.reviewing
                                     && this.navigator.documents.active.as_ref() == Some(&key);
@@ -660,21 +693,25 @@ impl project_editor::CodeWorkspace {
                                                         .hover(if selected { selection } else { theme::row_hover(cx) })
                                                         .active(selection))
                                             })
-                                            .accessibility_label(if index == 0 {
-                                                format!("Open diff {title}")
-                                            } else {
-                                                format!(
-                                                    "Open commit {}",
-                                                    text(&entry["oid"], "hex")
-                                                )
+                                            .accessibility_label(match &entry {
+                                                Entry::Commit(commit) => {
+                                                    format!("Open commit {}", commit.oid.hex)
+                                                }
+                                                _ => format!("Open diff {title}"),
                                             })
-                                            .when(index == 0, |button| button.child(
+                                            .when_some(match &entry {
+                                                Entry::Change(change) => Some(change),
+                                                _ => None,
+                                            }, |button, change| button.child(
                                                 div().debug_selector(move || format!("project-nav-content-{i}"))
                                                     .flex().items_center().gap(px(7.)).min_w_0().w_full().text_size(px(crate::ui::FONT_SIZE))
-                                                    .child(git_file_row::badge(change_mark(entry, staged), cx))
+                                                    .child(git_file_row::badge(change_mark(change, staged), cx))
                                                     .child(git_file_row::filename_first(&title, cx))
                                             ))
-                                            .when(index == 1, |button| button
+                                            .when_some(match &entry {
+                                                Entry::Commit(commit) => Some(commit),
+                                                _ => None,
+                                            }, |button, commit| button
                                                 .child(
                                                 div()
                                                     .debug_selector(move || format!("project-nav-content-{i}"))
@@ -689,13 +726,11 @@ impl project_editor::CodeWorkspace {
                                                             .line_height(px(17.))
                                                             .child(title),
                                                     )
-                                                    .when(index == 1, |view| {
-                                                        view.child(
-                                                            git_commit_header::history_row_identity(
-                                                                entry, cx,
-                                                            ),
-                                                        )
-                                                    }),
+                                                    .child(
+                                                        git_commit_header::history_row_identity(
+                                                            commit, cx,
+                                                        ),
+                                                    ),
                                             )
                                             )
                                             .on_click(cx.listener(
@@ -706,14 +741,13 @@ impl project_editor::CodeWorkspace {
                                                 },
                                             )),
                                     );
-                                if index == 0 {
-                                    let entry = entry.clone();
+                                if let Entry::Change(entry) = entry {
                                     let snapshot = snapshot.clone();
-                                    let name = text(&entry["path"], "display");
+                                    let name = entry.path.display.clone();
                                     let tint = theme::selected_fill(cx.theme().is_dark());
                                     row = row.when(selected, |row| row.bg(tint)).child(
                                         div().w(px(24.)).h_full().flex_shrink_0().flex().items_center().justify_center()
-                                            .when(entry["conflicted"] != true, |slot| slot.child(
+                                            .when(!entry.conflicted, |slot| slot.child(
                                                 crate::controls::checkbox(SharedString::from(format!("project-nav-stage-{identity}")))
                                                     .checked(staged)
                                                     .accessibility_label(format!("{} {name}", if staged { "Unstage" } else { "Stage" }))
@@ -735,7 +769,7 @@ impl project_editor::CodeWorkspace {
                 .flex_1()
                 .min_h_0(),
             )
-            .when(collection.page["metadata"]["truncated"] == true, |view| {
+            .when(collection.page.as_deref().is_some_and(Listing::truncated), |view| {
                 view.child(crate::label("Listing incomplete").px_2().text_size(px(crate::ui::FONT_SIZE)))
             })
             .into_any_element()
@@ -747,7 +781,9 @@ mod tests {
     use super::{
         ChangeGroup, Collection, Documents, NavigationRow, Navigator, ReviewDocument, ReviewKey,
     };
-    use serde_json::json;
+    use crate::git_fixture::{status_entry, status_page};
+    use crate::git_listing::{Entry, Listing};
+    use newport_protocol::git::StatusEntry;
     use std::time::Instant;
     fn visible_rows(
         collection: &Collection,
@@ -758,14 +794,29 @@ mod tests {
             .map(|i| display.row(i).unwrap())
             .collect()
     }
+    fn change(path: &str, staged: bool, unstaged: bool, untracked: bool) -> StatusEntry {
+        let mut entry = status_entry(path, path);
+        entry.staged = staged;
+        entry.unstaged = unstaged;
+        entry.untracked = untracked;
+        entry
+    }
+    fn status(snapshot: &str, entries: Vec<StatusEntry>) -> Listing {
+        Listing::Status(Box::new(status_page(snapshot, entries, None)))
+    }
     #[test]
     fn snapshot_groups_handle_conflicts_partial_staging_and_collapsing() {
         let mut collection = Collection::default();
-        collection.set_page(json!({"snapshot":"first","entries":[
-            {"path":{"display":"conflict"},"conflicted":true,"staged":true,"unstaged":true},
-            {"path":{"display":"partial"},"staged":true,"unstaged":true},
-            {"path":{"display":"new"},"untracked":true,"unstaged":true}
-        ]}));
+        let mut conflict = change("conflict", true, true, false);
+        conflict.conflicted = true;
+        collection.set_page(status(
+            "first",
+            vec![
+                conflict,
+                change("partial", true, true, false),
+                change("new", false, true, true),
+            ],
+        ));
         use ChangeGroup::*;
         use NavigationRow::{Entry, Group};
         assert_eq!(
@@ -813,7 +864,7 @@ mod tests {
                 Group(Untracked),
             ]
         );
-        collection.set_page(json!({"snapshot":"second","entries":[]}));
+        collection.set_page(status("second", vec![]));
         assert!(
             collection
                 .display_rows(false, &Default::default())
@@ -825,24 +876,27 @@ mod tests {
     #[test]
     fn retained_documents_share_a_snapshot_and_survive_collection_replacement() {
         let mut collection = Collection::default();
-        collection.set_page(json!({"snapshot":"first","entries":[{"path":{"display":"first"}}]}));
+        collection.set_page(status("first", vec![change("first", false, true, false)]));
         let mut document = file("first", false);
-        document.status = collection.page().clone();
+        document.status = collection.page().cloned();
         let clone = document.clone();
-        assert!(std::sync::Arc::ptr_eq(&document.status, &clone.status));
-        assert!(std::sync::Arc::ptr_eq(&document.status, collection.page()));
-        collection.set_page(json!({"snapshot":"second","entries":[]}));
-        assert_eq!(document.status["snapshot"], "first");
-        assert_eq!(collection.page()["snapshot"], "second");
+        let shared = |a: &ReviewDocument, b: Option<&std::sync::Arc<Listing>>| {
+            std::sync::Arc::ptr_eq(a.status.as_ref().unwrap(), b.unwrap())
+        };
+        assert!(shared(&document, clone.status.as_ref()));
+        assert!(shared(&document, collection.page()));
+        collection.set_page(status("second", vec![]));
+        assert_eq!(document.status.as_ref().unwrap().snapshot(), "first");
+        assert_eq!(collection.page().unwrap().snapshot(), "second");
     }
 
     #[test]
     fn large_list_projection_shares_indices_and_resolves_only_requested_rows() {
         let mut collection = Collection::default();
         let entries: Vec<_> = (0..10_000)
-            .map(|i| json!({"path":{"display":format!("file-{i}")},"untracked":true}))
+            .map(|i| change(&format!("file-{i}"), false, false, true))
             .collect();
-        collection.set_page(json!({"entries":entries}));
+        collection.set_page(status("s", entries));
         let display = collection.display_rows(false, &Default::default());
         let again = collection.display_rows(false, &Default::default());
         assert!(std::sync::Arc::ptr_eq(&display.groups[3], &again.groups[3]));
@@ -899,8 +953,8 @@ mod tests {
                 path: name.into(),
                 staged: false,
             },
-            entry: json!({"entryId":name,"path":{"display":name}}),
-            status: json!({"snapshot":"s"}).into(),
+            entry: Entry::Change(status_entry(name, name)),
+            status: Some(status("s", vec![]).into()),
             preview,
         }
     }
@@ -935,33 +989,36 @@ mod tests {
         };
         docs.open(staged.clone());
         docs.open(file("changed.rs", true));
-        let page = json!({"snapshot":"after-stage"});
-        assert!(docs.reconcile_file(staged.entry.clone(), page.clone(), true));
+        let page = status("after-stage", vec![]);
+        let Entry::Change(entry) = staged.entry.clone() else {
+            unreachable!()
+        };
+        assert!(docs.reconcile_file(entry.clone(), Some(page.clone()), true));
         assert_eq!(docs.active, Some(staged.key.clone()));
         assert_eq!(docs.reviews.len(), 1);
         assert!(!docs.reviews[0].preview);
         assert_eq!(docs.reviews[0].title(), "changed.rs · Staged");
-        assert_eq!(*docs.reviews[0].status, page);
-        assert!(!docs.reconcile_file(staged.entry, page, true));
+        assert_eq!(docs.reviews[0].status.as_deref(), Some(&page));
+        assert!(!docs.reconcile_file(entry, Some(page), true));
     }
 
     #[test]
     fn staging_requires_current_snapshot_and_visible_entries() {
-        let entry = file("one.rs", true).entry;
+        let entry = status_entry("one.rs", "one.rs");
         let mut nav = Navigator {
             writable: true,
             ..Default::default()
         };
-        nav.collections[0].set_page(json!({"snapshot":"current","entries":[entry]}));
+        nav.collections[0].set_page(status("current", vec![entry.clone()]));
         assert!(nav.can_stage("current", std::slice::from_ref(&entry)));
         assert!(!nav.can_stage("old", std::slice::from_ref(&entry)));
         let mut changed = entry.clone();
-        changed["flags"] = json!(512);
+        changed.flags = 512;
         assert!(
             !nav.can_stage("current", &[changed]),
             "matching entry ID must not authorize changed contents"
         );
-        assert!(!nav.can_stage("current", &[file("other.rs", true).entry]));
+        assert!(!nav.can_stage("current", &[status_entry("other.rs", "other.rs")]));
         nav.collections[0].loading = true;
         assert!(!nav.can_stage("current", std::slice::from_ref(&entry)));
         nav.collections[0].loading = false;
@@ -973,15 +1030,20 @@ mod tests {
     }
     #[test]
     fn change_badges_describe_the_selected_index_side() {
-        let entry = json!({"flags": 1 | 512, "staged":true, "unstaged":true});
+        let mut entry = change("file", true, true, false);
+        entry.flags = 1 | 512;
         assert_eq!(super::change_mark(&entry, true), "A");
         assert_eq!(super::change_mark(&entry, false), "D");
-        assert_eq!(super::change_mark(&json!({"flags":8 | 256}), true), "R");
-        assert_eq!(super::change_mark(&json!({"flags":8 | 256}), false), "M");
+        let mut renamed = change("file", false, false, false);
+        renamed.flags = 8 | 256;
+        assert_eq!(super::change_mark(&renamed, true), "R");
+        assert_eq!(super::change_mark(&renamed, false), "M");
+        let mut conflicted = change("file", false, false, true);
+        conflicted.conflicted = true;
+        assert_eq!(super::change_mark(&conflicted, false), "!");
         assert_eq!(
-            super::change_mark(&json!({"conflicted":true,"untracked":true}), false),
-            "!"
+            super::change_mark(&change("file", false, false, true), false),
+            "?"
         );
-        assert_eq!(super::change_mark(&json!({"untracked":true}), false), "?");
     }
 }

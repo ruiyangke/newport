@@ -1,14 +1,18 @@
 //! Plan a read-only return to the saved checkout after a linked folder vanishes.
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde_json::Value;
+use newport_protocol::git::code;
+use newport_protocol::{desktop::preferences::Project, git::Path};
 
-fn path_bytes(path: &Value) -> Option<Vec<u8>> {
-    let bytes = STANDARD.decode(path["bytesB64"].as_str()?).ok()?;
+fn path_bytes(bytes_b64: &str) -> Option<Vec<u8>> {
+    let bytes = STANDARD.decode(bytes_b64).ok()?;
     (bytes.starts_with(b"/") && !bytes.contains(&0)).then_some(bytes)
 }
 
 pub fn unavailable(code: Option<&str>) -> bool {
-    matches!(code, Some("REPO_NOT_FOUND" | "CHECKOUT_UNAVAILABLE"))
+    matches!(
+        code,
+        Some(code::REPO_NOT_FOUND | code::CHECKOUT_UNAVAILABLE)
+    )
 }
 
 /// Only an explicit unavailable-checkout code is evidence that navigation helps.
@@ -17,44 +21,55 @@ pub fn unavailable(code: Option<&str>) -> bool {
 pub fn destination(
     code: Option<&str>,
     server: &str,
-    project: &Value,
-    opened_path: &Value,
-) -> Option<Value> {
-    if !unavailable(code)
-        || server.is_empty()
-        || project["serverId"].as_str() != Some(server)
-        || project["id"].as_str().is_none_or(str::is_empty)
-    {
+    project: &Project,
+    opened_path: Option<&Path>,
+) -> Option<Path> {
+    if !unavailable(code) || server.is_empty() || project.server.to_string() != server {
         return None;
     }
-    let root = path_bytes(&project["path"])?;
-    let opened = path_bytes(opened_path)?;
-    (root != opened).then(|| project["path"].clone())
+    let root = path_bytes(&project.path.bytes_b64)?;
+    let opened = path_bytes(&opened_path?.bytes_b64)?;
+    (root != opened).then(|| project.path.clone())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-    fn path(bytes: &[u8]) -> Value {
-        json!({"display":"same lossy display","bytesB64":STANDARD.encode(bytes)})
+    const SERVER: &str = "00000000-0000-0000-0000-000000000001";
+    fn path(bytes: &[u8]) -> Path {
+        Path {
+            bytes_b64: STANDARD.encode(bytes),
+            display: "same lossy display".into(),
+        }
     }
     #[test]
     fn returns_exact_saved_bytes_only_for_a_missing_different_checkout() {
-        let project = json!({"id":"project","serverId":"server","path":path(b"/project/\xff")});
+        let project = Project {
+            id: uuid::Uuid::from_u128(7),
+            server: uuid::Uuid::parse_str(SERVER).unwrap(),
+            name: "project".into(),
+            path: path(b"/project/\xff"),
+        };
         let linked = path(b"/linked/\xfe");
+        let linked = Some(&linked);
         assert_eq!(
-            destination(Some("REPO_NOT_FOUND"), "server", &project, &linked),
-            Some(project["path"].clone())
+            destination(Some("REPO_NOT_FOUND"), SERVER, &project, linked),
+            Some(project.path.clone())
         );
         assert_eq!(
-            destination(Some("CHECKOUT_UNAVAILABLE"), "server", &project, &linked),
-            Some(project["path"].clone())
+            destination(Some("CHECKOUT_UNAVAILABLE"), SERVER, &project, linked),
+            Some(project.path.clone())
         );
         assert!(
-            destination(Some("REPO_NOT_FOUND"), "server", &project, &project["path"]).is_none()
+            destination(
+                Some("REPO_NOT_FOUND"),
+                SERVER,
+                &project,
+                Some(&project.path)
+            )
+            .is_none()
         );
-        assert!(destination(Some("REPO_NOT_FOUND"), "another-server", &project, &linked).is_none());
+        assert!(destination(Some("REPO_NOT_FOUND"), "another-server", &project, linked).is_none());
         for code in [
             None,
             Some("AUTH_FAILED"),
@@ -64,17 +79,22 @@ mod tests {
             Some("IO_ERROR"),
             Some("GIT_UNAVAILABLE"),
         ] {
-            assert!(destination(code, "server", &project, &linked).is_none());
+            assert!(destination(code, SERVER, &project, linked).is_none());
         }
         for invalid in [
             path(b"relative"),
             path(b"/bad\0path"),
-            json!({"display":"/valid","bytesB64":"invalid!"}),
+            Path {
+                bytes_b64: "invalid!".into(),
+                display: "/valid".into(),
+            },
         ] {
-            assert!(destination(Some("REPO_NOT_FOUND"), "server", &project, &invalid).is_none());
+            assert!(
+                destination(Some("REPO_NOT_FOUND"), SERVER, &project, Some(&invalid)).is_none()
+            );
             let mut bad = project.clone();
-            bad["path"] = invalid;
-            assert!(destination(Some("REPO_NOT_FOUND"), "server", &bad, &linked).is_none());
+            bad.path = invalid;
+            assert!(destination(Some("REPO_NOT_FOUND"), SERVER, &bad, linked).is_none());
         }
     }
 }

@@ -27,11 +27,7 @@ fn endpoints(entry: &Entry) -> Vec<(Endpoint, Entry)> {
                 .unwrap_or_default();
             selected.forwards.retain(|forward| {
                 members.iter().any(|member| {
-                    newport_domain::forwarding::reaches_member(
-                        forward,
-                        connections_grouped::string(forward, "serverId"),
-                        member,
-                    )
+                    newport_domain::forwarding::reaches_member(forward, forward.server_id, member)
                 })
             });
             (endpoint, selected)
@@ -72,9 +68,7 @@ impl Newport {
                 let choices = endpoints(&entry);
                 let owner = cx.weak_entity();
                 let server = self.server.clone();
-                let scope = self
-                    .selected_server()
-                    .map(|server| terminal_scope::connection(server, &self.snapshot));
+                let scope = self.selected_connection();
                 let project = project.to_owned();
                 window.open_dialog(cx, move |dialog, _, _| {
                     let owner = owner.clone();
@@ -118,12 +112,7 @@ impl Newport {
                                                 let _ = owner.update(cx, |this, cx| {
                                                     if this.page != Page::Ports
                                                         || this.server != server
-                                                        || this.selected_server().map(|server| {
-                                                            terminal_scope::connection(
-                                                                server,
-                                                                &this.snapshot,
-                                                            )
-                                                        }) != scope
+                                                        || this.selected_connection() != scope
                                                     {
                                                         return;
                                                     }
@@ -146,12 +135,9 @@ impl Newport {
                 cx.notify();
             }
             Ok(destination) if options => {
-                let draft = (|| -> Result<(Value, bool), String> {
+                let draft = (|| -> Result<(newport_domain::model::Tunnel, bool), String> {
                     let server = self.server.parse().map_err(|_| "Invalid server")?;
-                    let tunnels = serde_json::from_value::<Vec<newport_domain::model::Tunnel>>(
-                        self.snapshot["config"]["tunnels"].clone(),
-                    )
-                    .map_err(|error| error.to_string())?;
+                    let tunnels = self.saved_forwards()?;
                     connections_rows::editor_draft(
                         &tunnels,
                         server,
@@ -180,7 +166,6 @@ impl Newport {
 mod tests {
     use super::{ListenerSelection, Port, endpoints};
     use crate::connections::fixtures::Listener;
-    use serde_json::json;
 
     #[gpui_kit::test]
     fn dual_stack_forward_options_open_directly_with_an_editable_default(
@@ -248,10 +233,16 @@ mod tests {
             socket.ipv6_only = Some(true);
         }
         row.members.push(ipv6);
-        entry.forwards = vec![
-            json!({"id":"v4", "serverId":"s", "direction":"local", "remoteHost":"127.0.0.1", "remotePort":8000}),
-            json!({"id":"v6", "serverId":"s", "direction":"local", "remoteHost":"::1", "remotePort":8000}),
-        ];
+        let forward = |id, host: &str| newport_protocol::desktop::configuration::Tunnel {
+            remote_host: host.into(),
+            ..crate::snapshot_fixture::tunnel(
+                uuid::Uuid::from_u128(id),
+                crate::snapshot_fixture::SERVER,
+                8000,
+                8000,
+            )
+        };
+        entry.forwards = vec![forward(4, "127.0.0.1"), forward(6, "::1")];
         assert_eq!(entry.port.destination(None).unwrap().host, "localhost");
         let choices = endpoints(&entry);
         assert_eq!(choices.len(), 2);
@@ -349,12 +340,7 @@ mod tests {
                     assert!(!window.has_active_dialog(cx), "{change}");
                     assert!(view.read(cx).notification.is_some(), "{change}");
                 }
-                assert!(
-                    view.read(cx).snapshot["config"]["tunnels"]
-                        .as_array()
-                        .unwrap()
-                        .is_empty()
-                );
+                assert!(view.read(cx).tunnels().is_empty());
             });
         }
     }

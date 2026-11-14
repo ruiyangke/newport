@@ -1,9 +1,7 @@
 //! Container commands and modal review. The shared client validates observed
 //! identities and owns operations; this module owns controls and focus only.
 use super::*;
-use newport_domain::compose::{ComposeCli, ComposeService};
 use newport_protocol::monitor::compose::Action as ComposeAction;
-use serde::Deserialize;
 
 #[cfg(test)]
 #[path = "container_compose_actions_tests.rs"]
@@ -89,7 +87,7 @@ impl ContainersPanel {
                     })),
             );
         }
-        if c.state != domain::ContainerState::Paused {
+        if c.state != ContainerState::Paused {
             let (id, name, title) = (
                 c.id.clone(),
                 c.name.clone(),
@@ -99,7 +97,7 @@ impl ContainersPanel {
                 crate::controls::button("container-shell")
                     .icon(IconName::Terminal)
                     .label("Shell")
-                    .when(c.state != domain::ContainerState::Running, |button| {
+                    .when(c.state != ContainerState::Running, |button| {
                         button.hover_hint("Start the container to open a shell in it")
                     })
                     .disabled(self.client.shell_command(&id, &name).is_err())
@@ -116,11 +114,8 @@ impl ContainersPanel {
         let compose_builds = compose_target
             .as_ref()
             .and_then(|target| self.container_compose_builds(target));
-        if c.state == domain::ContainerState::Running
-            || compose_builds.is_some()
-            || remove.is_some()
-        {
-            let pause = c.state == domain::ContainerState::Running;
+        if c.state == ContainerState::Running || compose_builds.is_some() || remove.is_some() {
+            let pause = c.state == ContainerState::Running;
             let (id, name) = (c.id.clone(), c.name.clone());
             let action = Action::Container {
                 container: c.id.clone(),
@@ -240,14 +235,12 @@ impl ContainersPanel {
         // Read only capability fields: Compose file contents can be several
         // megabytes and are unrelated to this menu's presentation.
         let detail = self.client.compose_project()?;
-        ComposeCli::deserialize(detail.get("cli")?).ok()?;
+        detail.cli.as_ref()?;
         Some(
             detail
-                .get("services")
-                .and_then(Value::as_array)
-                .into_iter()
+                .services
+                .iter()
                 .flatten()
-                .filter_map(|service| ComposeService::deserialize(service).ok())
                 .any(|service| service.name == target.service && service.build),
         )
     }

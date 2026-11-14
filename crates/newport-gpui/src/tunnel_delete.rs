@@ -10,28 +10,28 @@ struct Confirmation {
     error: Option<String>,
 }
 
-pub(super) fn name(value: &Value) -> String {
-    value["name"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("Port {}", value["localPort"]))
+pub(super) fn name(value: &configuration::Tunnel) -> String {
+    if value.name.is_empty() {
+        format!("Port {}", value.local_port)
+    } else {
+        value.name.clone()
+    }
 }
 
 impl Newport {
     pub(super) fn confirm_delete_tunnel(
         &mut self,
-        value: Value,
+        value: configuration::Tunnel,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if window.has_active_dialog(cx) || self.tunnel_busy(&value) {
+        if window.has_active_dialog(cx)
+            || self.tunnel_busy(&value)
+            || value.server_id.to_string() != self.server
+        {
             return;
         }
-        let tunnel = match serde_json::from_value::<Tunnel>(value) {
-            Ok(t) if t.server_id.to_string() == self.server => t,
-            _ => return,
-        };
+        let tunnel = Tunnel::from(&value);
         let owner = cx.weak_entity();
         let form = cx.new(|_| Confirmation {
             owner,

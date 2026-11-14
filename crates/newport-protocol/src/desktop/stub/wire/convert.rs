@@ -1,5 +1,31 @@
 use super::*;
 use crate::encoding::protobuf::generated::newport::desktop::stub as pb;
+#[cfg(test)]
+pub(crate) fn enum_maps() -> Vec<crate::desktop::wire::wire_tables::EnumMap> {
+    use crate::desktop::wire::wire_tables::enum_map;
+    vec![
+        enum_map(
+            "newport.desktop.stub.LaunchReason",
+            |value| launch_reason_from(value).ok(),
+            |value| launch_reason_to(*value),
+        ),
+        enum_map(
+            "newport.desktop.stub.WindowKind",
+            |value| window_kind_from(value).ok(),
+            |value| window_kind_to(*value),
+        ),
+        enum_map(
+            "newport.desktop.stub.Decoration",
+            |value| decoration_from(value).ok(),
+            |value| decoration_to(*value),
+        ),
+        enum_map(
+            "newport.desktop.stub.Activate",
+            |value| activate_from(value).ok(),
+            |value| activate_to(*value),
+        ),
+    ]
+}
 fn required<T>(value: Option<T>) -> Result<T, Error> {
     value.ok_or_else(|| Invalid("required field").into())
 }

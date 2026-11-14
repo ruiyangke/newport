@@ -1,43 +1,24 @@
-//! Validate Git diff wire pages before publishing them to client state.
-//! Accumulated page boundaries are tracked separately.
-use base64::{Engine, engine::general_purpose::STANDARD};
-use serde_json::Value;
+//! Check Git diff pages before publishing them to client state, and join
+//! continuation pages at their file, hunk and line boundaries.
+use newport_protocol::git::{self, FileFragment, HunkFragment, LineFragment, ObjectId, Path};
+
+/// One page of a working-tree or commit diff.
+pub type DiffPage = git::Page<FileFragment, git::DiffMetadata>;
 
 type Result<T> = std::result::Result<T, String>;
 fn invalid(field: &str) -> String {
     format!("Invalid Git diff response ({field}). Refresh to retry.")
 }
-fn count(value: &Value) -> Result<u64> {
-    value
-        .as_u64()
-        .filter(|n| *n <= 9_007_199_254_740_991)
+/// Counts stay within the range every consumer represents exactly.
+fn count(value: u64) -> Result<u64> {
+    (value <= 9_007_199_254_740_991)
+        .then_some(value)
         .ok_or_else(|| invalid("count"))
 }
-fn text(value: &Value) -> Result<&str> {
-    value.as_str().ok_or_else(|| invalid("text"))
+fn required<T>(value: Option<T>, field: &str) -> Result<T> {
+    value.ok_or_else(|| invalid(field))
 }
-fn flag(value: &Value) -> Result<bool> {
-    value.as_bool().ok_or_else(|| invalid("boolean"))
-}
-fn array(value: &Value, max: usize) -> Result<&[Value]> {
-    value
-        .as_array()
-        .filter(|v| v.len() <= max)
-        .map(Vec::as_slice)
-        .ok_or_else(|| invalid("array"))
-}
-fn nullable<T>(
-    value: Option<&Value>,
-    parse: impl FnOnce(&Value) -> Result<T>,
-) -> Result<Option<T>> {
-    match value {
-        Some(Value::Null) => Ok(None),
-        Some(value) => parse(value).map(Some),
-        None => Err(invalid("missing nullable field")),
-    }
-}
-fn hex(value: &Value, len: usize) -> Result<()> {
-    let value = text(value)?;
+fn hex(value: &str, len: usize) -> Result<()> {
     if value.len() != len
         || !value
             .bytes()
@@ -47,22 +28,18 @@ fn hex(value: &Value, len: usize) -> Result<()> {
     }
     Ok(())
 }
-fn oid(value: &Value) -> Result<()> {
-    let len = match value
-        .get("algorithm")
-        .or_else(|| value.get("format"))
-        .and_then(Value::as_str)
-    {
-        Some("sha1") => 40,
-        Some("sha256") => 64,
+fn oid(value: &ObjectId) -> Result<()> {
+    let len = match value.algorithm.as_str() {
+        "sha1" => 40,
+        "sha256" => 64,
         _ => return Err(invalid("object algorithm")),
     };
-    hex(&value["hex"], len)
+    hex(&value.hex, len)
 }
-fn bytes(value: &Value) -> Result<()> {
-    text(&value["display"])?;
+fn bytes(value: &Path) -> Result<()> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
     STANDARD
-        .decode(text(&value["bytesB64"])?)
+        .decode(&value.bytes_b64)
         .map_err(|_| invalid("base64"))?;
     Ok(())
 }
@@ -78,17 +55,10 @@ struct Piece<'a> {
     length: u64,
 }
 impl<'a> Piece<'a> {
-    fn read(value: &'a Value, working: bool) -> Result<Self> {
-        let encoded = text(&value["contentBytesB64"])?;
-        if encoded.len() > 5464 {
-            return Err(invalid("piece size"));
-        }
-        let length = STANDARD
-            .decode(encoded)
-            .map_err(|_| invalid("base64"))?
-            .len() as u64;
-        let complete = flag(&value["lineComplete"])?;
-        let origin = text(&value["origin"])?;
+    fn read(value: &'a LineFragment, working: bool) -> Result<Self> {
+        let length = value.content_bytes_b64.0.len() as u64;
+        let complete = value.line_complete;
+        let origin = value.origin.as_str();
         if length > 4096
             || (!complete && length != 4096)
             || !matches!(origin, " " | "+" | "-" | "=" | ">" | "<")
@@ -96,18 +66,20 @@ impl<'a> Piece<'a> {
             return Err(invalid("line piece"));
         }
         if working {
-            let id = nullable(value.get("id"), |v| hex(v, 64))?;
-            if (complete && matches!(origin, "+" | "-")) != id.is_some() {
+            if let Some(id) = &value.id {
+                hex(id, 64)?;
+            }
+            if (complete && matches!(origin, "+" | "-")) != value.id.is_some() {
                 return Err(invalid("line selection ID"));
             }
         }
         Ok(Self {
-            index: count(&value["lineIndex"])?,
-            offset: count(&value["byteOffset"])?,
+            index: count(value.line_index)?,
+            offset: count(value.byte_offset)?,
             complete,
             origin,
-            old: nullable(value.get("oldLine"), count)?,
-            new: nullable(value.get("newLine"), count)?,
+            old: value.old_line.map(count).transpose()?,
+            new: value.new_line.map(count).transpose()?,
             length,
         })
     }
@@ -130,92 +102,51 @@ impl<'a> Piece<'a> {
     }
 }
 
-/// Accept object and tuple_v1 rows, normalizing tuples for all native consumers.
-/// Called on individual wire responses, before they enter Resources or a cache.
-pub fn decode(page: &mut Value, working: bool, from_start: bool) -> Result<()> {
-    crate::git_page::validate(page)?;
-    // Normalize only explicit tuples. Missing/invalid arrays remain errors below.
-    for file in page["entries"].as_array_mut().expect("validated entries") {
-        if let Some(hunks) = file.get_mut("hunks").and_then(Value::as_array_mut) {
-            for hunk in hunks {
-                if let Some(lines) = hunk.get_mut("lines").and_then(Value::as_array_mut) {
-                    for line in lines {
-                        if let Some(tuple) = line.as_array() {
-                            if tuple.len() != if working { 8 } else { 7 } {
-                                return Err(invalid("line tuple"));
-                            }
-                            let Value::Array(values) = std::mem::take(line) else {
-                                unreachable!()
-                            };
-                            let fields = [
-                                "lineIndex",
-                                "byteOffset",
-                                "lineComplete",
-                                "origin",
-                                "oldLine",
-                                "newLine",
-                                "contentBytesB64",
-                                "id",
-                            ];
-                            *line = Value::Object(
-                                fields
-                                    .into_iter()
-                                    .zip(values)
-                                    .map(|(k, v)| (k.into(), v))
-                                    .collect(),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-    validate(page, working, from_start)
-}
-
-fn validate(page: &Value, working: bool, from_start: bool) -> Result<()> {
-    let meta = &page["metadata"];
-    if flag(&meta["readOnly"])? == working {
+/// Check one wire page, before it enters Resources or a cache. `working`
+/// selects a working-tree comparison; `from_start` a page read without a
+/// cursor, which must also begin at the first file, hunk and line.
+pub fn validate(page: &DiffPage, working: bool, from_start: bool) -> Result<()> {
+    crate::git_page::validate_page(page)?;
+    let meta = &page.metadata;
+    if meta.read_only == working {
         return Err(invalid("comparison mode"));
     }
-    if count(&meta["contextLines"])? > 100 {
+    if count(required(meta.context_lines, "context lines")?.into())? > 100 {
         return Err(invalid("context lines"));
     }
-    let total = count(&meta["totalUnits"])?;
-    let omissions = flag(&meta["hasOmissions"])?;
+    let total = count(required(meta.total_units, "total units")?)?;
+    let omissions = required(meta.has_omissions, "omissions")?;
     let total_files = if working {
-        text(&meta["sourceSnapshot"])?;
-        text(&meta["entryId"])?;
-        if !matches!(
-            text(&meta["side"])?,
-            "head_to_index" | "index_to_worktree" | "head_to_worktree"
-        ) {
-            return Err(invalid("side"));
-        }
-        Some(count(&meta["totalFiles"])?)
+        required(meta.source_snapshot.as_ref(), "source snapshot")?;
+        required(meta.entry_id.as_ref(), "entry")?;
+        required(meta.side, "side")?;
+        Some(count(required(meta.total_files, "total files")?)?)
     } else {
-        oid(&meta["commitOid"])?;
-        nullable(meta.get("parentOid"), oid)?;
-        let index = nullable(meta.get("parentIndex"), count)?;
-        let parents = array(&meta["parents"], 10000)?;
+        oid(required(meta.commit_oid.as_ref(), "commit")?)?;
+        meta.parent_oid.as_ref().map(oid).transpose()?;
+        let index = meta.parent_index.map(count).transpose()?;
+        let parents = required(meta.parents.as_ref(), "parents")?;
+        if parents.len() > 10000 {
+            return Err(invalid("array"));
+        }
         for parent in parents {
             oid(parent)?;
         }
         if parents.is_empty() {
-            if index.is_some() || !meta["parentOid"].is_null() {
+            if index.is_some() || meta.parent_oid.is_some() {
                 return Err(invalid("root parent"));
             }
         } else if index
             .and_then(|i| usize::try_from(i).ok())
             .and_then(|i| parents.get(i))
-            .is_none_or(|p| p["hex"] != meta["parentOid"]["hex"])
+            .is_none_or(|p| Some(&p.hex) != meta.parent_oid.as_ref().map(|o| &o.hex))
         {
             return Err(invalid("selected parent"));
         }
-        bytes(&meta["selectedPath"])?;
+        bytes(required(meta.selected_path.as_ref(), "selected path")?)?;
         None
     };
-    let files = array(&page["entries"], 200)?;
+    let files = &page.entries;
     let mut units = 0;
     let mut previous_file = None;
     let mut tail: Option<(Piece<'_>, Option<u64>)> = None;
@@ -223,29 +154,28 @@ fn validate(page: &Value, working: bool, from_start: bool) -> Result<()> {
         if fi > 0 && tail.is_some_and(|(p, n)| !p.complete || n.is_some_and(|n| p.index + 1 != n)) {
             return Err(invalid("unfinished file"));
         }
-        let file_index = count(&file["fileIndex"])?;
+        let file_index = count(file.file_index)?;
         if previous_file.is_some_and(|p| file_index <= p)
             || (working && from_start && file_index != fi as u64)
         {
             return Err(invalid("file order"));
         }
         previous_file = Some(file_index);
-        nullable(file.get("oldPath"), bytes)?;
-        nullable(file.get("newPath"), bytes)?;
-        nullable(file.get("oldOid"), oid)?;
-        nullable(file.get("newOid"), oid)?;
-        count(&file["oldMode"])?;
-        count(&file["newMode"])?;
-        text(&file["status"])?;
-        flag(&file["binary"])?;
-        count(&file["additions"])?;
-        count(&file["deletions"])?;
-        let omitted = match file.get("omissionReason") {
-            Some(Value::Null) => false,
-            Some(Value::String(s)) if s == "binary" || s == "file_size_limit" => true,
-            _ => return Err(invalid("omission reason")),
+        bytes(&file.old_path)?;
+        bytes(&file.new_path)?;
+        file.old_oid.as_ref().map(oid).transpose()?;
+        file.new_oid.as_ref().map(oid).transpose()?;
+        count(file.additions)?;
+        count(file.deletions)?;
+        let omitted = match file.omission_reason.as_deref() {
+            None => false,
+            Some("binary" | "file_size_limit") => true,
+            Some(_) => return Err(invalid("omission reason")),
         };
-        let hunks = array(&file["hunks"], 5000)?;
+        let hunks = &file.hunks;
+        if hunks.len() > 5000 {
+            return Err(invalid("array"));
+        }
         if omitted && (!omissions || !hunks.is_empty()) {
             return Err(invalid("omitted content"));
         }
@@ -259,19 +189,24 @@ fn validate(page: &Value, working: bool, from_start: bool) -> Result<()> {
             {
                 return Err(invalid("unfinished hunk"));
             }
-            let index = count(&hunk["index"])?;
+            let index = count(hunk.index)?;
             if previous_hunk.is_some_and(|p| index != p + 1)
                 || ((from_start || fi > 0) && hi == 0 && index != 0)
             {
                 return Err(invalid("hunk order"));
             }
             previous_hunk = Some(index);
-            for field in ["oldStart", "oldLines", "newStart", "newLines"] {
-                count(&hunk[field])?;
+            for value in [
+                hunk.old_start,
+                hunk.old_lines,
+                hunk.new_start,
+                hunk.new_lines,
+            ] {
+                count(value)?;
             }
             let total_lines = if working {
-                hex(&hunk["id"], 64)?;
-                let n = count(&hunk["totalLines"])?;
+                hex(required(hunk.id.as_deref(), "hunk")?, 64)?;
+                let n = count(hunk.total_lines)?;
                 if n == 0 {
                     return Err(invalid("hunk length"));
                 }
@@ -279,7 +214,10 @@ fn validate(page: &Value, working: bool, from_start: bool) -> Result<()> {
             } else {
                 None
             };
-            let pieces = array(&hunk["lines"], 5000)?;
+            let pieces = &hunk.lines;
+            if pieces.len() > 5000 {
+                return Err(invalid("array"));
+            }
             if pieces.is_empty() {
                 return Err(invalid("empty hunk"));
             }
@@ -305,7 +243,7 @@ fn validate(page: &Value, working: bool, from_start: bool) -> Result<()> {
             tail = previous_piece.map(|p| (p, total_lines));
         }
     }
-    let more = page["nextCursor"].is_string();
+    let more = page.next_cursor.is_some();
     if units > 5000 || units > total || (more && units == 0) {
         return Err(invalid("page units"));
     }
@@ -323,19 +261,36 @@ fn validate(page: &Value, working: bool, from_start: bool) -> Result<()> {
     Ok(())
 }
 
-/// Join validated pages into canonical files/hunks. Only the incoming bytes and
-/// boundary pieces are decoded again; cumulative counts use array lengths. The
-/// accepted page is borrowed and remains untouched on every failure.
-pub fn merge(previous: &Value, mut incoming: Value, cursor: &str, working: bool) -> Result<Value> {
-    crate::git_page::validate_continuation(previous, &incoming, cursor)?;
-    decode(&mut incoming, working, false)?;
-    let mut files = previous["entries"]
-        .as_array()
-        .ok_or_else(|| invalid("previous files"))?
-        .clone();
-    let Value::Array(fragments) = incoming["entries"].take() else {
-        unreachable!()
-    };
+/// Whether two fragments describe the same file, so a continuation extends
+/// it rather than starting another.
+fn same_file(a: &FileFragment, b: &FileFragment) -> bool {
+    a.file_index == b.file_index
+        && a.old_path == b.old_path
+        && a.new_path == b.new_path
+        && a.old_oid == b.old_oid
+        && a.new_oid == b.new_oid
+        && a.old_mode == b.old_mode
+        && a.new_mode == b.new_mode
+        && a.status == b.status
+        && a.binary == b.binary
+        && a.omission_reason == b.omission_reason
+        && a.additions == b.additions
+        && a.deletions == b.deletions
+}
+
+/// Join a checked continuation page onto an accepted one, into canonical
+/// files and hunks. The accepted page is borrowed and stays untouched on
+/// every failure.
+pub fn merge(
+    previous: &DiffPage,
+    mut incoming: DiffPage,
+    cursor: &str,
+    working: bool,
+) -> Result<DiffPage> {
+    crate::git_page::validate_page_continuation(previous, &incoming, cursor)?;
+    validate(&incoming, working, false)?;
+    let mut files = previous.entries.clone();
+    let fragments = std::mem::take(&mut incoming.entries);
     if fragments.is_empty() {
         return Err(invalid("empty continuation"));
     }
@@ -343,17 +298,17 @@ pub fn merge(previous: &Value, mut incoming: Value, cursor: &str, working: bool)
         let tail = files
             .last_mut()
             .ok_or_else(|| invalid("missing previous file"))?;
-        let old_index = count(&tail["fileIndex"])?;
-        let new_index = count(&fragment["fileIndex"])?;
+        let old_index = tail.file_index;
+        let new_index = fragment.file_index;
         if new_index != old_index {
             if new_index < old_index || (working && new_index != old_index + 1) {
                 return Err(invalid("file continuation order"));
             }
-            if let Some(hunk) = tail["hunks"].as_array().and_then(|h| h.last()) {
+            if let Some(hunk) = tail.hunks.last() {
                 finished_hunk(hunk, working)?;
             }
-            if let Some(hunk) = fragment["hunks"].as_array().and_then(|h| h.first()) {
-                if count(&hunk["index"])? != 0 {
+            if let Some(hunk) = fragment.hunks.first() {
+                if hunk.index != 0 {
                     return Err(invalid("file hunk start"));
                 }
                 starts_hunk(hunk, working)?;
@@ -361,109 +316,76 @@ pub fn merge(previous: &Value, mut incoming: Value, cursor: &str, working: bool)
             files.push(fragment);
             continue;
         }
-        for field in [
-            "fileIndex",
-            "oldPath",
-            "newPath",
-            "oldOid",
-            "newOid",
-            "oldMode",
-            "newMode",
-            "status",
-            "binary",
-            "omissionReason",
-            "additions",
-            "deletions",
-        ] {
-            if tail[field] != fragment[field] {
-                return Err(invalid("file continuation header"));
-            }
+        if !same_file(tail, &fragment) {
+            return Err(invalid("file continuation header"));
         }
-        let previous_hunks = tail
-            .get_mut("hunks")
-            .and_then(Value::as_array_mut)
-            .ok_or_else(|| invalid("previous hunks"))?;
-        let Value::Array(hunks) = fragment["hunks"].take() else {
-            unreachable!()
-        };
-        if previous_hunks.is_empty() || hunks.is_empty() {
+        let hunks = std::mem::take(&mut fragment.hunks);
+        if tail.hunks.is_empty() || hunks.is_empty() {
             return Err(invalid("repeated empty file"));
         }
         for mut hunk in hunks {
-            let last = previous_hunks.last_mut().expect("nonempty hunks");
-            let old_index = count(&last["index"])?;
-            let new_index = count(&hunk["index"])?;
-            if new_index != old_index {
-                if new_index != old_index + 1 {
+            let last = tail.hunks.last_mut().expect("nonempty hunks");
+            if hunk.index != last.index {
+                if hunk.index != last.index + 1 {
                     return Err(invalid("hunk continuation order"));
                 }
                 finished_hunk(last, working)?;
                 starts_hunk(&hunk, working)?;
-                previous_hunks.push(hunk);
+                tail.hunks.push(hunk);
                 continue;
             }
-            for field in ["index", "oldStart", "oldLines", "newStart", "newLines"] {
-                if last[field] != hunk[field] {
-                    return Err(invalid("hunk continuation header"));
-                }
+            if (
+                last.old_start,
+                last.old_lines,
+                last.new_start,
+                last.new_lines,
+            ) != (
+                hunk.old_start,
+                hunk.old_lines,
+                hunk.new_start,
+                hunk.new_lines,
+            ) {
+                return Err(invalid("hunk continuation header"));
             }
-            if working && (last["id"] != hunk["id"] || last["totalLines"] != hunk["totalLines"]) {
+            if working && (last.id != hunk.id || last.total_lines != hunk.total_lines) {
                 return Err(invalid("hunk continuation identity"));
             }
-            let first = hunk["lines"]
-                .as_array()
-                .and_then(|l| l.first())
-                .ok_or_else(|| invalid("empty hunk"))?;
-            let before = last["lines"]
-                .as_array()
-                .and_then(|l| l.last())
+            let first = hunk.lines.first().ok_or_else(|| invalid("empty hunk"))?;
+            let before = last
+                .lines
+                .last()
                 .ok_or_else(|| invalid("empty previous hunk"))?;
             Piece::read(first, working)?.follows(Piece::read(before, working)?)?;
-            let Value::Array(mut pieces) = hunk["lines"].take() else {
-                unreachable!()
-            };
-            last["lines"]
-                .as_array_mut()
-                .expect("validated previous lines")
-                .append(&mut pieces);
+            last.lines.append(&mut hunk.lines);
         }
     }
-    let loaded: u64 = files.iter().try_fold(0u64, |units, file| {
-        let hunks = file["hunks"]
-            .as_array()
-            .ok_or_else(|| invalid("assembled hunks"))?;
-        let count = if hunks.is_empty() {
-            1
-        } else {
-            hunks.iter().try_fold(0u64, |n, h| {
-                h["lines"]
-                    .as_array()
-                    .map(|l| n + l.len() as u64)
-                    .ok_or_else(|| invalid("assembled lines"))
-            })?
-        };
-        Ok::<_, String>(units + count)
-    })?;
-    let total = count(&incoming["metadata"]["totalUnits"])?;
-    let more = incoming["nextCursor"].is_string();
+    let loaded: u64 = files
+        .iter()
+        .map(|file| {
+            if file.hunks.is_empty() {
+                1
+            } else {
+                file.hunks.iter().map(|h| h.lines.len() as u64).sum()
+            }
+        })
+        .sum();
+    let total = incoming.metadata.total_units.unwrap_or_default();
+    let more = incoming.next_cursor.is_some();
     if loaded > total || (more && loaded >= total) || (!more && loaded != total) {
         return Err(invalid("cumulative diff units"));
     }
     if working {
-        let total_files = count(&incoming["metadata"]["totalFiles"])?;
+        let total_files = incoming.metadata.total_files.unwrap_or_default();
         if files.len() as u64 > total_files || (!more && files.len() as u64 != total_files) {
             return Err(invalid("cumulative diff files"));
         }
     }
-    incoming["entries"] = Value::Array(files);
+    incoming.entries = files;
     Ok(incoming)
 }
 
-fn starts_hunk(hunk: &Value, working: bool) -> Result<()> {
-    let first = hunk["lines"]
-        .as_array()
-        .and_then(|l| l.first())
-        .ok_or_else(|| invalid("empty hunk"))?;
+fn starts_hunk(hunk: &HunkFragment, working: bool) -> Result<()> {
+    let first = hunk.lines.first().ok_or_else(|| invalid("empty hunk"))?;
     let piece = Piece::read(first, working)?;
     if piece.index != 0 || piece.offset != 0 {
         return Err(invalid("hunk start"));
@@ -471,13 +393,10 @@ fn starts_hunk(hunk: &Value, working: bool) -> Result<()> {
     Ok(())
 }
 
-fn finished_hunk(hunk: &Value, working: bool) -> Result<()> {
-    let last = hunk["lines"]
-        .as_array()
-        .and_then(|l| l.last())
-        .ok_or_else(|| invalid("empty hunk"))?;
+fn finished_hunk(hunk: &HunkFragment, working: bool) -> Result<()> {
+    let last = hunk.lines.last().ok_or_else(|| invalid("empty hunk"))?;
     let piece = Piece::read(last, working)?;
-    if !piece.complete || (working && piece.index + 1 != count(&hunk["totalLines"])?) {
+    if !piece.complete || (working && piece.index + 1 != hunk.total_lines) {
         return Err(invalid("unfinished hunk"));
     }
     Ok(())
@@ -486,246 +405,265 @@ fn finished_hunk(hunk: &Value, working: bool) -> Result<()> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use serde_json::json;
+    use newport_protocol::git::{Binary, DiffMetadata, Side};
 
-    pub(crate) fn page(working: bool) -> Value {
-        let path = json!({"display":"file","bytesB64":"ZmlsZQ=="});
-        let oid = json!({"algorithm":"sha1","hex":"a".repeat(40)});
-        let meta = if working {
-            json!({"readOnly":false,"sourceSnapshot":"status","entryId":"file-id","side":"index_to_worktree","contextLines":3,"hasOmissions":false,"totalUnits":1,"totalFiles":1})
+    pub(crate) fn object() -> ObjectId {
+        ObjectId {
+            algorithm: "sha1".into(),
+            hex: "a".repeat(40),
+        }
+    }
+
+    /// A one-line diff page of a working-tree or commit comparison.
+    pub(crate) fn page(working: bool) -> DiffPage {
+        let path = Path::new(b"file");
+        let metadata = if working {
+            DiffMetadata {
+                read_only: false,
+                source_snapshot: Some("status".into()),
+                entry_id: Some("file-id".into()),
+                side: Some(Side::IndexToWorktree),
+                context_lines: Some(3),
+                has_omissions: Some(false),
+                total_units: Some(1),
+                total_files: Some(1),
+                ..empty_metadata()
+            }
         } else {
-            json!({"readOnly":true,"commitOid":oid,"parentOid":null,"parentIndex":null,"parents":[],"selectedPath":path,"contextLines":3,"hasOmissions":false,"totalUnits":1})
+            DiffMetadata {
+                read_only: true,
+                commit_oid: Some(object()),
+                parents: Some(vec![]),
+                selected_path: Some(path.clone()),
+                context_lines: Some(3),
+                has_omissions: Some(false),
+                total_units: Some(1),
+                ..empty_metadata()
+            }
         };
-        json!({"snapshot":"snapshot","nextCursor":null,"metadata":meta,"entries":[{
-            "fileIndex":0,"oldPath":path,"newPath":path,"oldOid":null,"newOid":oid,
-            "oldMode":33188,"newMode":33188,"status":"Modified","binary":false,"omissionReason":null,"additions":1,"deletions":0,
-            "hunks":[{"id":if working {json!("b".repeat(64))} else {Value::Null},"index":0,"oldStart":0,"oldLines":0,"newStart":1,"newLines":1,"totalLines":1,
-                "lines":[{"id":if working {json!("c".repeat(64))} else {Value::Null},"lineIndex":0,"byteOffset":0,"lineComplete":true,"origin":"+","oldLine":null,"newLine":1,"contentBytesB64":"eAo="}]}]}]})
+        git::Page {
+            snapshot: "snapshot".into(),
+            next_cursor: None,
+            metadata,
+            entries: vec![FileFragment {
+                file_index: 0,
+                old_path: path.clone(),
+                new_path: path,
+                old_oid: None,
+                new_oid: Some(object()),
+                old_mode: 33188,
+                new_mode: 33188,
+                status: "Modified".into(),
+                binary: false,
+                omission_reason: None,
+                additions: 1,
+                deletions: 0,
+                hunks: vec![HunkFragment {
+                    id: working.then(|| "b".repeat(64)),
+                    index: 0,
+                    old_start: 0,
+                    old_lines: 0,
+                    new_start: 1,
+                    new_lines: 1,
+                    total_lines: 1,
+                    lines: vec![LineFragment {
+                        id: working.then(|| "c".repeat(64)),
+                        line_index: 0,
+                        byte_offset: 0,
+                        line_complete: true,
+                        origin: "+".into(),
+                        old_line: None,
+                        new_line: Some(1),
+                        content_bytes_b64: Binary(b"x\n".to_vec()),
+                    }],
+                }],
+            }],
+        }
+    }
+
+    pub(crate) fn empty_metadata() -> DiffMetadata {
+        DiffMetadata {
+            read_only: false,
+            commit_oid: None,
+            parent_oid: None,
+            parent_index: None,
+            parents: None,
+            source_snapshot: None,
+            entry_id: None,
+            side: None,
+            context_lines: None,
+            selected_path: None,
+            truncated: None,
+            total_files: None,
+            total_units: None,
+            has_omissions: None,
+        }
+    }
+
+    fn line(page: &mut DiffPage) -> &mut LineFragment {
+        &mut page.entries[0].hunks[0].lines[0]
     }
 
     #[test]
-    fn object_and_tuple_pages_have_one_canonical_form() {
+    fn both_comparisons_accept_their_own_metadata() {
         for working in [true, false] {
-            let mut object = page(working);
-            decode(&mut object, working, true).unwrap();
-            let mut tuple = object.clone();
-            let line = &mut tuple["entries"][0]["hunks"][0]["lines"][0];
-            let mut fields = vec![
-                json!(0),
-                json!(0),
-                json!(true),
-                json!("+"),
-                Value::Null,
-                json!(1),
-                json!("eAo="),
-            ];
-            if working {
-                fields.push(line["id"].clone());
-            }
-            *line = json!(fields);
-            decode(&mut tuple, working, true).unwrap();
-            if !working {
-                object["entries"][0]["hunks"][0]["lines"][0]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("id");
-            }
-            assert_eq!(object, tuple);
+            validate(&page(working), working, true).unwrap();
+            assert!(validate(&page(working), !working, true).is_err());
         }
     }
 
     #[test]
-    fn malformed_shapes_and_missing_fields_never_become_empty_content() {
-        for pointer in [
-            "/entries/0",
-            "/entries/0/hunks",
-            "/entries/0/hunks/0",
-            "/entries/0/hunks/0/lines",
-            "/entries/0/hunks/0/lines/0",
-            "/metadata",
-        ] {
-            for bad in [
-                Value::Null,
-                json!(false),
-                json!(17),
-                json!("bad"),
-                json!([]),
-                json!({}),
-            ] {
-                // A file with no text hunks can be a valid metadata-only delta.
-                if pointer == "/entries/0/hunks" && bad == json!([]) {
-                    continue;
-                }
-                let mut response = page(true);
-                *response.pointer_mut(pointer).unwrap() = bad;
-                assert!(decode(&mut response, true, true).is_err(), "{pointer}");
-            }
+    fn missing_metadata_never_becomes_an_empty_comparison() {
+        let edits: [fn(&mut DiffMetadata); 5] = [
+            |m| m.context_lines = None,
+            |m| m.total_units = None,
+            |m| m.has_omissions = None,
+            |m| m.source_snapshot = None,
+            |m| m.total_files = None,
+        ];
+        for edit in edits {
+            let mut response = page(true);
+            edit(&mut response.metadata);
+            assert!(validate(&response, true, true).is_err());
         }
-        for pointer in [
-            "/metadata",
-            "/entries/0",
-            "/entries/0/hunks/0",
-            "/entries/0/hunks/0/lines/0",
-        ] {
-            let keys: Vec<_> = page(true)
-                .pointer(pointer)
-                .unwrap()
-                .as_object()
-                .unwrap()
-                .keys()
-                .cloned()
-                .collect();
-            for key in keys {
-                let mut response = page(true);
-                response
-                    .pointer_mut(pointer)
-                    .unwrap()
-                    .as_object_mut()
-                    .unwrap()
-                    .remove(&key);
-                assert!(
-                    decode(&mut response, true, true).is_err(),
-                    "missing {pointer}/{key}"
-                );
-            }
+        let edits: [fn(&mut DiffMetadata); 3] = [
+            |m| m.commit_oid = None,
+            |m| m.parents = None,
+            |m| m.selected_path = None,
+        ];
+        for edit in edits {
+            let mut response = page(false);
+            edit(&mut response.metadata);
+            assert!(validate(&response, false, true).is_err());
         }
+        let mut response = page(true);
+        response.entries[0].hunks[0].lines.clear();
+        assert!(validate(&response, true, true).is_err());
+        let mut response = page(true);
+        response.snapshot.clear();
+        assert!(validate(&response, true, true).is_err());
     }
 
     #[test]
     fn wrong_mode_ids_counts_and_parent_comparisons_are_rejected() {
-        for (pointer, bad) in [
-            ("/metadata/readOnly", json!(true)),
-            ("/metadata/totalUnits", json!(2)),
-            ("/metadata/totalFiles", json!(2)),
-            ("/metadata/contextLines", json!(101)),
-            ("/metadata/side", json!("unknown")),
-            ("/entries/0/fileIndex", json!(1)),
-            ("/entries/0/hunks/0/index", json!(1)),
-            ("/entries/0/hunks/0/totalLines", json!(2)),
-            ("/entries/0/hunks/0/id", json!("bad")),
-            ("/entries/0/hunks/0/lines/0/id", Value::Null),
-            ("/entries/0/hunks/0/lines/0/contentBytesB64", json!("Zh==")),
-            (
-                "/entries/0/hunks/0/lines/0/lineIndex",
-                json!(9007199254740992u64),
-            ),
-        ] {
+        let edits: [fn(&mut DiffPage); 11] = [
+            |p| p.metadata.read_only = true,
+            |p| p.metadata.total_units = Some(2),
+            |p| p.metadata.total_files = Some(2),
+            |p| p.metadata.context_lines = Some(101),
+            |p| p.entries[0].file_index = 1,
+            |p| p.entries[0].hunks[0].index = 1,
+            |p| p.entries[0].hunks[0].total_lines = 2,
+            |p| p.entries[0].hunks[0].id = Some("bad".into()),
+            |p| line(p).id = None,
+            |p| line(p).origin = "invalid-origin".into(),
+            |p| line(p).line_index = 9_007_199_254_740_992,
+        ];
+        for edit in edits {
             let mut response = page(true);
-            *response.pointer_mut(pointer).unwrap() = bad;
-            assert!(decode(&mut response, true, true).is_err(), "{pointer}");
+            edit(&mut response);
+            assert!(validate(&response, true, true).is_err());
         }
         let mut historical = page(false);
-        historical["metadata"]["parents"] = json!([historical["metadata"]["commitOid"]]);
-        assert!(decode(&mut historical, false, true).is_err());
-        historical["metadata"]["parentIndex"] = json!(0);
-        historical["metadata"]["parentOid"] = historical["metadata"]["commitOid"].clone();
-        decode(&mut historical, false, true).unwrap();
+        historical.metadata.parents = Some(vec![object()]);
+        assert!(validate(&historical, false, true).is_err());
+        historical.metadata.parent_index = Some(0);
+        historical.metadata.parent_oid = Some(object());
+        validate(&historical, false, true).unwrap();
     }
 
     #[test]
     fn partial_page_can_start_mid_line_but_initial_and_final_boundaries_are_checked() {
         let mut first = page(true);
-        first["nextCursor"] = json!("next");
-        first["metadata"]["totalUnits"] = json!(2);
-        let line = &mut first["entries"][0]["hunks"][0]["lines"][0];
-        line["contentBytesB64"] = json!(STANDARD.encode(vec![b'x'; 4096]));
-        line["lineComplete"] = json!(false);
-        line["id"] = Value::Null;
-        decode(&mut first, true, true).unwrap();
+        first.next_cursor = Some("next".into());
+        first.metadata.total_units = Some(2);
+        let piece = line(&mut first);
+        piece.content_bytes_b64 = Binary(vec![b'x'; 4096]);
+        piece.line_complete = false;
+        piece.id = None;
+        validate(&first, true, true).unwrap();
         let mut last = page(true);
-        last["metadata"]["totalUnits"] = json!(2);
-        last["entries"][0]["hunks"][0]["lines"][0]["byteOffset"] = json!(4096);
-        decode(&mut last, true, false).unwrap();
-        assert!(decode(&mut last, true, true).is_err());
-        first["nextCursor"] = Value::Null;
-        assert!(decode(&mut first, true, true).is_err());
+        last.metadata.total_units = Some(2);
+        line(&mut last).byte_offset = 4096;
+        validate(&last, true, false).unwrap();
+        assert!(validate(&last, true, true).is_err());
+        first.next_cursor = None;
+        assert!(validate(&first, true, true).is_err());
     }
 
     #[test]
     fn omissions_and_empty_comparisons_have_explicit_consistent_metadata() {
         let mut omitted = page(true);
-        omitted["metadata"]["hasOmissions"] = json!(true);
-        omitted["entries"][0]["hunks"] = json!([]);
-        omitted["entries"][0]["omissionReason"] = json!("binary");
-        omitted["entries"][0]["binary"] = json!(true);
-        decode(&mut omitted, true, true).unwrap();
-        omitted["metadata"]["hasOmissions"] = json!(false);
-        assert!(decode(&mut omitted, true, true).is_err());
+        omitted.metadata.has_omissions = Some(true);
+        omitted.entries[0].hunks.clear();
+        omitted.entries[0].omission_reason = Some("binary".into());
+        omitted.entries[0].binary = true;
+        validate(&omitted, true, true).unwrap();
+        omitted.metadata.has_omissions = Some(false);
+        assert!(validate(&omitted, true, true).is_err());
+        omitted.metadata.has_omissions = Some(true);
+        omitted.entries[0].omission_reason = Some("unknown".into());
+        assert!(validate(&omitted, true, true).is_err());
         let mut empty = page(true);
-        empty["entries"] = json!([]);
-        empty["metadata"]["totalUnits"] = json!(0);
-        empty["metadata"]["totalFiles"] = json!(0);
-        decode(&mut empty, true, true).unwrap();
-        empty["nextCursor"] = json!("not-empty");
-        assert!(decode(&mut empty, true, true).is_err());
+        empty.entries.clear();
+        empty.metadata.total_units = Some(0);
+        empty.metadata.total_files = Some(0);
+        validate(&empty, true, true).unwrap();
+        empty.next_cursor = Some("not-empty".into());
+        assert!(validate(&empty, true, true).is_err());
     }
 
     #[test]
     fn duplicates_gaps_and_unfinished_lines_cannot_hide_between_hunks() {
         for index in [0, 2] {
             let mut response = page(true);
-            response["metadata"]["totalUnits"] = json!(2);
-            response["entries"][0]["hunks"][0]["totalLines"] = json!(3);
-            let mut next = response["entries"][0]["hunks"][0]["lines"][0].clone();
-            next["lineIndex"] = json!(index);
-            response["entries"][0]["hunks"][0]["lines"]
-                .as_array_mut()
-                .unwrap()
-                .push(next);
-            assert!(decode(&mut response, true, true).is_err());
+            response.metadata.total_units = Some(2);
+            response.entries[0].hunks[0].total_lines = 3;
+            let mut next = line(&mut response).clone();
+            next.line_index = index;
+            response.entries[0].hunks[0].lines.push(next);
+            assert!(validate(&response, true, true).is_err());
         }
         let mut response = page(true);
-        response["metadata"]["totalUnits"] = json!(2);
-        response["metadata"]["totalFiles"] = json!(2);
-        let mut empty_file = response["entries"][0].clone();
-        empty_file["fileIndex"] = json!(1);
-        empty_file["hunks"] = json!([]);
-        response["entries"][0]["hunks"][0]["totalLines"] = json!(2);
-        response["entries"].as_array_mut().unwrap().push(empty_file);
-        assert!(decode(&mut response, true, true).is_err());
+        response.metadata.total_units = Some(2);
+        response.metadata.total_files = Some(2);
+        let mut empty_file = response.entries[0].clone();
+        empty_file.file_index = 1;
+        empty_file.hunks.clear();
+        response.entries[0].hunks[0].total_lines = 2;
+        response.entries.push(empty_file);
+        assert!(validate(&response, true, true).is_err());
     }
 }
 
 #[cfg(test)]
 mod continuation_tests {
-    use super::{decode, merge, tests::page};
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    use serde_json::{Value, json};
+    use super::{DiffPage, merge, tests::page, validate};
+    use newport_protocol::git::Binary;
 
-    fn pair(working: bool) -> (Value, Value) {
+    fn pair(working: bool) -> (DiffPage, DiffPage) {
         let mut first = page(working);
-        first["metadata"]["totalUnits"] = json!(2);
-        first["entries"][0]["hunks"][0]["totalLines"] = json!(2);
-        first["nextCursor"] = json!("next");
+        first.metadata.total_units = Some(2);
+        first.entries[0].hunks[0].total_lines = 2;
+        first.next_cursor = Some("next".into());
         let mut last = first.clone();
-        last["nextCursor"] = Value::Null;
-        last["entries"][0]["hunks"][0]["lines"][0]["lineIndex"] = json!(1);
-        last["entries"][0]["hunks"][0]["lines"][0]["newLine"] = json!(2);
+        last.next_cursor = None;
+        let line = &mut last.entries[0].hunks[0].lines[0];
+        line.line_index = 1;
+        line.new_line = Some(2);
         (first, last)
     }
 
     #[test]
     fn repeated_file_and_hunk_headers_join_without_duplicate_rows() {
         for working in [true, false] {
-            let (mut first, last) = pair(working);
-            decode(&mut first, working, true).unwrap();
+            let (first, last) = pair(working);
+            validate(&first, working, true).unwrap();
             let result = merge(&first, last, "next", working).unwrap();
-            assert_eq!(result["entries"].as_array().unwrap().len(), 1);
-            assert_eq!(result["entries"][0]["hunks"].as_array().unwrap().len(), 1);
-            assert_eq!(
-                result["entries"][0]["hunks"][0]["lines"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-                2
-            );
-            assert_eq!(
-                first["entries"][0]["hunks"][0]["lines"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-                1
-            );
+            assert_eq!(result.entries.len(), 1);
+            assert_eq!(result.entries[0].hunks.len(), 1);
+            assert_eq!(result.entries[0].hunks[0].lines.len(), 2);
+            assert_eq!(first.entries[0].hunks[0].lines.len(), 1);
         }
     }
 
@@ -734,25 +672,23 @@ mod continuation_tests {
         for working in [true, false] {
             let (first, last) = pair(working);
             let original = first.clone();
-            for (pointer, value) in [
-                ("/entries/0/oldMode", json!(33261)),
-                ("/entries/0/oldPath/display", json!("other")),
-                ("/entries/0/additions", json!(8)),
-                ("/entries/0/hunks/0/oldStart", json!(10)),
-                ("/entries/0/hunks/0/lines/0/lineIndex", json!(0)),
-                ("/entries/0/hunks/0/lines/0/byteOffset", json!(1)),
-            ] {
+            let edits: [fn(&mut DiffPage); 6] = [
+                |p| p.entries[0].old_mode = 33261,
+                |p| p.entries[0].old_path = newport_protocol::git::Path::new(b"other"),
+                |p| p.entries[0].additions = 8,
+                |p| p.entries[0].hunks[0].old_start = 10,
+                |p| p.entries[0].hunks[0].lines[0].line_index = 0,
+                |p| p.entries[0].hunks[0].lines[0].byte_offset = 1,
+            ];
+            for edit in edits {
                 let mut changed = last.clone();
-                *changed.pointer_mut(pointer).unwrap() = value;
-                assert!(
-                    merge(&first, changed, "next", working).is_err(),
-                    "{pointer}"
-                );
+                edit(&mut changed);
+                assert!(merge(&first, changed, "next", working).is_err());
                 assert_eq!(first, original);
             }
             assert!(merge(&first, last.clone(), "wrong", working).is_err());
             let mut changed = last;
-            changed["metadata"]["contextLines"] = json!(10);
+            changed.metadata.context_lines = Some(10);
             assert!(merge(&first, changed, "next", working).is_err());
         }
     }
@@ -761,26 +697,27 @@ mod continuation_tests {
     fn final_piece_can_supply_an_id_but_not_change_the_continued_line() {
         let (mut first, mut last) = pair(true);
         for p in [&mut first, &mut last] {
-            p["entries"][0]["hunks"][0]["totalLines"] = json!(1);
+            p.entries[0].hunks[0].total_lines = 1;
         }
-        let before = &mut first["entries"][0]["hunks"][0]["lines"][0];
-        before["id"] = Value::Null;
-        before["lineComplete"] = json!(false);
-        before["contentBytesB64"] = json!(STANDARD.encode(vec![b'x'; 4096]));
-        let after = &mut last["entries"][0]["hunks"][0]["lines"][0];
-        after["lineIndex"] = json!(0);
-        after["newLine"] = json!(1);
-        after["byteOffset"] = json!(4096);
-        decode(&mut first, true, true).unwrap();
+        let before = &mut first.entries[0].hunks[0].lines[0];
+        before.id = None;
+        before.line_complete = false;
+        before.content_bytes_b64 = Binary(vec![b'x'; 4096]);
+        let after = &mut last.entries[0].hunks[0].lines[0];
+        after.line_index = 0;
+        after.new_line = Some(1);
+        after.byte_offset = 4096;
+        validate(&first, true, true).unwrap();
         let result = merge(&first, last.clone(), "next", true).unwrap();
-        assert!(result["entries"][0]["hunks"][0]["lines"][1]["id"].is_string());
-        for (field, value) in [
-            ("origin", json!("-")),
-            ("newLine", json!(3)),
-            ("byteOffset", json!(8192)),
-        ] {
+        assert!(result.entries[0].hunks[0].lines[1].id.is_some());
+        let edits: [fn(&mut DiffPage); 3] = [
+            |p| p.entries[0].hunks[0].lines[0].origin = "-".into(),
+            |p| p.entries[0].hunks[0].lines[0].new_line = Some(3),
+            |p| p.entries[0].hunks[0].lines[0].byte_offset = 8192,
+        ];
+        for edit in edits {
             let mut changed = last.clone();
-            changed["entries"][0]["hunks"][0]["lines"][0][field] = value;
+            edit(&mut changed);
             assert!(merge(&first, changed, "next", true).is_err());
         }
     }
@@ -788,36 +725,36 @@ mod continuation_tests {
     #[test]
     fn new_hunks_and_files_must_follow_finished_predecessors() {
         let (mut first, mut last) = pair(true);
-        first["entries"][0]["hunks"][0]["totalLines"] = json!(1);
-        last["entries"][0]["hunks"][0]["totalLines"] = json!(1);
-        last["entries"][0]["hunks"][0]["index"] = json!(1);
-        last["entries"][0]["hunks"][0]["id"] = json!("d".repeat(64));
-        last["entries"][0]["hunks"][0]["lines"][0]["lineIndex"] = json!(0);
+        first.entries[0].hunks[0].total_lines = 1;
+        let hunk = &mut last.entries[0].hunks[0];
+        hunk.total_lines = 1;
+        hunk.index = 1;
+        hunk.id = Some("d".repeat(64));
+        hunk.lines[0].line_index = 0;
         assert_eq!(
-            merge(&first, last.clone(), "next", true).unwrap()["entries"][0]["hunks"]
-                .as_array()
-                .unwrap()
+            merge(&first, last.clone(), "next", true).unwrap().entries[0]
+                .hunks
                 .len(),
             2
         );
-        first["entries"][0]["hunks"][0]["totalLines"] = json!(2);
+        first.entries[0].hunks[0].total_lines = 2;
         assert!(merge(&first, last.clone(), "next", true).is_err());
-        first["entries"][0]["hunks"][0]["totalLines"] = json!(1);
+        first.entries[0].hunks[0].total_lines = 1;
         for p in [&mut first, &mut last] {
-            p["metadata"]["totalFiles"] = json!(2);
+            p.metadata.total_files = Some(2);
         }
-        last["entries"][0]["fileIndex"] = json!(1);
+        last.entries[0].file_index = 1;
         // The next file cannot start at the second hunk.
         assert!(merge(&first, last.clone(), "next", true).is_err());
-        last["entries"][0]["hunks"][0]["index"] = json!(0);
+        last.entries[0].hunks[0].index = 0;
         assert_eq!(
-            merge(&first, last.clone(), "next", true).unwrap()["entries"]
-                .as_array()
+            merge(&first, last.clone(), "next", true)
                 .unwrap()
+                .entries
                 .len(),
             2
         );
-        last["entries"][0]["fileIndex"] = json!(2);
+        last.entries[0].file_index = 2;
         assert!(merge(&first, last, "next", true).is_err());
     }
 
@@ -825,14 +762,14 @@ mod continuation_tests {
     fn cumulative_counts_reject_early_ends_and_spurious_continuations() {
         for working in [true, false] {
             let (first, mut last) = pair(working);
-            last["nextCursor"] = json!("more");
+            last.next_cursor = Some("more".into());
             assert!(merge(&first, last, "next", working).is_err());
             let (mut first, mut last) = pair(working);
             for p in [&mut first, &mut last] {
-                p["metadata"]["totalUnits"] = json!(3);
+                p.metadata.total_units = Some(3);
             }
             assert!(merge(&first, last.clone(), "next", working).is_err());
-            last["entries"] = json!([]);
+            last.entries.clear();
             assert!(merge(&first, last, "next", working).is_err());
         }
     }
@@ -840,32 +777,27 @@ mod continuation_tests {
     #[test]
     fn many_pages_can_accumulate_more_than_wire_limits() {
         let mut first = page(true);
-        first["metadata"]["totalUnits"] = json!(400);
-        first["metadata"]["totalFiles"] = json!(400);
-        first["nextCursor"] = json!("next");
-        let mut file = first["entries"][0].clone();
-        file["hunks"] = json!([]);
+        first.metadata.total_units = Some(400);
+        first.metadata.total_files = Some(400);
+        first.next_cursor = Some("next".into());
+        let mut file = first.entries[0].clone();
+        file.hunks.clear();
         let files = |start| {
-            Value::Array(
-                (start..start + 200)
-                    .map(|i| {
-                        let mut f = file.clone();
-                        f["fileIndex"] = json!(i);
-                        f
-                    })
-                    .collect(),
-            )
+            (start..start + 200)
+                .map(|i| {
+                    let mut f = file.clone();
+                    f.file_index = i;
+                    f
+                })
+                .collect::<Vec<_>>()
         };
-        first["entries"] = files(0);
+        first.entries = files(0);
         let mut last = first.clone();
-        last["nextCursor"] = Value::Null;
-        last["entries"] = files(200);
-        decode(&mut first, true, true).unwrap();
+        last.next_cursor = None;
+        last.entries = files(200);
+        validate(&first, true, true).unwrap();
         assert_eq!(
-            merge(&first, last, "next", true).unwrap()["entries"]
-                .as_array()
-                .unwrap()
-                .len(),
+            merge(&first, last, "next", true).unwrap().entries.len(),
             400
         );
     }

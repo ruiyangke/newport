@@ -15,8 +15,11 @@ pub(super) struct Preview {
     editor: RefCell<Option<Entity<git_blob_text::BlobText>>>,
 }
 
-fn resolution(entry: &Value, side: usize) -> Option<newport_protocol::git::Action> {
-    newport_client::git_conflict::resolution(entry, SIDES.get(side)?)
+fn resolution(
+    entry: Option<&newport_protocol::git::StatusEntry>,
+    side: usize,
+) -> Option<newport_protocol::git::Action> {
+    newport_client::git_conflict::resolution(entry?, SIDES.get(side)?)
 }
 
 impl Newport {
@@ -50,7 +53,7 @@ impl Newport {
         }
         self.git.conflict.side = side;
         if let Some(newport_protocol::git::Action::ConflictResolve { expected_oid, .. }) =
-            resolution(&self.git.selected, side)
+            resolution(self.git.entry(), side)
         {
             self.git.conflict.content.oid = expected_oid.unwrap_or_default();
             self.request_conflict_preview(false);
@@ -59,7 +62,7 @@ impl Newport {
     fn request_conflict_preview(&mut self, more: bool) {
         let preview = &self.git.conflict;
         if self.git.tab != 0
-            || self.git.selected["conflicted"] != true
+            || !self.git.entry().is_some_and(|entry| entry.conflicted)
             || preview.content.oid.is_empty()
             || preview.content.binary
             || preview.error.is_some()
@@ -90,7 +93,7 @@ impl Newport {
             max_bytes: Some(65536),
             cursor,
         };
-        self.request_git(
+        self.request_git_typed(
             if more {
                 "git-conflict-more"
             } else {
@@ -103,15 +106,20 @@ impl Newport {
         if self.resources.get(key).is_some_and(|r| r.error.is_some()) {
             return;
         }
-        let value = self.value(key);
-        if let Err(error) = self.git.conflict.content.append(&value) {
+        let result = match self.resources.get(key).and_then(|row| row.git()) {
+            Some(newport_protocol::git::Reply::BlobPage(page)) => {
+                self.git.conflict.content.append(page)
+            }
+            _ => Err("Conflict preview response does not match the requested content.".into()),
+        };
+        if let Err(error) = result {
             self.git.conflict.error = Some(error);
         }
     }
     pub(super) fn poll_conflict_preview(&mut self, cx: &App) {
         if self.page == Page::Projects
             && self.git.tab == 0
-            && self.git.selected["conflicted"] == true
+            && self.git.entry().is_some_and(|entry| entry.conflicted)
             && self
                 .git
                 .conflict
@@ -127,11 +135,15 @@ impl Newport {
         if !self.git_can_change_index(true) || self.git.integration_review.is_some() {
             return;
         }
-        let Some(action) = resolution(&self.git.selected, self.git.conflict.side) else {
+        let Some(action) = resolution(self.git.entry(), self.git.conflict.side) else {
             return;
         };
         let side = LABELS[self.git.conflict.side];
-        let path = text(&self.git.selected["path"], "display");
+        let path = self
+            .git
+            .entry()
+            .map(|entry| entry.path.display.clone())
+            .unwrap_or_default();
         let newport_protocol::git::Action::ConflictResolve { expected_oid, .. } = &action else {
             return;
         };
@@ -147,7 +159,7 @@ impl Newport {
             origin: git_integration::ReviewOrigin::Changes,
             id: uuid::Uuid::new_v4(),
             action,
-            snapshot: text(&self.git.page, "snapshot"),
+            snapshot: self.git.snapshot().to_owned(),
             title: format!("Resolve {path} using {side}"),
             detail,
             reset_confirmed: false,
@@ -159,7 +171,7 @@ impl Newport {
     }
     pub(super) fn conflict_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let preview = &self.git.conflict;
-        let action = resolution(&self.git.selected, preview.side);
+        let action = resolution(self.git.entry(), preview.side);
         let absent = matches!(
             &action,
             Some(newport_protocol::git::Action::ConflictResolve {
@@ -181,9 +193,11 @@ impl Newport {
             .border_l_1()
             .border_color(cx.theme().border)
             .child(
-                div()
-                    .p_3()
-                    .child(text(&self.git.selected["path"], "display")),
+                div().p_3().child(
+                    self.git
+                        .entry()
+                        .map_or_else(|| "—".into(), |entry| entry.path.display.clone()),
+                ),
             )
             .child(
                 crate::label(
@@ -300,25 +314,39 @@ impl Newport {
 #[cfg(test)]
 mod tests {
     use super::resolution;
-    use serde_json::json;
+    use newport_protocol::git::{Conflict, ConflictEntry, Path};
+    fn recorded(hex: &str) -> ConflictEntry {
+        ConflictEntry {
+            mode: 0o100644,
+            oid: crate::git_fixture::object(hex),
+            path: Path::new(b"file"),
+        }
+    }
     #[test]
     fn resolutions_capture_recorded_blob_or_explicit_absence() {
         let oid = "a".repeat(40);
-        let entry = json!({"entryId":"entry","conflicted":true,"conflict":{"ours":{"oid":{"hex":oid}},"theirs":null}});
+        let mut entry = crate::git_fixture::status_entry("entry", "file");
+        entry.conflicted = true;
+        entry.conflict = Some(Conflict {
+            base: Some(recorded("")),
+            ours: Some(recorded(&oid)),
+            theirs: None,
+        });
         assert!(
-            matches!(resolution(&entry, 0), Some(newport_protocol::git::Action::ConflictResolve { expected_oid: Some(value), .. }) if value == oid)
+            matches!(resolution(Some(&entry), 0), Some(newport_protocol::git::Action::ConflictResolve { expected_oid: Some(value), .. }) if value == oid)
         );
         assert!(matches!(
-            resolution(&entry, 1),
+            resolution(Some(&entry), 1),
             Some(newport_protocol::git::Action::ConflictResolve {
                 expected_oid: None,
                 ..
             })
         ));
-        assert!(resolution(&entry, 2).is_none());
-        assert!(resolution(&entry, 3).is_none());
+        assert!(resolution(Some(&entry), 2).is_none());
+        assert!(resolution(Some(&entry), 3).is_none());
+        assert!(resolution(None, 0).is_none());
         let mut malformed = entry;
-        malformed["conflict"]["ours"]["oid"]["hex"] = json!("invalid");
-        assert!(resolution(&malformed, 0).is_none());
+        malformed.conflict.as_mut().unwrap().ours = Some(recorded("invalid"));
+        assert!(resolution(Some(&malformed), 0).is_none());
     }
 }

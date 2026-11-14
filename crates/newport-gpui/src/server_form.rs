@@ -35,13 +35,11 @@ enum Route {
     Command,
 }
 impl Route {
-    fn of(value: &Value) -> Self {
-        if value["proxy"]["jump"].is_string() {
-            Self::Jump
-        } else if value["proxy"]["command"].is_string() {
-            Self::Command
-        } else {
-            Self::Direct
+    fn of(server: &configuration::Server) -> Self {
+        match server.proxy {
+            Some(configuration::Proxy::Jump(_)) => Self::Jump,
+            Some(configuration::Proxy::Command(_)) => Self::Command,
+            None => Self::Direct,
         }
     }
     fn value(self) -> &'static str {
@@ -93,7 +91,7 @@ impl FormError {
 
 pub(super) struct ServerForm {
     owner: WeakEntity<Newport>,
-    value: Value,
+    value: configuration::Server,
     fields: Vec<Entity<InputState>>,
     authentication: Entity<ChoiceState>,
     key: Entity<ChoiceState>,
@@ -103,7 +101,7 @@ pub(super) struct ServerForm {
     jump_hosts: Entity<ChoiceState>,
     any_jump_hosts: bool,
     jump: Option<String>,
-    keys: Vec<Value>,
+    keys: Vec<desktop::connection::AgentKey>,
     keys_loading: bool,
     key_revision: Option<Instant>,
     file_mode: bool,
@@ -128,7 +126,7 @@ pub(super) struct ServerForm {
 impl Newport {
     pub(super) fn edit_server(
         &mut self,
-        value: Option<Value>,
+        value: Option<configuration::Server>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -137,7 +135,7 @@ impl Newport {
     /// Opens the server's settings at the field `fix` points to.
     pub(super) fn edit_server_at(
         &mut self,
-        value: Option<Value>,
+        value: Option<configuration::Server>,
         fix: Option<Fix>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -151,27 +149,42 @@ impl Newport {
         let existing = value.is_some();
         if value.as_ref().is_some_and(|server| {
             self.resources
-                .get(&format!("server-delete:{}", text(server, "id")))
+                .get(&format!("server-delete:{}", server.id))
                 .is_some_and(|r| r.pending)
         }) {
             return;
         }
         self.server_picker.update(cx, |picker, cx| picker.close(cx));
-        let value = value.unwrap_or_else(|| json!({"id":uuid::Uuid::new_v4(),"name":"","sshHost":"","sshUser":"","sshPort":22,"identityFile":null,"agentSource":null,"agentKeyFingerprint":null,"authMethod":"publicKey"}));
+        let value = value.unwrap_or_else(|| configuration::Server {
+            id: uuid::Uuid::new_v4(),
+            name: String::new(),
+            ssh_user: String::new(),
+            ssh_host: String::new(),
+            ssh_port: 22,
+            identity_file: None,
+            agent_source: None,
+            agent_key_fingerprint: None,
+            auth_method: configuration::AuthMethod::PublicKey,
+            clipboard_enabled: false,
+            browser_enabled: false,
+            agent_install_approved: false,
+            setup_complete: false,
+            proxy: None,
+        });
         self.resources.invalidate("server-save");
         self.resources.invalidate(KEYS);
-        if value["authMethod"] != "password" {
-            self.request(
+        if value.auth_method != configuration::AuthMethod::Password {
+            self.request_typed(
                 KEYS,
-                desktop::Operation::Connection(Box::new(
+                Ok(desktop::Operation::Connection(Box::new(
                     desktop::connection::Operation::SshAgentKeys(Box::new(
                         newport_protocol::common::Present {},
                     )),
-                )),
+                ))),
             );
         }
         let owner = cx.weak_entity();
-        let servers = rows(&self.snapshot["config"]["servers"]);
+        let servers = self.servers().to_vec();
         let form = cx.new(|cx| {
             let mut form = ServerForm::new(owner, value, existing, &servers, window, cx);
             form.first = match fix {
@@ -192,23 +205,23 @@ impl Newport {
 impl ServerForm {
     fn new(
         owner: WeakEntity<Newport>,
-        value: Value,
+        value: configuration::Server,
         existing: bool,
-        servers: &[Value],
+        servers: &[configuration::Server],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let initial = [
-            text(&value, "name"),
-            text(&value, "sshHost"),
-            text(&value, "sshPort"),
-            text(&value, "sshUser"),
-            value["identityFile"].as_str().unwrap_or_default().into(),
+            value.name.clone(),
+            value.ssh_host.clone(),
+            value.ssh_port.to_string(),
+            value.ssh_user.clone(),
+            value.identity_file.clone().unwrap_or_default(),
             String::new(),
-            value["proxy"]["command"]
-                .as_str()
-                .unwrap_or_default()
-                .into(),
+            match &value.proxy {
+                Some(configuration::Proxy::Command(command)) => command.to_string(),
+                _ => String::new(),
+            },
         ];
         let fields: Vec<_> = initial
             .clone()
@@ -242,13 +255,14 @@ impl ServerForm {
                 window,
                 cx,
             );
-            state.set_selected_value(&text(&value, "authMethod"), window, cx);
+            state.set_selected_value(&auth_choice(value.auth_method).to_owned(), window, cx);
             state
         });
-        let file_mode = value["identityFile"]
-            .as_str()
+        let file_mode = value
+            .identity_file
+            .as_deref()
             .is_some_and(|s| !s.is_empty());
-        let keys_loading = value["authMethod"] != "password";
+        let keys_loading = value.auth_method != configuration::AuthMethod::Password;
         let selected = selected_key(&value, file_mode);
         let key = cx.new(|cx| {
             let mut state =
@@ -271,15 +285,15 @@ impl ServerForm {
             state.set_selected_value(&route.value().to_owned(), window, cx);
             state
         });
-        let choices = jump_choices(servers, &value["id"]);
+        let choices = jump_choices(servers, value.id);
         let any_jump_hosts = !choices.is_empty();
         // A saved jump host that can't be chosen any more is chosen again.
-        let jump = match value["proxy"]["jump"].as_str() {
-            Some(saved) => choices
+        let jump = match &value.proxy {
+            Some(configuration::Proxy::Jump(saved)) => choices
                 .iter()
-                .find(|choice| choice.value == saved)
+                .find(|choice| choice.value == saved.to_string())
                 .map(|choice| choice.value.clone()),
-            None => choices.first().map(|choice| choice.value.clone()),
+            _ => choices.first().map(|choice| choice.value.clone()),
         };
         let jump_hosts = cx.new(|cx| {
             let mut state = SelectState::new(choices, None, window, cx);
@@ -314,7 +328,11 @@ impl ServerForm {
                     if this.pending {
                         return;
                     }
-                    this.value["authMethod"] = json!(value);
+                    this.value.auth_method = if value == "password" {
+                        configuration::AuthMethod::Password
+                    } else {
+                        configuration::AuthMethod::PublicKey
+                    };
                     this.error = None;
                     if value == "publicKey" {
                         this.refresh_keys(cx);
@@ -489,7 +507,13 @@ impl ServerForm {
             .resources
             .get(KEYS)
             .filter(|r| !r.pending && r.finished_at != self.key_revision)
-            .map(|r| (r.value.clone(), r.error.clone(), r.finished_at));
+            .map(|r| {
+                let keys = match owner.connection_reply(KEYS) {
+                    Some(desktop::connection::Reply::SshAgentKeys(list)) => list.keys.clone(),
+                    _ => Vec::new(),
+                };
+                (keys, r.error.clone(), r.finished_at)
+            });
         let save_result = self
             .pending
             .then(|| {
@@ -504,18 +528,24 @@ impl ServerForm {
             .resources
             .get(LOOKUP)
             .filter(|r| !r.pending && r.finished_at != self.lookup_revision)
-            .map(|r| (r.value.clone(), r.error.is_none(), r.finished_at));
+            .map(|r| {
+                let resolved = match owner.connection_reply(LOOKUP) {
+                    Some(desktop::connection::Reply::SshResolve(resolved)) => (**resolved).clone(),
+                    _ => Default::default(),
+                };
+                (resolved, r.error.is_none(), r.finished_at)
+            });
         if let Some((value, ok, revision)) = lookup_result {
             self.lookup_revision = revision;
             if ok {
                 self.fill_from_config(&value, window, cx);
             }
         }
-        if let Some((value, error, revision)) = key_result {
+        if let Some((keys, error, revision)) = key_result {
             self.key_revision = revision;
             self.keys_loading = false;
             if error.is_none() {
-                self.keys = rows(&value["keys"]);
+                self.keys = keys;
             }
             self.sync_key_choices(window, cx);
             cx.notify();
@@ -543,13 +573,13 @@ impl ServerForm {
         }
         let request = host.clone();
         let result = self.owner.update(cx, |owner, cx| {
-            owner.request(
+            owner.request_typed(
                 LOOKUP,
-                desktop::Operation::Connection(Box::new(
+                Ok(desktop::Operation::Connection(Box::new(
                     desktop::connection::Operation::SshResolve(Box::new(
                         desktop::connection::SshResolveArgs { host: request },
                     )),
-                )),
+                ))),
             );
             cx.notify();
         });
@@ -560,7 +590,12 @@ impl ServerForm {
 
     /// Fills the fields the person hasn't typed in with what the SSH config
     /// sets, for the host the field still holds.
-    fn fill_from_config(&mut self, value: &Value, window: &mut Window, cx: &mut Context<Self>) {
+    fn fill_from_config(
+        &mut self,
+        value: &desktop::connection::SshResolved,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let host = self.fields[HOST].read(cx).value().trim().to_owned();
         if self.pending || self.lookup.as_ref() != Some(&host) {
             return;
@@ -569,7 +604,7 @@ impl ServerForm {
         let set = |this: &mut Self, index: usize, text: &str, window: &mut Window, cx: &mut App| {
             this.fields[index].update(cx, |input, cx| input.set_value(text, window, cx));
         };
-        if let Some(hostname) = value["hostname"].as_str().filter(|_| !self.typed[HOST]) {
+        if let Some(hostname) = value.hostname.as_deref().filter(|_| !self.typed[HOST]) {
             if !self.typed[NAME] && self.fields[NAME].read(cx).value().trim().is_empty() {
                 set(self, NAME, &host, window, cx);
             }
@@ -578,27 +613,27 @@ impl ServerForm {
             self.lookup = Some(hostname.to_owned());
             filled.push("host");
         }
-        if let Some(user) = value["user"].as_str().filter(|_| !self.typed[USER]) {
+        if let Some(user) = value.user.as_deref().filter(|_| !self.typed[USER]) {
             set(self, USER, user, window, cx);
             filled.push("username");
         }
-        if let Some(port) = value["port"].as_u64().filter(|_| !self.typed[PORT]) {
+        if let Some(port) = value.port.filter(|_| !self.typed[PORT]) {
             set(self, PORT, &port.to_string(), window, cx);
             filled.push("port");
         }
-        if let Some(path) = value["identityFile"]
-            .as_str()
-            .filter(|_| !self.typed[IDENTITY] && self.value["authMethod"] != "password")
-        {
+        if let Some(path) = value.identity_file.as_deref().filter(|_| {
+            !self.typed[IDENTITY] && self.value.auth_method != configuration::AuthMethod::Password
+        }) {
             self.file_mode = true;
-            self.value["agentSource"] = Value::Null;
-            self.value["agentKeyFingerprint"] = Value::Null;
+            self.value.agent_source = None;
+            self.value.agent_key_fingerprint = None;
             set(self, IDENTITY, path, window, cx);
             self.sync_key_choices(window, cx);
             filled.push("key file");
         }
-        if let Some(command) = value["proxyCommand"]
-            .as_str()
+        if let Some(command) = value
+            .proxy_command
+            .as_deref()
             .filter(|_| !self.route_chosen && !self.typed[PROXY])
         {
             self.route = Route::Command;
@@ -608,8 +643,9 @@ impl ServerForm {
             set(self, PROXY, command, window, cx);
             filled.push("proxy command");
         }
-        let jump = value["proxyJump"]
-            .as_str()
+        let jump = value
+            .proxy_jump
+            .as_deref()
             .filter(|_| !self.route_chosen)
             .map(|jump| format!(" It connects through {jump}: add it as a server and choose it as the jump host."));
         self.lookup_note = (!filled.is_empty() || jump.is_some()).then(|| {
@@ -629,13 +665,13 @@ impl ServerForm {
             return;
         }
         let result = self.owner.update(cx, |owner, cx| {
-            owner.request(
+            owner.request_typed(
                 KEYS,
-                desktop::Operation::Connection(Box::new(
+                Ok(desktop::Operation::Connection(Box::new(
                     desktop::connection::Operation::SshAgentKeys(Box::new(
                         newport_protocol::common::Present {},
                     )),
-                )),
+                ))),
             );
             cx.notify();
         });
@@ -668,15 +704,11 @@ impl ServerForm {
             let focus = self.fields[IDENTITY].focus_handle(cx);
             window.defer(cx, move |window, cx| focus.focus(window, cx));
         } else {
-            self.value["identityFile"] = Value::Null;
+            self.value.identity_file = None;
             self.fields[IDENTITY].update(cx, |input, cx| input.set_value("", window, cx));
         }
-        self.value["agentSource"] = selected_key
-            .map(|key| key["source"].clone())
-            .unwrap_or(Value::Null);
-        self.value["agentKeyFingerprint"] = selected_key
-            .map(|key| key["fingerprint"].clone())
-            .unwrap_or(Value::Null);
+        self.value.agent_source = selected_key.map(|key| key.source.clone());
+        self.value.agent_key_fingerprint = selected_key.map(|key| key.fingerprint.clone());
         self.error = None;
         cx.notify();
     }
@@ -699,7 +731,16 @@ impl ServerForm {
         cx.notify();
     }
 
-    fn draft(&self, cx: &App) -> Result<(Value, Value), FormError> {
+    fn draft(
+        &self,
+        cx: &App,
+    ) -> Result<
+        (
+            configuration::Server,
+            Option<newport_protocol::common::Secret>,
+        ),
+        FormError,
+    > {
         let values: Vec<_> = self
             .fields
             .iter()
@@ -721,7 +762,7 @@ impl ServerForm {
         if values[USER].trim().is_empty() {
             return Err(invalid(USER, "Enter a username."));
         }
-        let password_auth = self.value["authMethod"] == "password";
+        let password_auth = self.value.auth_method == configuration::AuthMethod::Password;
         if password_auth && !self.existing && values[PASSWORD].is_empty() {
             return Err(invalid(PASSWORD, "Enter a password."));
         }
@@ -729,38 +770,40 @@ impl ServerForm {
             return Err(invalid(IDENTITY, "Enter an identity-file path."));
         }
         let proxy = match self.route {
-            Route::Direct => Value::Null,
-            Route::Jump => json!({"jump": self.jump.as_deref().ok_or_else(|| {
-                FormError::general(if self.any_jump_hosts {
-                    "Choose a jump host."
-                } else {
-                    NO_JUMP_HOSTS
-                })
-            })?}),
+            Route::Direct => None,
+            Route::Jump => {
+                let jump = self.jump.as_deref().ok_or_else(|| {
+                    FormError::general(if self.any_jump_hosts {
+                        "Choose a jump host."
+                    } else {
+                        NO_JUMP_HOSTS
+                    })
+                })?;
+                let jump = uuid::Uuid::parse_str(jump)
+                    .map_err(|_| FormError::general("Choose a jump host."))?;
+                Some(configuration::Proxy::Jump(Box::new(jump)))
+            }
             Route::Command if values[PROXY].trim().is_empty() => {
                 return Err(invalid(PROXY, "Enter a proxy command."));
             }
-            Route::Command => json!({"command": values[PROXY].trim()}),
+            Route::Command => Some(configuration::Proxy::Command(Box::new(
+                values[PROXY].trim().to_owned(),
+            ))),
         };
         let mut value = self.value.clone();
-        value["proxy"] = proxy;
-        for (field, index) in [("name", NAME), ("sshHost", HOST), ("sshUser", USER)] {
-            value[field] = json!(values[index].trim());
-        }
-        value["sshPort"] = json!(port);
+        value.proxy = proxy;
+        value.name = values[NAME].trim().to_owned();
+        value.ssh_host = values[HOST].trim().to_owned();
+        value.ssh_user = values[USER].trim().to_owned();
+        value.ssh_port = port;
         if self.file_mode {
-            value["identityFile"] = if values[IDENTITY].trim().is_empty() {
-                Value::Null
-            } else {
-                json!(values[IDENTITY].trim())
-            };
+            let path = values[IDENTITY].trim();
+            value.identity_file = (!path.is_empty()).then(|| path.to_owned());
         }
-        // Password bytes are deliberately not trimmed; null keeps the saved password.
-        let password = if values[PASSWORD].is_empty() {
-            Value::Null
-        } else {
-            json!(values[PASSWORD])
-        };
+        // Password bytes are deliberately not trimmed; none keeps the saved password.
+        let password = (!values[PASSWORD].is_empty()).then(|| newport_protocol::common::Secret {
+            value: values[PASSWORD].clone().into_bytes().into(),
+        });
         Ok((value, password))
     }
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -776,13 +819,11 @@ impl ServerForm {
         };
         let result = self.owner.update(cx,|owner,cx| {
             if !owner.configuration_available() { return Err("The server configuration is unavailable. Try again after reconnecting.".to_owned()); }
-            if self.existing && !rows(&owner.snapshot["config"]["servers"]).iter().any(|server| server["id"] == self.value["id"]) {
+            if self.existing && !owner.servers().iter().any(|server| server.id == self.value.id) {
                 return Err("This server was removed. Cancel this editor and add a new server if needed.".to_owned());
             }
-            if owner.resources.get(&format!("server-delete:{}",text(&self.value,"id"))).is_some_and(|r| r.pending) { return Err("This server is being deleted.".to_owned()); }
-            let server=desktop_server_record(&server).map_err(|error|error.to_string())?;
-            let password=match password { Value::Null=>None,Value::String(value)=>Some(newport_protocol::common::Secret { value:value.into_bytes().into() }),_=>return Err("Invalid password.".to_owned()) };
-            owner.request("server-save",desktop::Operation::Configuration(Box::new(desktop::configuration::Operation::SaveServer(Box::new(desktop::configuration::SaveServerArgs { server,password })))));
+            if owner.resources.get(&format!("server-delete:{}",self.value.id)).is_some_and(|r| r.pending) { return Err("This server is being deleted.".to_owned()); }
+            owner.request_typed("server-save",Ok(desktop::Operation::Configuration(Box::new(desktop::configuration::Operation::SaveServer(Box::new(desktop::configuration::SaveServerArgs { server,password }))))));
             cx.notify();
             Ok(())
         }).map_err(|_| "The main window is no longer available.".to_owned()).and_then(|r| r);
@@ -814,9 +855,9 @@ impl ServerForm {
         cx.notify();
     }
     fn error_row(&self) -> usize {
-        if self.value["authMethod"] == "password" {
+        if self.value.auth_method == configuration::AuthMethod::Password {
             8
-        } else if self.file_mode && self.value["agentKeyFingerprint"].is_null() {
+        } else if self.file_mode && self.value.agent_key_fingerprint.is_none() {
             10
         } else {
             9
@@ -940,7 +981,7 @@ impl ServerForm {
 impl Render for ServerForm {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let compact = compact(window);
-        let key_auth = self.value["authMethod"] != "password";
+        let key_auth = self.value.auth_method != configuration::AuthMethod::Password;
         let mut body = div()
             .id("server-editor-body")
             .debug_selector(|| "server-editor-viewport".into())
@@ -996,7 +1037,7 @@ impl Render for ServerForm {
                 )),
             ));
         if key_auth {
-            let fingerprint = self.value["agentKeyFingerprint"].as_str();
+            let fingerprint = self.value.agent_key_fingerprint.clone();
             body = body
                 .child(self.scroll.row(
                     7,
@@ -1044,7 +1085,7 @@ impl Render for ServerForm {
                             }),
                     ),
                 );
-            if self.file_mode && self.value["agentKeyFingerprint"].is_null() {
+            if self.file_mode && self.value.agent_key_fingerprint.is_none() {
                 body = body.child(self.scroll.row(
                     9,
                     self.input_field(IDENTITY, "Identity file", cx).child(help(
@@ -1085,26 +1126,38 @@ impl Render for ServerForm {
     }
 }
 
-fn selected_key(value: &Value, file_mode: bool) -> String {
-    value["agentKeyFingerprint"]
-        .as_str()
+/// The authentication choice a saved method selects.
+fn auth_choice(method: configuration::AuthMethod) -> &'static str {
+    match method {
+        configuration::AuthMethod::PublicKey => "publicKey",
+        configuration::AuthMethod::Password => "password",
+    }
+}
+fn selected_key(value: &configuration::Server, file_mode: bool) -> String {
+    value
+        .agent_key_fingerprint
+        .as_deref()
         .map(|fingerprint| {
             format!(
                 "{}:{fingerprint}",
-                value["agentSource"].as_str().unwrap_or("system")
+                value.agent_source.as_deref().unwrap_or("system")
             )
         })
         .unwrap_or_else(|| if file_mode { "file" } else { "automatic" }.into())
 }
-fn key_id(value: &Value) -> String {
-    format!("{}:{}", text(value, "source"), text(value, "fingerprint"))
+fn key_id(key: &desktop::connection::AgentKey) -> String {
+    format!("{}:{}", key.source, key.fingerprint)
 }
-fn key_choices(value: &Value, keys: &[Value], loading: bool) -> Vec<Choice> {
+fn key_choices(
+    value: &configuration::Server,
+    keys: &[desktop::connection::AgentKey],
+    loading: bool,
+) -> Vec<Choice> {
     let mut choices = vec![
         Choice::new("automatic", "Automatic · system agent and default keys"),
         Choice::new("file", "Enter a key-file path…"),
     ];
-    if value["agentKeyFingerprint"].is_string()
+    if value.agent_key_fingerprint.is_some()
         && !keys
             .iter()
             .any(|key| key_id(key) == selected_key(value, false))
@@ -1126,16 +1179,15 @@ fn key_choices(value: &Value, keys: &[Value], loading: bool) -> Vec<Choice> {
             key_id(key),
             format!(
                 "{} · {} · {}",
-                if key["source"] == "onePassword" {
+                if key.source == "onePassword" {
                     "1Password"
                 } else {
                     "System agent"
                 },
-                key["comment"]
-                    .as_str()
+                Some(key.comment.as_str())
                     .filter(|comment| !comment.is_empty())
-                    .unwrap_or(key["algorithm"].as_str().unwrap_or_default()),
-                text(key, "fingerprint")
+                    .unwrap_or(&key.algorithm),
+                key.fingerprint
             ),
         )
     }));
@@ -1143,21 +1195,23 @@ fn key_choices(value: &Value, keys: &[Value], loading: bool) -> Vec<Choice> {
 }
 /// The saved servers `id` may connect through: all but itself and the ones
 /// that already connect through it.
-fn jump_choices(servers: &[Value], id: &Value) -> Vec<Choice> {
-    let mut behind = vec![id.clone()];
+fn jump_choices(servers: &[configuration::Server], id: uuid::Uuid) -> Vec<Choice> {
+    let mut behind = vec![id];
     let mut index = 0;
-    while let Some(jump) = behind.get(index).cloned() {
+    while let Some(jump) = behind.get(index).copied() {
         for server in servers {
-            if server["proxy"]["jump"] == jump && !behind.contains(&server["id"]) {
-                behind.push(server["id"].clone());
+            if matches!(&server.proxy, Some(configuration::Proxy::Jump(through)) if **through == jump)
+                && !behind.contains(&server.id)
+            {
+                behind.push(server.id);
             }
         }
         index += 1;
     }
     servers
         .iter()
-        .filter(|server| !behind.contains(&server["id"]))
-        .map(|server| Choice::new(text(server, "id"), server_picker::display_name(server)))
+        .filter(|server| !behind.contains(&server.id))
+        .map(|server| Choice::new(server.id.to_string(), server_picker::display_name(server)))
         .collect()
 }
 /// "a", "a and b", "a, b and c".
@@ -1215,6 +1269,7 @@ mod tests {
         FormError, HOST, IDENTITY, PASSWORD, PORT, PROXY, Route, ServerForm, USER, jump_choices,
         key_choices,
     };
+    use desktop::connection::{AgentKey, SshResolved};
     use gpui::{
         AppContext, Context, Entity, Focusable, IntoElement, Render, Styled, WeakEntity, Window,
         div, px,
@@ -1223,7 +1278,30 @@ mod tests {
     use gpui_kit as gpui;
     use gpui_kit::component::WindowExt as _;
     use newport_protocol::desktop;
-    use serde_json::{Value, json};
+    use newport_protocol::desktop::configuration::{AuthMethod, Proxy, Server};
+    /// An agent key with no comment of its own unless `comment` names one.
+    fn agent_key(source: &str, fingerprint: &str, comment: &str) -> AgentKey {
+        AgentKey {
+            source: source.into(),
+            comment: comment.into(),
+            fingerprint: fingerprint.into(),
+            algorithm: "ed25519".into(),
+        }
+    }
+
+    /// A saved server named `name` with this id, reached directly or as `proxy` says.
+    fn saved(id: uuid::Uuid, name: &str, proxy: Option<Proxy>) -> Server {
+        Server {
+            proxy,
+            ..crate::snapshot_fixture::server(id, name)
+        }
+    }
+    fn jump(id: uuid::Uuid) -> Option<Proxy> {
+        Some(Proxy::Jump(Box::new(id)))
+    }
+    fn command(command: &str) -> Option<Proxy> {
+        Some(Proxy::Command(Box::new(command.into())))
+    }
 
     struct Host;
     impl Render for Host {
@@ -1235,13 +1313,13 @@ mod tests {
         cx: &mut TestAppContext,
         existing: bool,
     ) -> (Entity<ServerForm>, &mut VisualTestContext) {
-        editor_with(cx, existing, Value::Null, vec![])
+        editor_with(cx, existing, None, vec![])
     }
     fn editor_with(
         cx: &mut TestAppContext,
         existing: bool,
-        proxy: Value,
-        servers: Vec<Value>,
+        proxy: Option<Proxy>,
+        servers: Vec<Server>,
     ) -> (Entity<ServerForm>, &mut VisualTestContext) {
         cx.update(|cx| {
             gpui_kit::component::init(cx);
@@ -1253,12 +1331,39 @@ mod tests {
             gpui_kit::base::Root::new(content, window, cx)
         });
         cx.simulate_resize(gpui::size(px(500.), px(440.)));
-        let form = cx.update(|window,cx| {
+        let form = cx.update(|window, cx| {
             window.activate_window();
-            let value = json!({"id":uuid::Uuid::new_v4(),"name":"","sshHost":"localhost","sshPort":22,"sshUser":"developer","authMethod":"publicKey","identityFile":null,"agentKeyFingerprint":null,"agentSource":null,"clipboardEnabled":true,"proxy":proxy});
-            let form = cx.new(|cx|ServerForm::new(WeakEntity::new_invalid(),value,existing,&servers,window,cx));
-            form.update(cx, |form,cx| { form.keys_loading=false; form.sync_key_choices(window,cx); });
-            ServerForm::open(form.clone(),window,cx);
+            let value = Server {
+                id: uuid::Uuid::new_v4(),
+                name: String::new(),
+                ssh_user: "developer".into(),
+                ssh_host: "localhost".into(),
+                ssh_port: 22,
+                identity_file: None,
+                agent_source: None,
+                agent_key_fingerprint: None,
+                auth_method: AuthMethod::PublicKey,
+                clipboard_enabled: true,
+                browser_enabled: false,
+                agent_install_approved: false,
+                setup_complete: false,
+                proxy,
+            };
+            let form = cx.new(|cx| {
+                ServerForm::new(
+                    WeakEntity::new_invalid(),
+                    value,
+                    existing,
+                    &servers,
+                    window,
+                    cx,
+                )
+            });
+            form.update(cx, |form, cx| {
+                form.keys_loading = false;
+                form.sync_key_choices(window, cx);
+            });
+            ServerForm::open(form.clone(), window, cx);
             form
         });
         draw(cx);
@@ -1353,7 +1458,7 @@ mod tests {
             .try_iter()
             .find(|work| work.key == "server-save")
             .unwrap();
-        let crate::request_dispatch::Request::Desktop(operation) = &save.request else {
+        let crate::request_dispatch::Request::Typed(operation) = &save.request else {
             panic!("desktop save");
         };
         let desktop::Operation::Configuration(operation) = operation.as_ref() else {
@@ -1362,36 +1467,30 @@ mod tests {
         let desktop::configuration::Operation::SaveServer(args) = operation.as_ref() else {
             panic!("server save");
         };
-        let server = &args.server;
-        let saved = json!({"id":server.id,"name":server.name,"sshHost":server.ssh_host,"sshUser":server.ssh_user,"sshPort":server.ssh_port,"identityFile":server.identity_file,"agentSource":server.agent_source,"agentKeyFingerprint":server.agent_key_fingerprint,"authMethod":match server.auth_method { desktop::configuration::AuthMethod::PublicKey=>"publicKey",desktop::configuration::AuthMethod::Password=>"password" },"clipboardEnabled":server.clipboard_enabled,"browserEnabled":server.browser_enabled,"agentInstallApproved":server.agent_install_approved,"setupComplete":server.setup_complete,"proxy":null});
-        assert!(server.proxy.is_none());
+        let saved = args.server.clone();
+        assert!(saved.proxy.is_none());
         owner.update(cx, |owner, cx| {
             let generation = owner.resources.begin("snapshot").unwrap();
-            let mut snapshot = owner.snapshot.clone();
-            snapshot["config"]["servers"]
-                .as_array_mut()
-                .unwrap()
-                .push(saved.clone());
-            for (key, generation, result) in [
-                ("server-save", save.generation, Value::Null),
-                ("snapshot", generation, snapshot),
-            ] {
-                replies
-                    .send(crate::Completion {
-                        discovery: None,
-                        key: key.into(),
-                        generation,
-                        result: Ok(result),
-                        server: saved["id"].as_str().unwrap().into(),
-                        image: None,
-                        pdf: None,
-                        pdf_text: None,
-                    })
-                    .unwrap();
-            }
+            let mut snapshot = owner.snapshot.clone().unwrap();
+            snapshot.config.servers.push(saved.clone());
+            replies
+                .send(crate::Completion {
+                    key: "server-save".into(),
+                    generation: save.generation,
+                    result: crate::Outcome::Typed(Ok(desktop::Reply::Configuration(Box::new(
+                        desktop::configuration::Reply::SaveServer(Box::new(
+                            newport_protocol::common::Present {},
+                        )),
+                    )))),
+                    server: saved.id.to_string(),
+                })
+                .unwrap();
+            replies
+                .send(crate::snapshot_fixture::completion(generation, snapshot))
+                .unwrap();
             // Both replies are drained before GPUI delivers the owner observer.
             owner.tick(cx);
-            assert_eq!(owner.server, saved["id"].as_str().unwrap());
+            assert_eq!(owner.server, saved.id.to_string());
         });
         draw(cx);
         assert!(!form.read_with(cx, |form, _| form.pending));
@@ -1504,7 +1603,7 @@ mod tests {
             form.update(cx, |form, cx| {
                 form.key_revision = Some(std::time::Instant::now());
                 form.file_mode = true;
-                form.keys = vec![json!({"source":"system", "fingerprint":"SHA256:fixture", "comment":"Fixture key"})];
+                form.keys = vec![agent_key("system", "SHA256:fixture", "Fixture key")];
                 form.sync_key_choices(window, cx);
                 cx.notify();
             });
@@ -1547,7 +1646,7 @@ mod tests {
         cx: &mut VisualTestContext,
         host: &str,
         looked_up: &str,
-        reply: Value,
+        reply: SshResolved,
     ) {
         cx.update(|window, cx| {
             form.update(cx, |form, cx| {
@@ -1574,7 +1673,12 @@ mod tests {
             cx,
             "app.box.me.gw",
             "app.box.me.gw",
-            json!({"user": "ops", "port": 2222, "proxyCommand": command}),
+            SshResolved {
+                user: Some("ops".into()),
+                port: Some(2222),
+                proxy_command: Some(command.into()),
+                ..Default::default()
+            },
         );
         assert_eq!(field(&form, cx, USER), "developer");
         assert_eq!(field(&form, cx, PORT), "2222");
@@ -1588,14 +1692,19 @@ mod tests {
             let Ok((server, _)) = form.draft(cx) else {
                 panic!("the filled-in form saves");
             };
-            assert_eq!(server["proxy"]["command"], command);
-            assert_eq!(server["sshPort"], 2222);
+            assert_eq!(server.proxy, super::tests::command(command));
+            assert_eq!(server.ssh_port, 2222);
         });
     }
 
     #[gpui::test]
     fn a_reply_for_another_host_or_a_saved_servers_values_are_left_alone(cx: &mut TestAppContext) {
-        let reply = json!({"user": "ops", "port": 2222, "proxyCommand": "gateway %h"});
+        let reply = SshResolved {
+            user: Some("ops".into()),
+            port: Some(2222),
+            proxy_command: Some("gateway %h".into()),
+            ..Default::default()
+        };
         let (form, visual) = editor(cx, false);
         deliver(
             &form,
@@ -1625,7 +1734,11 @@ mod tests {
             cx,
             "box",
             "box",
-            json!({"hostname": "10.0.0.5", "proxyJump": "bastion"}),
+            SshResolved {
+                hostname: Some("10.0.0.5".into()),
+                proxy_jump: Some("bastion".into()),
+                ..Default::default()
+            },
         );
         assert_eq!(field(&form, cx, HOST), "10.0.0.5");
         assert_eq!(field(&form, cx, super::NAME), "box");
@@ -1655,7 +1768,7 @@ mod tests {
             form.update(cx, |form, cx| {
                 form.keys_loading = false;
                 form.key_revision = Some(std::time::Instant::now());
-                form.keys = vec![json!({"source":"system", "fingerprint":"SHA256:fixture", "comment":"Fixture key"})];
+                form.keys = vec![agent_key("system", "SHA256:fixture", "Fixture key")];
                 form.sync_key_choices(window, cx);
                 cx.notify();
             });
@@ -1673,10 +1786,11 @@ mod tests {
             form.update(cx, |form, cx| {
                 form.keys = (0..4)
                     .map(|index| {
-                        json!({
-                            "source":"onePassword", "fingerprint":format!("SHA256:key-{index}"),
-                            "comment":format!("SSH key {index}"), "algorithm":"ed25519"
-                        })
+                        agent_key(
+                            "onePassword",
+                            &format!("SHA256:key-{index}"),
+                            &format!("SSH key {index}"),
+                        )
                     })
                     .collect();
                 form.sync_key_choices(window, cx);
@@ -1719,8 +1833,8 @@ mod tests {
         key(cx, "down");
         key(cx, "enter");
         assert_eq!(
-            form.read_with(cx, |form, _| form.value["authMethod"].clone()),
-            json!("password")
+            form.read_with(cx, |form, _| form.value.auth_method),
+            AuthMethod::Password
         );
         cx.update(|window, cx| assert!(window.has_active_dialog(cx)));
         assert!(!form.read_with(cx, |form, _| form.pending));
@@ -1748,26 +1862,30 @@ mod tests {
         let (form, cx) = editor(cx, true);
         cx.update(|window, cx| {
             form.update(cx, |form, cx| {
-                form.value["authMethod"] = json!("password");
+                form.value.auth_method = AuthMethod::Password;
                 let (value, password) = form
                     .draft(cx)
                     .unwrap_or_else(|_| panic!("blank existing password should be allowed"));
-                assert_eq!(value["name"], json!(""));
-                assert_eq!(value["clipboardEnabled"], true);
-                assert_eq!(password, Value::Null);
+                assert_eq!(value.name, "");
+                assert!(value.clipboard_enabled);
+                assert!(password.is_none());
                 form.fields[PASSWORD]
                     .update(cx, |input, cx| input.set_value("  secret  ", window, cx));
                 let (_, password) = form
                     .draft(cx)
                     .unwrap_or_else(|_| panic!("password should be accepted"));
-                assert_eq!(password, json!("  secret  "));
+                assert_eq!(
+                    password.map(|password| password.value.to_vec()),
+                    Some(b"  secret  ".to_vec())
+                );
                 form.fields[HOST]
                     .update(cx, |input, cx| input.set_value(" host.test ", window, cx));
                 assert_eq!(
                     form.draft(cx)
                         .unwrap_or_else(|_| panic!("host should trim"))
-                        .0["sshHost"],
-                    json!("host.test")
+                        .0
+                        .ssh_host,
+                    "host.test"
                 );
             });
         });
@@ -1778,28 +1896,52 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let (form, cx) = editor(cx, true);
-        cx.update(|window,cx| form.update(cx,|form,cx| {
-            form.value["agentSource"]=json!("onePassword");
-            form.value["agentKeyFingerprint"]=json!("SHA256:saved");
-            form.sync_key_choices(window,cx);
-            assert_eq!(form.key.read(cx).selected_value().map(String::as_str),Some("onePassword:SHA256:saved"));
-            assert!(key_choices(&form.value,&[],false).iter().any(|choice|choice.title.contains("not currently available")));
-            form.select_key("onePassword:SHA256:saved",window,cx);
-            assert_eq!(form.value["agentKeyFingerprint"],json!("SHA256:saved"));
-            form.select_key("file",window,cx);
-            assert!(form.file_mode);
-            assert_eq!(form.value["agentKeyFingerprint"],Value::Null);
-            form.fields[IDENTITY].update(cx,|input,cx|input.set_value(" ~/.ssh/id_ed25519 ",window,cx));
-            assert_eq!(form.draft(cx).unwrap_or_else(|_|panic!("file should be accepted")).0["identityFile"],json!("~/.ssh/id_ed25519"));
-            form.select_key("automatic",window,cx);
-            assert_eq!(form.fields[IDENTITY].read(cx).value(),"");
-            assert_eq!(form.value["identityFile"],Value::Null);
-            assert_eq!(form.value["agentSource"],Value::Null);
-            form.keys=vec![json!({"source":"onePassword","fingerprint":"SHA256:available","comment":"Laptop","algorithm":"ed25519"})];
-            form.select_key("onePassword:SHA256:available",window,cx);
-            assert_eq!(form.value["agentSource"],json!("onePassword"));
-            assert_eq!(form.value["agentKeyFingerprint"],json!("SHA256:available"));
-        }));
+        cx.update(|window, cx| {
+            form.update(cx, |form, cx| {
+                form.value.agent_source = Some("onePassword".into());
+                form.value.agent_key_fingerprint = Some("SHA256:saved".into());
+                form.sync_key_choices(window, cx);
+                assert_eq!(
+                    form.key.read(cx).selected_value().map(String::as_str),
+                    Some("onePassword:SHA256:saved")
+                );
+                assert!(
+                    key_choices(&form.value, &[], false)
+                        .iter()
+                        .any(|choice| choice.title.contains("not currently available"))
+                );
+                form.select_key("onePassword:SHA256:saved", window, cx);
+                assert_eq!(
+                    form.value.agent_key_fingerprint.as_deref(),
+                    Some("SHA256:saved")
+                );
+                form.select_key("file", window, cx);
+                assert!(form.file_mode);
+                assert_eq!(form.value.agent_key_fingerprint, None);
+                form.fields[IDENTITY].update(cx, |input, cx| {
+                    input.set_value(" ~/.ssh/id_ed25519 ", window, cx)
+                });
+                assert_eq!(
+                    form.draft(cx)
+                        .unwrap_or_else(|_| panic!("file should be accepted"))
+                        .0
+                        .identity_file
+                        .as_deref(),
+                    Some("~/.ssh/id_ed25519")
+                );
+                form.select_key("automatic", window, cx);
+                assert_eq!(form.fields[IDENTITY].read(cx).value(), "");
+                assert_eq!(form.value.identity_file, None);
+                assert_eq!(form.value.agent_source, None);
+                form.keys = vec![agent_key("onePassword", "SHA256:available", "Laptop")];
+                form.select_key("onePassword:SHA256:available", window, cx);
+                assert_eq!(form.value.agent_source.as_deref(), Some("onePassword"));
+                assert_eq!(
+                    form.value.agent_key_fingerprint.as_deref(),
+                    Some("SHA256:available")
+                );
+            })
+        });
     }
 
     #[gpui::test]
@@ -1870,14 +2012,14 @@ mod tests {
             form.update(cx, |form, cx| {
                 assert_eq!(form.route, Route::Direct);
                 let (value, _) = form.draft(cx).unwrap_or_else(|_| panic!("direct saves"));
-                assert_eq!(value["proxy"], Value::Null);
+                assert_eq!(value.proxy, None);
 
                 form.select_route("command", window, cx);
                 assert_eq!(form.draft(cx).err().and_then(|e| e.input), Some(PROXY));
                 form.fields[PROXY]
                     .update(cx, |input, cx| input.set_value(" nc %h %p ", window, cx));
                 let (value, _) = form.draft(cx).unwrap_or_else(|_| panic!("command saves"));
-                assert_eq!(value["proxy"], json!({"command": "nc %h %p"}));
+                assert_eq!(value.proxy, command("nc %h %p"));
 
                 // No other server is saved, so there is no jump host to choose.
                 form.select_route("jump", window, cx);
@@ -1888,14 +2030,14 @@ mod tests {
                         .message
                         .contains("Add the jump host as a server first")
                 );
-                let bastion = uuid::Uuid::new_v4().to_string();
-                form.jump = Some(bastion.clone());
+                let bastion = uuid::Uuid::new_v4();
+                form.jump = Some(bastion.to_string());
                 let (value, _) = form.draft(cx).unwrap_or_else(|_| panic!("jump saves"));
-                assert_eq!(value["proxy"], json!({"jump": bastion}));
+                assert_eq!(value.proxy, jump(bastion));
 
                 form.select_route("direct", window, cx);
                 let (value, _) = form.draft(cx).unwrap_or_else(|_| panic!("direct saves"));
-                assert_eq!(value["proxy"], Value::Null);
+                assert_eq!(value.proxy, None);
             });
         });
     }
@@ -1905,7 +2047,7 @@ mod tests {
         let (form, cx) = editor_with(
             cx,
             true,
-            json!({"command": "cloudflared access ssh --hostname %h"}),
+            command("cloudflared access ssh --hostname %h"),
             vec![],
         );
         cx.update(|_, cx| {
@@ -1920,19 +2062,22 @@ mod tests {
 
     #[test]
     fn jump_hosts_leave_out_the_server_and_the_ones_behind_it() {
-        let [edited, behind, further, other] = ["a", "b", "c", "d"].map(|id| json!(id));
+        let [edited, behind, further, other] = [0xa, 0xb, 0xc, 0xd].map(uuid::Uuid::from_u128);
+        let mut inner = saved(further, "", jump(behind));
+        inner.ssh_user = "ops".into();
+        inner.ssh_host = "inner".into();
         let servers = [
-            json!({"id": edited, "name": "Edited", "proxy": null}),
-            json!({"id": behind, "name": "Behind", "proxy": {"jump": edited}}),
-            json!({"id": further, "name": "", "sshUser": "ops", "sshHost": "inner", "proxy": {"jump": behind}}),
-            json!({"id": other, "name": "Bastion", "proxy": null}),
+            saved(edited, "Edited", None),
+            saved(behind, "Behind", jump(edited)),
+            inner,
+            saved(other, "Bastion", None),
         ];
-        let choices: Vec<_> = jump_choices(&servers, &edited)
+        let choices: Vec<_> = jump_choices(&servers, edited)
             .into_iter()
             .map(|choice| (choice.value, choice.title.to_string()))
             .collect();
-        assert_eq!(choices, [("d".to_owned(), "Bastion".to_owned())]);
-        let choices: Vec<_> = jump_choices(&servers, &other)
+        assert_eq!(choices, [(other.to_string(), "Bastion".to_owned())]);
+        let choices: Vec<_> = jump_choices(&servers, other)
             .into_iter()
             .map(|choice| choice.title.to_string())
             .collect();
@@ -1941,17 +2086,18 @@ mod tests {
 
     #[gpui::test]
     fn a_saved_jump_host_that_cant_be_chosen_must_be_chosen_again(cx: &mut TestAppContext) {
-        let bastion = json!({"id": "b", "name": "Bastion", "proxy": null});
-        let (form, cx) = editor_with(cx, true, json!({"jump": "gone"}), vec![bastion]);
+        let id = uuid::Uuid::from_u128(0xb);
+        let bastion = saved(id, "Bastion", None);
+        let (form, cx) = editor_with(cx, true, jump(uuid::Uuid::from_u128(0x9)), vec![bastion]);
         cx.update(|_, cx| {
             form.update(cx, |form, cx| {
                 assert_eq!(form.route, Route::Jump);
                 assert_eq!(form.jump, None);
                 let error = form.draft(cx).expect_err("the jump host is chosen again");
                 assert_eq!(error.message, "Choose a jump host.");
-                form.jump = Some("b".into());
+                form.jump = Some(id.to_string());
                 let (value, _) = form.draft(cx).unwrap_or_else(|_| panic!("jump saves"));
-                assert_eq!(value["proxy"], json!({"jump": "b"}));
+                assert_eq!(value.proxy, jump(id));
             });
         });
     }

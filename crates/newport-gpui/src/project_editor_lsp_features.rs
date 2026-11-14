@@ -134,7 +134,7 @@ type EditDone = Box<
 struct PendingEdits {
     snapshot: Snapshot,
     files: Vec<FileEdits>,
-    loaded: HashMap<String, Value>,
+    loaded: HashMap<String, files::Document>,
     generation: u64,
     done: Option<EditDone>,
 }
@@ -589,9 +589,9 @@ impl CodeWorkspace {
                 if pending.generation != this.language_tools.generation {
                     return;
                 }
-                match result {
-                    Ok(value) => {
-                        if value["path"].as_str() != Some(&path) {
+                match result.and_then(document_reply) {
+                    Ok(document) => {
+                        if document.path != path {
                             this.finish_language_edits(
                                 pending.done.take(),
                                 Err(
@@ -604,7 +604,7 @@ impl CodeWorkspace {
                             return;
                         }
                         let mut pending = pending;
-                        pending.loaded.insert(path, value);
+                        pending.loaded.insert(path, document);
                         this.load_language_edits(pending, window, cx);
                     }
                     Err(error) => this.finish_language_edits(
@@ -658,12 +658,17 @@ impl CodeWorkspace {
                 }
                 buffer
             } else {
-                let value = pending
+                let document = pending
                     .loaded
                     .get(&file.path)
                     .ok_or("An edit target could not be loaded.")?
                     .clone();
-                new_buffers.push(Self::document_buffer(file.path.clone(), value, window, cx)?);
+                new_buffers.push(Self::document_buffer(
+                    file.path.clone(),
+                    document,
+                    window,
+                    cx,
+                )?);
                 new_buffers.last().unwrap()
             };
             if buffer.page.is_some()
@@ -954,6 +959,7 @@ mod interaction_tests {
     use crate::project_editor::{
         CodeWorkspace,
         interaction_tests::{draw, fixture, open},
+        rpc_fixture::document,
     };
     use gpui_kit::{Entity, TestAppContext, VisualTestContext};
     use serde_json::json;
@@ -1053,20 +1059,38 @@ mod interaction_tests {
         open(&view, cx, "/repo/main.rs");
         let (_writer, _messages) = connect(&view, cx);
         let snapshot = snapshot(&view, cx);
-        view.update_in(cx,|view,window,cx| {
+        view.update_in(cx, |view, window, cx| {
             view.opening.insert("/repo/other.rs".into());
-            let result=view.apply_language_edits(PendingEdits {
-                snapshot, files:vec![rename("/repo/main.rs"),rename("/repo/other.rs")], done: None,
-                loaded:HashMap::from([("/repo/other.rs".into(),json!({"path":"/repo/other.rs","content":"fn main() {}\n","revision":"original"}))]),
-                generation:view.language_tools.generation,
-            },window,cx);
+            let result = view.apply_language_edits(
+                PendingEdits {
+                    snapshot,
+                    files: vec![rename("/repo/main.rs"), rename("/repo/other.rs")],
+                    done: None,
+                    loaded: HashMap::from([(
+                        "/repo/other.rs".into(),
+                        newport_protocol::desktop::files::Document {
+                            path: "/repo/other.rs".into(),
+                            ..document("fn main() {}\n", "original")
+                        },
+                    )]),
+                    generation: view.language_tools.generation,
+                },
+                window,
+                cx,
+            );
             assert!(result.unwrap_err().contains("still opening"));
-            assert_eq!(view.buffers.len(),1);
+            assert_eq!(view.buffers.len(), 1);
             assert!(!view.buffers[0].dirty(cx));
             // The normal open response can now land without replacing staged edits.
             view.opening.remove("/repo/other.rs");
-            let buffer=CodeWorkspace::document_buffer("/repo/other.rs".into(),json!({"content":"fn main() {}\n","revision":"original"}),window,cx).unwrap();
-            view.place_buffer(buffer,window,cx);
+            let buffer = CodeWorkspace::document_buffer(
+                "/repo/other.rs".into(),
+                document("fn main() {}\n", "original"),
+                window,
+                cx,
+            )
+            .unwrap();
+            view.place_buffer(buffer, window, cx);
             assert!(view.buffers.iter().all(|buffer| !buffer.dirty(cx)));
         });
     }

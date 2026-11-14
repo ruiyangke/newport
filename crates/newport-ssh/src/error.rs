@@ -1,3 +1,4 @@
+use newport_protocol::desktop::connection::code;
 use std::fmt;
 
 /// Everything that can go wrong reaching a server, classified once.
@@ -90,23 +91,23 @@ impl Error {
     /// A stable name for the error, for the app to word it.
     pub fn code(&self) -> &'static str {
         match self {
-            Error::Unreachable(_) => "SSH_UNREACHABLE",
-            Error::ProxyFailed { .. } => "SSH_PROXY_FAILED",
-            Error::InvalidProxy(_) => "SSH_INVALID_PROXY",
-            Error::InvalidJump(_) => "SSH_INVALID_JUMP",
-            Error::TimedOut => "SSH_TIMED_OUT",
-            Error::Lost(_) => "SSH_LOST",
-            Error::AgentUnavailable => "SSH_AGENT_UNAVAILABLE",
-            Error::ApprovalRequired => "SSH_APPROVAL_REQUIRED",
-            Error::AuthRefused => "SSH_AUTH_REFUSED",
-            Error::Credentials(_) => "SSH_CREDENTIALS",
-            Error::HostKeyChanged { .. } => "SSH_HOST_KEY_CHANGED",
-            Error::HostKeyRejected(_) => "SSH_HOST_KEY_REJECTED",
-            Error::SessionsDisabled => "SSH_SESSIONS_DISABLED",
-            Error::ChannelRefused { .. } => "SSH_CHANNEL_REFUSED",
-            Error::RequestDenied => "SSH_REQUEST_DENIED",
-            Error::Busy => "SSH_BUSY",
-            Error::Closed => "SSH_CLOSED",
+            Error::Unreachable(_) => code::SSH_UNREACHABLE,
+            Error::ProxyFailed { .. } => code::SSH_PROXY_FAILED,
+            Error::InvalidProxy(_) => code::SSH_INVALID_PROXY,
+            Error::InvalidJump(_) => code::SSH_INVALID_JUMP,
+            Error::TimedOut => code::SSH_TIMED_OUT,
+            Error::Lost(_) => code::SSH_LOST,
+            Error::AgentUnavailable => code::SSH_AGENT_UNAVAILABLE,
+            Error::ApprovalRequired => code::SSH_APPROVAL_REQUIRED,
+            Error::AuthRefused => code::SSH_AUTH_REFUSED,
+            Error::Credentials(_) => code::SSH_CREDENTIALS,
+            Error::HostKeyChanged { .. } => code::SSH_HOST_KEY_CHANGED,
+            Error::HostKeyRejected(_) => code::SSH_HOST_KEY_REJECTED,
+            Error::SessionsDisabled => code::SSH_SESSIONS_DISABLED,
+            Error::ChannelRefused { .. } => code::SSH_CHANNEL_REFUSED,
+            Error::RequestDenied => code::SSH_REQUEST_DENIED,
+            Error::Busy => code::SSH_BUSY,
+            Error::Closed => code::SSH_CLOSED,
         }
     }
 }

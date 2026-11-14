@@ -251,12 +251,19 @@ pub(super) fn current(
 ) -> bool {
     this.server == server
         && this.git_repository_id() == repo
-        && text(this.diff_page(), "snapshot") == diff
+        && this
+            .diff_page()
+            .map(|page| page.snapshot.as_str())
+            .unwrap_or_default()
+            == diff
         && !this.git_is_inspection()
         && this.git_can_change_index(!review.staged())
         && review.matches(
-            &text(&this.git.page, "snapshot"),
-            &text(&this.git.selected, "entryId"),
+            this.git.snapshot(),
+            this.git
+                .entry()
+                .map(|entry| entry.entry_id.as_str())
+                .unwrap_or_default(),
             this.git.diff_staged,
             this.git.diff_context.value(),
         )
@@ -273,7 +280,7 @@ impl Newport {
         cx: &Context<Self>,
     ) -> Option<Actions> {
         if self.git_is_inspection()
-            || self.git.selected["conflicted"] == true
+            || self.git.entry().is_some_and(|entry| entry.conflicted)
             || presentation.error.is_some()
         {
             return None;
@@ -282,7 +289,10 @@ impl Newport {
         let stage = !review.staged();
         let repo = self.git_repository_id();
         let server = self.server.clone();
-        let diff_snapshot = text(self.diff_page(), "snapshot");
+        let diff_snapshot = self
+            .diff_page()
+            .map(|page| page.snapshot.clone())
+            .unwrap_or_default();
         let enabled = current(self, &server, &repo, &diff_snapshot, &review);
         let guard_review = review.clone();
         let guard = Rc::new(move |this: &Newport| {
@@ -593,7 +603,6 @@ mod tests {
     };
     use gpui_kit as gpui;
     use newport_client::git_selection::Review;
-    use serde_json::json;
     use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 
     struct View {
@@ -604,10 +613,22 @@ mod tests {
     }
     impl Render for View {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let review = Rc::new(Review::from_page(&json!({
-                "nextCursor":"more","metadata":{"readOnly":false,"totalFiles":1,"sourceSnapshot":"status","entryId":"entry","side":"index_to_worktree","contextLines":3},
-                "entries":[{"fileIndex":0,"status":"Modified","oldMode":33188,"newMode":33188,"oldPath":{"bytesB64":"Zg=="},"newPath":{"bytesB64":"Zg=="},"hunks":[{"id":"h","totalLines":3,"lines":[{"lineIndex":0,"id":"a","origin":"-","lineComplete":true},{"lineIndex":1,"id":"b","origin":"+","lineComplete":true}]}]}]
-            })).unwrap());
+            let mut hunk = crate::git_fixture::hunk(
+                0,
+                Some("h"),
+                vec![
+                    crate::git_fixture::line(0, "-", Some("a"), b"a\n"),
+                    crate::git_fixture::line(1, "+", Some("b"), b"b\n"),
+                ],
+            );
+            hunk.total_lines = 3;
+            let page = crate::git_fixture::diff_page(
+                "diff",
+                crate::git_fixture::working_metadata("status", "entry"),
+                vec![crate::git_fixture::file(0, "f", vec![hunk])],
+                Some("more"),
+            );
+            let review = Rc::new(Review::from_page(&page).unwrap());
             let weak = cx.entity().downgrade();
             let toggle_review = review.clone();
             let actions = Actions {

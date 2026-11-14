@@ -29,10 +29,15 @@ pub(super) struct UiState {
     pub window: Option<Placement>,
     #[serde(default)]
     pub workspace: Selection,
-    /// The held shell this Mac last had selected on each server, by server
-    /// id. The shells, their order and their names are the server's.
+    /// The held shell this Mac last had selected on each server, and the
+    /// order it shows them in, by server id. The shells and their names are
+    /// the server's.
     #[serde(default)]
     pub terminals: BTreeMap<String, SavedTerminals>,
+    /// The file tabs this Mac had open in each project, by server id and
+    /// project root.
+    #[serde(default)]
+    pub files: BTreeMap<String, BTreeMap<String, SavedFiles>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -40,6 +45,23 @@ pub(super) struct SavedTerminals {
     /// The selected tab's terminal.
     #[serde(default)]
     pub selected: Option<uuid::Uuid>,
+    /// The tabs' terminals, in the order this Mac shows them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<uuid::Uuid>,
+    /// The finishes of coding agents someone has seen here, as their
+    /// reports, by terminal: they show as seen again after a restart.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub seen: BTreeMap<uuid::Uuid, String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(super) struct SavedFiles {
+    /// The files' paths, in the order their tabs were in.
+    #[serde(default)]
+    pub open: Vec<String>,
+    /// The selected file tab's path.
+    #[serde(default)]
+    pub selected: Option<String>,
 }
 
 fn path() -> Option<PathBuf> {
@@ -119,6 +141,9 @@ enum Message {
     Window(Placement),
     Workspace(Box<Selection>),
     Terminals(String, SavedTerminals),
+    Files(String, String, SavedFiles),
+    /// Forget a removed server's tabs.
+    Forget(String),
     /// Write what is pending now, then answer.
     Flush(mpsc::Sender<()>),
 }
@@ -173,6 +198,16 @@ impl Writer {
         self.send(Message::Terminals(server, saved));
     }
 
+    /// A project's file tabs; no tabs forgets the project's.
+    pub fn files(&self, server: String, root: String, saved: SavedFiles) {
+        self.send(Message::Files(server, root, saved));
+    }
+
+    /// Forgets a removed server's terminal and file tabs.
+    pub fn forget(&self, server: String) {
+        self.send(Message::Forget(server));
+    }
+
     /// Waits until everything sent so far is on disk, as Quit needs.
     pub fn flush(&self) {
         let (done, wait) = mpsc::channel();
@@ -223,11 +258,28 @@ fn run(path: &Path, mut state: UiState, receiver: &mpsc::Receiver<Message>) {
                 dirty = true;
             }
             Message::Terminals(server, saved) => {
-                if saved.selected.is_none() {
+                if saved == SavedTerminals::default() {
                     state.terminals.remove(&server);
                 } else {
                     state.terminals.insert(server, saved);
                 }
+                dirty = true;
+            }
+            Message::Files(server, root, saved) => {
+                let projects = state.files.entry(server.clone()).or_default();
+                if saved.open.is_empty() {
+                    projects.remove(&root);
+                } else {
+                    projects.insert(root, saved);
+                }
+                if projects.is_empty() {
+                    state.files.remove(&server);
+                }
+                dirty = true;
+            }
+            Message::Forget(server) => {
+                state.terminals.remove(&server);
+                state.files.remove(&server);
                 dirty = true;
             }
             Message::Flush(done) => {
@@ -306,6 +358,7 @@ mod tests {
             window: Some(Placement::new(1., 2., 800., 600.)),
             workspace: selection("kept"),
             terminals: Default::default(),
+            files: Default::default(),
         };
         let writer = Writer::start_at(Some(path.clone()), restored);
         writer.window(Placement::new(5., 5., 1000., 700.));
@@ -322,6 +375,8 @@ mod tests {
         let writer = Writer::start_at(Some(path.clone()), UiState::default());
         let tabs = || SavedTerminals {
             selected: Some(uuid::Uuid::new_v4()),
+            order: vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4()],
+            seen: [(uuid::Uuid::new_v4(), "state=done:app=claude-code".into())].into(),
         };
         let first = tabs();
         writer.terminals("a".into(), first.clone());
@@ -337,6 +392,36 @@ mod tests {
         assert_eq!(state.terminals["a"], first);
         // A file from before terminals were saved still loads.
         assert!(decode(b"{}").unwrap().terminals.is_empty());
+    }
+
+    #[test]
+    fn each_projects_file_tabs_are_kept_until_it_has_none_or_its_server_goes() {
+        let directory = Scratch::new();
+        let path = directory.path().join(FILE);
+        let writer = Writer::start_at(Some(path.clone()), UiState::default());
+        let files = |selected: &str| SavedFiles {
+            open: vec!["/repo/b.rs".into(), "/repo/a.rs".into()],
+            selected: Some(selected.into()),
+        };
+        writer.files("s".into(), "/repo".into(), files("/repo/a.rs"));
+        writer.files("s".into(), "/other".into(), files("/repo/b.rs"));
+        writer.terminals(
+            "s".into(),
+            SavedTerminals {
+                selected: Some(uuid::Uuid::new_v4()),
+                ..Default::default()
+            },
+        );
+        writer.flush();
+        let state = saved(&path);
+        assert_eq!(state.files["s"]["/repo"], files("/repo/a.rs"));
+        writer.files("s".into(), "/other".into(), SavedFiles::default());
+        writer.flush();
+        assert_eq!(saved(&path).files["s"].len(), 1);
+        writer.forget("s".into());
+        writer.flush();
+        let state = saved(&path);
+        assert!(state.files.is_empty() && state.terminals.is_empty());
     }
 
     #[test]

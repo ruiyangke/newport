@@ -27,10 +27,9 @@ Stage grammar libraries from the repository root:
 cargo xtask grammars
 ```
 
-On Windows, also run `cargo xtask pdfium` before preview checks. Use the same
-target for resource staging and tests when cross-compiling. `cargo xtask dev`
-and `build` perform this resource staging automatically once the agents are
-available.
+Use the same target for resource staging and tests when cross-compiling.
+`cargo xtask dev` and `build` perform this resource staging automatically once
+the agents are available.
 
 ### Commands
 
@@ -73,8 +72,7 @@ cargo xtask grammars
 cargo test --locked -p newport-gpui --lib
 ```
 
-Stage PDFium on Windows with `cargo xtask pdfium`. For lifecycle tests
-alone, after staging resources:
+For lifecycle tests alone, after staging resources:
 
 ```sh
 cargo test --locked -p newport-app --test standalone_lifecycle -- --ignored --nocapture

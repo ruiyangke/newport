@@ -27,19 +27,9 @@ fn fixture(cx: &mut TestAppContext) -> (Entity<Newport>, &mut VisualTestContext,
     let (_, visual) = cx.add_window_view(|window, cx| {
         let view = cx.new(|cx| {
             let mut view = crate::page_perf_tests::owner(window, cx);
-            let selected = view.server.clone();
-            let profile = view.snapshot["config"]["servers"]
-                .as_array_mut()
-                .unwrap()
-                .iter_mut()
-                .find(|profile| profile["id"] == selected)
-                .unwrap();
-            profile["id"] = json!(SERVER);
-            profile["sshPort"] = json!(22);
-            profile["authMethod"] = json!("publicKey");
-            view.server = SERVER.into();
-            view.snapshot["instanceId"] = json!("00000000-0000-4000-8000-000000000002");
-            view.snapshot["runtime"]["connectionRevisions"][SERVER] = json!(1);
+            assert_eq!(view.server, SERVER);
+            view.snapshot_mut().instance_id =
+                uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000002").unwrap();
             view.page = Page::Files;
             view.prepare_file_browser(window, cx);
             let browser = view.file_browsers.get_mut(SERVER).unwrap();
@@ -115,7 +105,7 @@ fn background_file_results_update_cache_without_invalidating_other_pages(cx: &mu
             let browser = &view.file_browsers[SERVER];
             assert_eq!(browser.directory, format!("/{visibility}"));
             assert_eq!(
-                browser.reads.listing().unwrap()["entries"][0]["name"],
+                browser.reads.listing().unwrap().entries[0].name,
                 "retained.txt"
             );
         });
@@ -203,7 +193,7 @@ fn file_filter_notifications_follow_the_captured_server_and_connection(cx: &mut 
             browser.active = scope != "inactive";
             browser.selected = Some("/kept".into());
             browser.connection = if scope == "replacement" {
-                json!({"replacement":true})
+                Some(crate::snapshot_fixture::scope("replacement"))
             } else {
                 connection.clone()
             };
@@ -279,7 +269,7 @@ fn projected_file_targets_revalidate_after_navigation_and_connection_changes(
             let browser = view.file_browsers.get_mut(SERVER).unwrap();
             browser.active = state != "inactive";
             browser.connection = if state == "replacement" {
-                json!(["replacement"])
+                Some(crate::snapshot_fixture::scope("replacement"))
             } else {
                 connection.clone()
             };

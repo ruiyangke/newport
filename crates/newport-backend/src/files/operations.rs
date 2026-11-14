@@ -88,7 +88,7 @@ impl Operations {
         state: &Shared,
         server: Uuid,
         id: Uuid,
-        expected_connection: Option<&serde_json::Value>,
+        expected_connection: Option<&newport_protocol::desktop::configuration::ConnectionScope>,
         work: F,
     ) -> Result<T, String>
     where
@@ -108,7 +108,7 @@ impl Operations {
         state: &Shared,
         server: Uuid,
         id: Uuid,
-        expected_connection: Option<&serde_json::Value>,
+        expected_connection: Option<&newport_protocol::desktop::configuration::ConnectionScope>,
         work: F,
     ) -> Result<T, String>
     where
@@ -122,16 +122,12 @@ impl Operations {
             if expected_connection.is_some() && !state.configuration_available() {
                 return Err("Server configuration is unavailable.".into());
             }
-            if let Some(expected) = expected_connection {
-                let profile = serde_json::to_value(&profile).map_err(|error| error.to_string())?;
-                let snapshot = serde_json::json!({"instanceId":state.instance_id,
-                    "runtime":{"connectionRevisions":{server.to_string():owner.revision()}}});
-                if newport_domain::connection_scope::connection(&profile, &snapshot) != *expected {
-                    return Err(
-                        "The server connection changed before the file transfer could start."
-                            .into(),
-                    );
-                }
+            if let Some(expected) = expected_connection
+                && profile.connection_scope(owner.revision(), state.instance_id) != *expected
+            {
+                return Err(
+                    "The server connection changed before the file transfer could start.".into(),
+                );
             }
             let mut registry = self
                 .registry
@@ -296,7 +292,8 @@ pub fn files_progress(operations: &Operations, operation: Uuid) -> Option<Progre
 mod tests {
     use super::*;
     use crate::{manager::Manager, profile::Store};
-    use serde_json::{Value, json};
+    use newport_protocol::desktop::configuration::ConnectionScope;
+    use serde_json::json;
     use std::sync::Arc;
 
     #[test]
@@ -334,7 +331,7 @@ mod tests {
         drop(Guard(&operations, id));
     }
 
-    fn fixture() -> (tempfile::TempDir, Shared, Uuid, Value) {
+    fn fixture() -> (tempfile::TempDir, Shared, Uuid, ConnectionScope) {
         let directory = tempfile::tempdir().unwrap();
         let mut manager = Manager::new(Store::for_test(directory.path().into()));
         let server = Uuid::new_v4();
@@ -354,15 +351,16 @@ mod tests {
         )
     }
 
-    fn scope(manager: &Manager) -> Value {
-        let snapshot = serde_json::to_value(manager.snapshot()).unwrap();
-        newport_domain::connection_scope::connection(&snapshot["config"]["servers"][0], &snapshot)
+    fn scope(manager: &Manager) -> ConnectionScope {
+        manager
+            .connection_scope(manager.config.servers[0].id)
+            .unwrap()
     }
 
     async fn rejected_before_work(
         state: &Shared,
         server: Uuid,
-        connection: &Value,
+        connection: &ConnectionScope,
         expected_error: &str,
     ) {
         let operations = Operations::default();
@@ -419,12 +417,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unavailable_deleted_and_invalid_connection_reject_before_work() {
+    async fn unavailable_deleted_and_foreign_connection_reject_before_work() {
         let (_directory, state, server, connection) = fixture();
         state.lock().await.load_error = Some("fixture config load failure".into());
         rejected_before_work(&state, server, &connection, "configuration is unavailable").await;
         state.lock().await.load_error = None;
-        rejected_before_work(&state, server, &json!({}), "server connection changed").await;
+        let mut other = connection.clone();
+        other.settings.server_id = Uuid::new_v4();
+        rejected_before_work(&state, server, &other, "server connection changed").await;
         state.lock().await.config.servers.clear();
         rejected_before_work(&state, server, &connection, "Server no longer exists").await;
     }

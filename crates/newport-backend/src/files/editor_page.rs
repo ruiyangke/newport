@@ -189,7 +189,7 @@ mod tests {
             operation: Uuid::new_v4(),
             root: "/Documents".into(),
             path: path.clone(),
-            expected_connection: vec![],
+            expected_connection: server.connection_scope(0, Uuid::nil()),
             content: Some("partial overwrite".into()),
             revision: Some(first.revision.clone()),
             offset: Some(0),

@@ -7,7 +7,6 @@ use gpui_kit::{
     AnyElement, Context, Entity, IntoElement, Render, Window, div, prelude::*, px, size,
 };
 use gpui_kit::{TestAppContext, VisualTestContext};
-use serde_json::json;
 
 struct PreviewHost {
     identity: Identity,
@@ -83,10 +82,14 @@ fn fixture(cx: &mut TestAppContext, width: f32) -> (Entity<PreviewHost>, &mut Vi
     let mut view = None;
     let (_, cx) = cx.add_window_view(|window, cx| {
         let content = cx.new(|cx| PreviewHost {
-            identity: Identity::from_entry(&json!({
-                "name":"remote-report.unknown-extension", "path":"/srv/work/remote-report.unknown-extension",
-                "kind":"file", "size":2048, "permissions":"-rw-r--r--"
-            })),
+            identity: Identity::from_entry(&newport_protocol::desktop::files::Entry {
+                name: "remote-report.unknown-extension".into(),
+                path: "/srv/work/remote-report.unknown-extension".into(),
+                kind: newport_protocol::desktop::files::EntryKind::File,
+                size: Some(2048),
+                modified: None,
+                permissions: Some("-rw-r--r--".into()),
+            }),
             viewport: Viewport {
                 text: Some(super::text::PreviewText::new(window, cx)),
                 ..Viewport::default()

@@ -38,14 +38,40 @@ mod tree_status;
 #[path = "project_editor_watch.rs"]
 mod watch;
 
-pub(super) fn root_path(path: &Value) -> Option<String> {
+pub(super) fn root_path(path: &newport_protocol::git::Path) -> Option<String> {
+    path_text(&path.bytes_b64)
+}
+/// A path's bytes as text, when they are UTF-8.
+pub(super) fn path_text(bytes_b64: &str) -> Option<String> {
     use base64::Engine as _;
     String::from_utf8(
         base64::engine::general_purpose::STANDARD
-            .decode(path["bytesB64"].as_str()?)
+            .decode(bytes_b64)
             .ok()?,
     )
     .ok()
+}
+const UNEXPECTED_REPLY: &str = "The backend answered a file request with another reply.";
+/// The folder a listing read answers with.
+fn listing_reply(reply: files::Reply) -> Result<files::Listing, String> {
+    match reply {
+        files::Reply::List(listing) => Ok(*listing),
+        _ => Err(UNEXPECTED_REPLY.into()),
+    }
+}
+/// The document a text read or write answers with.
+pub(super) fn document_reply(reply: files::Reply) -> Result<files::Document, String> {
+    match reply {
+        files::Reply::ReadText(document) | files::Reply::WriteText(document) => Ok(*document),
+        _ => Err(UNEXPECTED_REPLY.into()),
+    }
+}
+/// The project's file paths an index read answers with.
+pub(super) fn index_reply(reply: files::Reply) -> Result<files::Index, String> {
+    match reply {
+        files::Reply::ProjectIndex(index) => Ok(*index),
+        _ => Err(UNEXPECTED_REPLY.into()),
+    }
 }
 gpui_kit::actions!(
     project_editor,
@@ -54,6 +80,8 @@ gpui_kit::actions!(
         ToggleFiles,
         NextTab,
         PreviousTab,
+        MoveTabLeft,
+        MoveTabRight,
         CloseTab,
         ToggleTerminal,
         QuickOpen,
@@ -83,6 +111,9 @@ struct Buffer {
     error: Option<String>,
     /// Why this file could not be opened; the tab shows it instead of text.
     failure: Option<String>,
+    /// Restored from the last run and not read yet: the file is read when
+    /// the tab is first shown.
+    unread: bool,
     /// The language server following this tab, if its language has one.
     lsp: Option<lsp::Attached>,
     /// Sends edits to the language server once typing pauses.
@@ -126,22 +157,36 @@ fn encode(content: &str, crlf: bool, bom: bool) -> String {
     output
 }
 
+/// Each project's file tabs saved by the last run, by server id and project
+/// root, taken by the project's editor when it opens.
+pub(crate) struct RestoredFiles(
+    pub BTreeMap<String, BTreeMap<String, crate::ui_state::SavedFiles>>,
+);
+impl Global for RestoredFiles {}
+
 #[derive(Clone)]
 struct TreeRow {
     path: String,
     name: String,
     directory: bool,
-    kind: String,
+    kind: files::EntryKind,
     depth: usize,
 }
 
 #[cfg(test)]
-type TestRpc = std::sync::Arc<dyn Fn(desktop::Operation) -> Result<Value, String> + Send + Sync>;
+type TestRpc =
+    std::sync::Arc<dyn Fn(desktop::Operation) -> Result<files::Reply, String> + Send + Sync>;
+#[cfg(test)]
+type TestGit = std::sync::Arc<
+    dyn Fn(newport_protocol::git::Request) -> Result<newport_protocol::git::Reply, String>
+        + Send
+        + Sync,
+>;
 
 pub(super) struct CodeWorkspace {
     pub(super) server: String,
     root: String,
-    connection: Value,
+    connection: Option<configuration::ConnectionScope>,
     pub(super) available: bool,
     visible: bool,
     pub(super) show_tree: bool,
@@ -153,13 +198,21 @@ pub(super) struct CodeWorkspace {
     pub(super) terminal: Option<Entity<terminal_workspace::Workspace>>,
     pub(super) terminal_visible: bool,
     _terminal_observer: Option<Subscription>,
-    directories: BTreeMap<String, Vec<Value>>,
+    directories: BTreeMap<String, Vec<files::Entry>>,
     watch: watch::State,
     expanded: HashSet<String>,
     loading: HashSet<String>,
     opening: HashSet<String>,
     buffers: Vec<Buffer>,
     active: Option<usize>,
+    /// The file whose tab is being dragged, while a drag is active.
+    dragging: Option<String>,
+    /// The file tabs last saved, so only changes are written.
+    saved_tabs: Option<crate::ui_state::SavedFiles>,
+    /// Where the pointer is across the tab strip while a tab is dragged.
+    drag_pointer: Option<(Pixels, Bounds<Pixels>)>,
+    /// Scrolls the tab strip while a dragged tab is held near its edge.
+    _drag_scroll: Option<Task<()>>,
     requested: Option<String>,
     error: Option<String>,
     failed_read: Option<(&'static str, String)>,
@@ -185,12 +238,14 @@ pub(super) struct CodeWorkspace {
     _connectivity: Subscription,
     #[cfg(test)]
     test_rpc: Option<TestRpc>,
+    #[cfg(test)]
+    pub(super) test_git: Option<TestGit>,
 }
 impl CodeWorkspace {
     pub(super) fn new(
         server: String,
         root: String,
-        connection: Value,
+        connection: Option<configuration::ConnectionScope>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -214,6 +269,10 @@ impl CodeWorkspace {
             loading: HashSet::new(),
             opening: HashSet::new(),
             buffers: Vec::new(),
+            dragging: None,
+            saved_tabs: None,
+            drag_pointer: None,
+            _drag_scroll: None,
             active: None,
             requested: None,
             error: None,
@@ -237,7 +296,7 @@ impl CodeWorkspace {
                 cx,
                 |this: &Self| &this.server,
                 |this, cx| {
-                    let connected = crate::connectivity::for_scope(&this.connection, cx)
+                    let connected = crate::connectivity::for_scope(this.connection.as_ref(), cx)
                         .is_some_and(|state| state.phase == crate::connectivity::Phase::Connected);
                     if connected && !this.connected {
                         this.reconnected = true;
@@ -248,6 +307,8 @@ impl CodeWorkspace {
             ),
             #[cfg(test)]
             test_rpc: None,
+            #[cfg(test)]
+            test_git: None,
         }
     }
     /// The server is connected again, so what failed with the connection
@@ -290,7 +351,7 @@ impl CodeWorkspace {
     ) -> Result<(uuid::Uuid, desktop::configuration::ConnectionScope), RequestError> {
         let server = newport_client::desktop_inputs::identity(&self.server, "server")
             .map_err(|error| RequestError::from(error.to_string()))?;
-        let expected = newport_client::desktop_inputs::connection_scope(&self.connection)
+        let expected = newport_client::desktop_inputs::captured(self.connection.as_ref())
             .map_err(|error| RequestError::from(error.to_string()))?;
         if expected.settings.server_id != server {
             return Err("The project connection belongs to another server.".into());
@@ -336,26 +397,13 @@ impl CodeWorkspace {
             })),
         )))
     }
-    pub(super) fn git_request(
-        &self,
-        request: newport_protocol::git::Request,
-    ) -> Result<desktop::Operation, RequestError> {
-        let server = newport_client::desktop_inputs::identity(&self.server, "server")
-            .map_err(|error| RequestError::from(error.to_string()))?;
-        Ok(desktop::Operation::Git(Box::new(
-            desktop::git::Operation::Request(Box::new(desktop::git::RequestArgs {
-                server,
-                request,
-                retry_connection: false,
-            })),
-        )))
-    }
     pub(super) fn rpc(
         &mut self,
         operation: Result<desktop::Operation, RequestError>,
         window: &mut Window,
         cx: &mut Context<Self>,
-        done: impl FnOnce(&mut Self, Result<Value, String>, &mut Window, &mut Context<Self>) + 'static,
+        done: impl FnOnce(&mut Self, Result<files::Reply, String>, &mut Window, &mut Context<Self>)
+        + 'static,
     ) {
         #[cfg(test)]
         let fake = self.test_rpc.clone();
@@ -365,8 +413,47 @@ impl CodeWorkspace {
             if let Some(fake) = fake {
                 return fake(operation);
             }
+            match backend::Backend::discover()
+                .execute_with_timeout(operation, Duration::from_secs(120))
+                .map_err(|error| error.to_string())?
+            {
+                desktop::Reply::Files(reply) => Ok(*reply),
+                _ => Err(UNEXPECTED_REPLY.into()),
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                done(this, result, window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    /// Sends a Git read and hands `done` its checked reply.
+    pub(super) fn git_rpc(
+        &mut self,
+        request: newport_protocol::git::Request,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        done: impl FnOnce(
+            &mut Self,
+            Result<newport_protocol::git::Reply, String>,
+            &mut Window,
+            &mut Context<Self>,
+        ) + 'static,
+    ) {
+        #[cfg(test)]
+        let fake = self.test_git.clone();
+        let server = newport_client::desktop_inputs::identity(&self.server, "server")
+            .map_err(|error| error.to_string());
+        let task = cx.background_executor().spawn(async move {
+            #[cfg(test)]
+            if let Some(fake) = fake {
+                return fake(request);
+            }
             backend::Backend::discover()
-                .execute_rendered_with_timeout(operation, Duration::from_secs(120))
+                .git_with_timeout(server?, request, false, Duration::from_secs(120))
                 .map_err(|error| error.to_string())
         });
         cx.spawn_in(window, async move |this, cx| {
@@ -402,9 +489,9 @@ impl CodeWorkspace {
             .is_some_and(|target| target.starts_with(&format!("{}/", path.trim_end_matches('/'))));
         self.rpc(operation, window, cx, move |this, result, window, cx| {
             this.loading.remove(&path);
-            let result = result.and_then(|value| {
-                if value["path"].as_str() == Some(path.as_str()) {
-                    Ok(value)
+            let result = result.and_then(listing_reply).and_then(|listing| {
+                if listing.path == path {
+                    Ok(listing)
                 } else {
                     Err(
                         "This folder is a symbolic link. Open its original project to edit it."
@@ -413,12 +500,13 @@ impl CodeWorkspace {
                 }
             });
             match result {
-                Ok(value) => {
+                Ok(listing) => {
                     this.directories.insert(
                         path,
-                        rows(&value["entries"])
+                        listing
+                            .entries
                             .into_iter()
-                            .filter(|e| e["name"] != ".git")
+                            .filter(|e| e.name != ".git")
                             .collect(),
                     );
                 }
@@ -501,16 +589,16 @@ impl CodeWorkspace {
             cx,
             move |this, result, window, cx| {
                 this.opening.remove(&path);
-                match result {
-                    Ok(value) => {
+                match result.and_then(document_reply) {
+                    Ok(document) => {
                         let retained: usize = this.buffers.iter().map(|b| b.editor.read(cx).text().len()).sum();
-                        if retained.saturating_add(value["content"].as_str().map_or(0, str::len)) > 64 * 1024 * 1024 {
+                        if retained.saturating_add(document.content.len()) > 64 * 1024 * 1024 {
                             this.error = Some("Close a file tab before opening another large file (64 MiB per project).".into());
                             return;
                         }
-                        let cached=value["cached"]==true;
+                        let cached = document.cached;
                         let (buffer, succeeded) =
-                            match Self::document_buffer(path.clone(), value, window, cx) {
+                            match Self::document_buffer(path.clone(), document, window, cx) {
                                 Ok(buffer) => (buffer, true),
                                 Err(error) => {
                                     (Self::failed_buffer(path.clone(), error, window, cx), false)
@@ -612,11 +700,11 @@ impl CodeWorkspace {
                 return;
             };
             buffer.saving = false;
-            match result {
-                Ok(value) => {
+            match result.and_then(document_reply) {
+                Ok(document) => {
                     buffer.changed.set(buffer.editor.read(cx).text() != &sent);
                     buffer.saved = sent;
-                    buffer.revision = text(&value, "revision");
+                    buffer.revision = document.revision;
                     this.language_saved(&path, cx);
                     cx.emit(Saved);
                 }
@@ -688,6 +776,179 @@ impl CodeWorkspace {
                 })
         });
     }
+    /// Opens the file tabs this project had in the last run, in their order,
+    /// unread until shown, with the one that was selected selected.
+    pub(super) fn restore_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let saved = cx
+            .has_global::<RestoredFiles>()
+            .then(|| {
+                cx.global_mut::<RestoredFiles>()
+                    .0
+                    .get_mut(&self.server)?
+                    .remove(&self.root)
+            })
+            .flatten();
+        let Some(saved) = saved else {
+            return;
+        };
+        for path in saved.open.into_iter().take(EDITOR_TAB_LIMIT) {
+            if !self.buffers.iter().any(|b| b.path == path) {
+                self.buffers.push(Self::unread_buffer(path, window, cx));
+            }
+        }
+        self.active = saved
+            .selected
+            .and_then(|selected| self.buffers.iter().position(|b| b.path == selected))
+            .or_else(|| self.buffers.len().checked_sub(1));
+        cx.notify();
+    }
+    /// Writes this project's file tabs when they changed.
+    fn save_tabs(&mut self, cx: &App) {
+        let saved = crate::ui_state::SavedFiles {
+            open: self.buffers.iter().map(|b| b.path.clone()).collect(),
+            selected: self
+                .active
+                .and_then(|i| self.buffers.get(i))
+                .map(|b| b.path.clone()),
+        };
+        if self.saved_tabs.as_ref() == Some(&saved) {
+            return;
+        }
+        if let Some(saver) = cx.try_global::<crate::terminal_workspace::TabsSaver>() {
+            saver
+                .0
+                .files(self.server.clone(), self.root.clone(), saved.clone());
+        }
+        self.saved_tabs = Some(saved);
+    }
+    /// Reads the selected tab's file if it was restored unread and the
+    /// project is showing.
+    fn read_shown_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(buffer) = self.active.and_then(|i| self.buffers.get(i)) else {
+            return;
+        };
+        if !self.visible
+            || !self.available
+            || self.reviewing
+            || !buffer.unread
+            || self.opening.contains(&buffer.path)
+        {
+            return;
+        }
+        let path = buffer.path.clone();
+        cx.defer_in(window, move |this, window, cx| {
+            let unread = this
+                .active
+                .and_then(|i| this.buffers.get(i))
+                .is_some_and(|b| b.path == path && b.unread);
+            if unread && !this.opening.contains(&path) {
+                this.open(path, window, cx);
+            }
+        });
+    }
+    /// Follows the pointer across the tab strip, at `strip`, while a file tab
+    /// is dragged: the tab takes the place under it, and the strip scrolls
+    /// while the pointer is held near either edge.
+    fn drag_over_strip(&mut self, pointer: Pixels, strip: Bounds<Pixels>, cx: &mut Context<Self>) {
+        self.drag_pointer = Some((pointer, strip));
+        self.reorder_dragged(cx);
+        if self._drag_scroll.is_none()
+            && project_workspace::drag_scroll_step(pointer, strip) != px(0.)
+        {
+            self._drag_scroll = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(16))
+                        .await;
+                    let scrolling = this.update(cx, |this, cx| this.drag_scroll(cx));
+                    if !matches!(scrolling, Ok(true)) {
+                        break;
+                    }
+                }
+            }));
+        }
+    }
+    /// One step of scrolling the strip under a dragged tab. False once the
+    /// drag ends or the pointer leaves the edges.
+    fn drag_scroll(&mut self, cx: &mut Context<Self>) -> bool {
+        let step = self
+            .drag_pointer
+            .filter(|_| self.dragging.is_some() && cx.has_active_drag())
+            .map(|(pointer, strip)| project_workspace::drag_scroll_step(pointer, strip))
+            .unwrap_or(px(0.));
+        if step == px(0.) {
+            self._drag_scroll = None;
+            return false;
+        }
+        if project_workspace::scroll_strip(&self.tab_scroll, step) {
+            self.reorder_dragged(cx);
+            cx.notify();
+        }
+        true
+    }
+    /// Moves the dragged file tab to the place under the pointer. Review tabs
+    /// come first in the strip and stay there.
+    fn reorder_dragged(&mut self, cx: &mut Context<Self>) {
+        let (Some(path), Some((pointer, _))) = (self.dragging.clone(), self.drag_pointer) else {
+            return;
+        };
+        if !cx.has_active_drag() {
+            return;
+        }
+        let Some(from) = self.buffers.iter().position(|b| b.path == path) else {
+            return;
+        };
+        let reviews = self.navigator.documents.reviews.len();
+        let middles = project_workspace::tab_middles(&self.tab_scroll, reviews, self.buffers.len());
+        if let Some(to) = project_workspace::dragged_tab_target(from, &middles, pointer) {
+            self.move_buffer(&path, to, cx);
+        }
+    }
+    /// Moves `path`'s tab to `index` among the file tabs, keeping the
+    /// selection on the same file.
+    fn move_buffer(&mut self, path: &str, index: usize, cx: &mut Context<Self>) {
+        let Some(from) = self.buffers.iter().position(|b| b.path == path) else {
+            return;
+        };
+        if from == index || index >= self.buffers.len() {
+            return;
+        }
+        let active_path = self
+            .active
+            .and_then(|i| self.buffers.get(i))
+            .map(|b| b.path.clone());
+        let buffer = self.buffers.remove(from);
+        self.buffers.insert(index, buffer);
+        self.active = active_path.and_then(|p| self.buffers.iter().position(|b| b.path == p));
+        cx.notify();
+    }
+    /// Moves the selected file tab one place, unless it is already at that
+    /// end. A focused project terminal moves its own tab instead.
+    fn move_active_tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        if let Some(terminal) = self
+            .terminal
+            .clone()
+            .filter(|t| self.terminal_visible && t.read(cx).contains_focus(window, cx))
+        {
+            terminal.update(cx, |t, cx| t.move_active_tab(forward, cx));
+            return;
+        }
+        let Some(index) = self.active.filter(|_| !self.reviewing) else {
+            return;
+        };
+        let Some(to) = (if forward {
+            index.checked_add(1)
+        } else {
+            index.checked_sub(1)
+        }) else {
+            return;
+        };
+        let path = self.buffers[index].path.clone();
+        self.move_buffer(&path, to, cx);
+    }
     fn remove(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         let previous_index = self.active.unwrap_or(0);
         let active_path = self
@@ -720,13 +981,13 @@ impl CodeWorkspace {
             }
             if let Some(children) = this.directories.get(path) {
                 for child in children {
-                    let path = text(child, "path");
-                    let directory = child["kind"] == "directory";
+                    let path = child.path.clone();
+                    let directory = child.kind == files::EntryKind::Directory;
                     result.push(TreeRow {
                         path: path.clone(),
-                        name: text(child, "name"),
+                        name: child.name.clone(),
                         directory,
-                        kind: text(child, "kind"),
+                        kind: child.kind,
                         depth,
                     });
                     if directory && this.expanded.contains(&path) {
@@ -749,7 +1010,7 @@ impl CodeWorkspace {
                 .unwrap_or("/")
                 .to_owned(),
             directory: true,
-            kind: "directory".into(),
+            kind: files::EntryKind::Directory,
             depth: 0,
         }];
         if self.expanded.contains(&self.root) {
@@ -1025,7 +1286,7 @@ impl CodeWorkspace {
                                                         } else {
                                                             file_icon::tree_icon(
                                                                 &row.name,
-                                                                &row.kind,
+                                                                row.kind,
                                                                 cx.theme().muted_foreground,
                                                             )
                                                         })
@@ -1134,6 +1395,16 @@ impl CodeWorkspace {
                     .h_full()
                     .overflow_x_scroll()
                     .track_scroll(&self.tab_scroll)
+                    .on_drag_move(cx.listener(
+                        |this,
+                         event: &DragMoveEvent<project_workspace::DraggedTab<String>>,
+                         _,
+                         cx| {
+                            if event.drag(cx).strip == cx.entity_id() {
+                                this.drag_over_strip(event.event.position.x, event.bounds, cx);
+                            }
+                        },
+                    ))
                     .children(reviews)
                     .children(self.buffers.iter().enumerate().map(|(i, buffer)| {
                         let path = buffer.path.clone();
@@ -1161,16 +1432,21 @@ impl CodeWorkspace {
                             n => format!("{title}, {n} errors"),
                         };
                         let tab = project_workspace::document_tab(
-                            ("code-tab", i),
+                            // Keyed by file, so a tab keeps its state as it moves.
+                            SharedString::from(format!("code-tab:{path}")),
                             active,
                             Some(file_icon::tree_icon(
                                 name,
-                                "file",
+                                files::EntryKind::File,
                                 cx.theme().muted_foreground,
                             )),
                             cx,
                         )
                         .accessibility_label(described)
+                        .debug_selector({
+                            let path = path.clone();
+                            move || format!("code-tab:{path}")
+                        })
                         .child(project_workspace::document_tab_title(title));
                         let tab = if problems > 0 {
                             tab.child(
@@ -1183,11 +1459,34 @@ impl CodeWorkspace {
                         } else {
                             tab
                         };
-                        tab.on_click(move |_, window, cx| {
-                            let _ = open.update(cx, |this, cx| this.open(path.clone(), window, cx));
+                        let dragged = cx.has_active_drag() && self.dragging.as_ref() == Some(&path);
+                        let drag_owner = cx.entity().downgrade();
+                        tab.on_click({
+                            let path = path.clone();
+                            move |_, window, cx| {
+                                let _ =
+                                    open.update(cx, |this, cx| this.open(path.clone(), window, cx));
+                            }
                         })
+                        .on_drag(
+                            project_workspace::DraggedTab {
+                                strip: cx.entity_id(),
+                                id: path,
+                                title: label.clone().into(),
+                                icon: Some(IconName::File),
+                            },
+                            move |tab, _, window, cx| {
+                                // Dragging a tab selects it, as a press on it would.
+                                let _ = drag_owner.update(cx, |this, cx| {
+                                    this.dragging = Some(tab.id.clone());
+                                    this.open(tab.id.clone(), window, cx);
+                                });
+                                cx.new(|_| project_workspace::DraggedTabView::new(tab, window))
+                            },
+                        )
+                        .when(dragged, |tab| tab.opacity(0.4))
                         .on_close(
-                            ("code-close", i),
+                            SharedString::from(format!("code-close:{}", buffer.path)),
                             format!("Close {}", buffer.path),
                             !buffer.saving,
                             move |_, window, cx| {
@@ -1363,83 +1662,86 @@ impl CodeWorkspace {
                 active.and_then(|b| b.page.as_ref().map(|p| (b, p))),
                 |view, (buffer, page)| view.child(self.section_controls(buffer, page, cx)),
             )
-            .child(
-                if let Some((buffer, failure)) =
-                    active.and_then(|b| b.failure.as_ref().map(|f| (b, f)))
-                {
-                    // Binary files will fail the same way again; reads can recover.
-                    let retry = !failure.contains("binary file");
-                    let path = buffer.path.clone();
-                    empty::pane(
-                        IconName::FileExclamationPoint,
-                        "Couldn’t open this file",
-                        failure.clone(),
-                        cx,
-                    )
-                    .debug_selector(|| "code-document-failure".into())
+            .child(if active.is_some_and(|b| b.unread) {
+                // Its file is being read.
+                div()
+                    .flex_1()
+                    .size_full()
                     .bg(cx.theme().background)
-                    .when(retry, |view| {
-                        view.child(
-                            crate::controls::button("code-retry-file")
-                                .label("Try again")
-                                .accessibility_label("Try opening the file again")
-                                .disabled(!self.available || self.opening.contains(&path))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.open(path.clone(), window, cx)
-                                })),
-                        )
-                    })
                     .into_any_element()
-                } else if let Some(buffer) = active {
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .min_h_0()
-                        .overflow_hidden()
-                        .child(
-                            Editor::new(
-                                buffer
-                                    .conflict
-                                    .as_ref()
-                                    .and_then(|c| c.preview())
-                                    .unwrap_or(&buffer.editor),
-                            )
-                            // The smallest input tier removes the text engine's vertical
-                            // inset; explicit typography below keeps code at its own size.
-                            .xsmall()
-                            .appearance(false)
-                            .bordered(false)
-                            .aria_label(
-                                if buffer.conflict.as_ref().is_some_and(|c| c.show_remote) {
-                                    "Remote version (read only)"
-                                } else if buffer.page.is_some() {
-                                    "Read-only file section"
-                                } else {
-                                    "Code editor"
-                                },
-                            )
-                            .readonly(
-                                buffer.page.is_some()
-                                    || buffer.conflict.as_ref().is_some_and(|c| c.show_remote),
-                            )
-                            .h_full()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_size(px(crate::ui::FONT_SIZE))
-                            .line_height(relative(1.6))
-                            .bg(cx.theme().background)
-                            .p_0(),
+            } else if let Some((buffer, failure)) =
+                active.and_then(|b| b.failure.as_ref().map(|f| (b, f)))
+            {
+                // Binary files will fail the same way again; reads can recover.
+                let retry = !failure.contains("binary file");
+                let path = buffer.path.clone();
+                empty::pane(
+                    IconName::FileExclamationPoint,
+                    "Couldn’t open this file",
+                    failure.clone(),
+                    cx,
+                )
+                .debug_selector(|| "code-document-failure".into())
+                .bg(cx.theme().background)
+                .when(retry, |view| {
+                    view.child(
+                        crate::controls::button("code-retry-file")
+                            .label("Try again")
+                            .accessibility_label("Try opening the file again")
+                            .disabled(!self.available || self.opening.contains(&path))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open(path.clone(), window, cx)
+                            })),
+                    )
+                })
+                .into_any_element()
+            } else if let Some(buffer) = active {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(
+                        Editor::new(
+                            buffer
+                                .conflict
+                                .as_ref()
+                                .and_then(|c| c.preview())
+                                .unwrap_or(&buffer.editor),
                         )
-                        .into_any_element()
-                } else {
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(empty::compact("Select a file to start editing", cx))
-                        .into_any_element()
-                },
-            )
+                        // The smallest input tier removes the text engine's vertical
+                        // inset; explicit typography below keeps code at its own size.
+                        .xsmall()
+                        .appearance(false)
+                        .bordered(false)
+                        .aria_label(if buffer.conflict.as_ref().is_some_and(|c| c.show_remote) {
+                            "Remote version (read only)"
+                        } else if buffer.page.is_some() {
+                            "Read-only file section"
+                        } else {
+                            "Code editor"
+                        })
+                        .readonly(
+                            buffer.page.is_some()
+                                || buffer.conflict.as_ref().is_some_and(|c| c.show_remote),
+                        )
+                        .h_full()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .text_size(px(crate::ui::FONT_SIZE))
+                        .line_height(relative(1.6))
+                        .bg(cx.theme().background)
+                        .p_0(),
+                    )
+                    .into_any_element()
+            } else {
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(empty::compact("Select a file to start editing", cx))
+                    .into_any_element()
+            })
     }
 }
 impl CodeWorkspace {
@@ -1478,7 +1780,9 @@ impl CodeWorkspace {
             ))))
         });
         self.rpc(request, window, cx, move |_, result, window, cx| {
-            let _ = pending.update(cx, |p, cx| p.loaded(result, window, cx));
+            let _ = pending.update(cx, |p, cx| {
+                p.loaded(result.and_then(index_reply), window, cx)
+            });
         });
         let focus = picker.clone();
         let previous_focus = window.focused(cx);
@@ -1789,6 +2093,12 @@ impl CodeWorkspace {
             .on_action(
                 cx.listener(|this, _: &PreviousTab, window, cx| this.cycle_tab(false, window, cx)),
             )
+            .on_action(cx.listener(|this, _: &MoveTabLeft, window, cx| {
+                this.move_active_tab(false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &MoveTabRight, window, cx| {
+                this.move_active_tab(true, window, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &CloseTab, window, cx| this.close_active_tab(window, cx)),
             )
@@ -1838,6 +2148,8 @@ impl Render for CodeWorkspace {
         if std::mem::take(&mut self.reconnected) {
             self.recover(window, cx);
         }
+        self.save_tabs(cx);
+        self.read_shown_tab(window, cx);
         let pane = self.editor_pane(true, cx);
         let content = if self.narrow && self.show_tree {
             self.tree(true, cx)
@@ -1866,6 +2178,8 @@ impl Render for CodeWorkspace {
             .on_action(cx.listener(|this, _: &FocusExplorer, window, cx| this.navigate(0, window, cx)))
             .on_action(cx.listener(|this, _: &NextTab, window, cx| this.cycle_tab(true, window, cx)))
             .on_action(cx.listener(|this, _: &PreviousTab, window, cx| this.cycle_tab(false, window, cx)))
+            .on_action(cx.listener(|this, _: &MoveTabLeft, window, cx| this.move_active_tab(false, window, cx)))
+            .on_action(cx.listener(|this, _: &MoveTabRight, window, cx| this.move_active_tab(true, window, cx)))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| this.close_active_tab(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 if !window.has_active_dialog(cx) { this.toggle_terminal(window, cx); }
@@ -1881,7 +2195,7 @@ impl Render for CodeWorkspace {
 }
 
 pub(super) struct Retained {
-    server: String,
+    pub(super) server: String,
     root: String,
     pub(super) editor: Entity<CodeWorkspace>,
     _subscription: Subscription,
@@ -1908,7 +2222,7 @@ impl Newport {
             let editor = retained.editor.read(cx);
             if (self.page != Page::Projects
                 || self.server != retained.server
-                || root_path(&self.git.repo["root"]).as_ref() != Some(&retained.root)
+                || self.git.root_path().as_ref() != Some(&retained.root)
                 || !editor.terminal_visible
                 || !editor.available
                 || (editor.narrow && editor.show_tree)
@@ -1921,10 +2235,10 @@ impl Newport {
     }
 
     pub(super) fn sync_code_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let current = root_path(&self.git.repo["root"]);
+        let current = self.git.root_path();
         for retained in &self.code_workspaces {
             let visible = self.page == Page::Projects
-                && self.git.repo["bare"] != true
+                && self.git.bare() != Some(true)
                 && retained.server == self.server
                 && current.as_ref() == Some(&retained.root);
             let narrow = self.content_width < 600.;
@@ -1945,19 +2259,16 @@ impl Newport {
                 });
             }
         }
-        if self.page != Page::Projects
-            || self.git.repo["bare"] == true
-            || !self.git.repo["repoId"].is_string()
-        {
+        if self.page != Page::Projects || self.git.bare() == Some(true) || self.git.repo.is_none() {
             return;
         }
-        let Some(root) = root_path(&self.git.repo["root"]) else {
+        let Some(root) = self.git.root_path() else {
             return;
         };
         let Some(server) = self.selected_server() else {
             return;
         };
-        let connection = terminal_scope::connection(server, &self.snapshot);
+        let connection = self.connection(server);
         if let Some(retained) = self
             .code_workspaces
             .iter()
@@ -1973,7 +2284,7 @@ impl Newport {
                     }
                     if !available && let Some(terminal) = &e.terminal {
                         terminal.update(cx, |terminal, cx| {
-                            terminal.sync_connection(Value::Null, e.root.clone(), cx)
+                            terminal.sync_connection(None, e.root.clone(), cx)
                         });
                     }
                     cx.notify();
@@ -1983,7 +2294,7 @@ impl Newport {
             let writable = !self.git_mutation_blocks_write()
                 && !self.project_dialog_open
                 && !self.modal_open
-                && self.git.repo["capabilities"]["readOnly"] == false;
+                && self.git.writable();
             retained.editor.update(cx, |e, cx| {
                 if e.navigator.repo != repo {
                     e.navigator.repo = repo.clone();
@@ -2015,9 +2326,10 @@ impl Newport {
         editor.update(cx, |editor, cx| {
             editor.narrow = self.content_width < 600.;
             editor.navigator.repo = self.git_repository_id();
-            editor.navigator.writable = self.git.repo["capabilities"]["readOnly"] == false;
+            editor.navigator.writable = self.git.writable();
             editor.list(root.clone(), window, cx);
             editor.refresh_tree_status(false, window, cx);
+            editor.restore_tabs(window, cx);
         });
         let initial = editor.downgrade();
         // Focus after the new workspace is mounted; the library's old focus
@@ -2034,7 +2346,7 @@ impl Newport {
         let subscription = cx.subscribe(&editor, move |this, _, _: &Saved, cx| {
             if this.page == Page::Projects
                 && this.server == saved_server
-                && root_path(&this.git.repo["root"]).as_ref() == Some(&saved_root)
+                && this.git.root_path().as_ref() == Some(&saved_root)
             {
                 if let Some(editor) = this.code_workspace() {
                     editor.update(cx, |e, _| {
@@ -2052,13 +2364,13 @@ impl Newport {
             &editor,
             move |this, editor, event: &project_documents::Event, cx| {
                 if this.server != document_server
-                    || root_path(&this.git.repo["root"]).as_ref() != Some(&document_root)
+                    || this.git.root_path().as_ref() != Some(&document_root)
                 {
                     return;
                 }
                 match event {
                     project_documents::Event::Open(document) => {
-                        this.project_open_document(document.clone(), cx)
+                        this.project_open_document((**document).clone(), cx)
                     }
                     project_documents::Event::CloseRepository => {
                         this.project_close_repository_tab(cx)
@@ -2074,7 +2386,7 @@ impl Newport {
                         }
                         let snapshot = snapshot.clone();
                         let ids: Vec<_> =
-                            entries.iter().map(|entry| text(entry, "entryId")).collect();
+                            entries.iter().map(|entry| entry.entry_id.clone()).collect();
                         let stage = *stage;
                         this.start_git_index_mutation(
                             this.git_repository_id(),
@@ -2104,7 +2416,7 @@ impl Newport {
         });
     }
     pub(super) fn code_workspace(&self) -> Option<Entity<CodeWorkspace>> {
-        let root = root_path(&self.git.repo["root"])?;
+        let root = self.git.root_path()?;
         self.code_workspaces
             .iter()
             .find(|e| e.server == self.server && e.root == root)
@@ -2248,11 +2560,18 @@ mod tests {
 #[cfg(test)]
 mod interaction_tests {
     use super::CodeWorkspace;
-    use super::rpc_fixture::{connection, observed_rpc};
+    use super::rpc_fixture::{
+        connection, document, empty_listing, events, index, listing, observed_connection,
+        observed_git, observed_rpc, read, reply, section,
+    };
     use crate::project_documents;
     use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
     use gpui_kit as gpui;
     use gpui_kit::AppContext;
+    use newport_protocol::desktop::files::{
+        self,
+        EntryKind::{Directory, File},
+    };
     use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
     type Calls = Arc<Mutex<Vec<(String, Value)>>>;
@@ -2278,22 +2597,32 @@ mod interaction_tests {
         let seen = calls.clone();
         let retained = std::rc::Rc::new(std::cell::RefCell::new(None));
         let saved = retained.clone();
-        let (_,cx)=cx.add_window_view(move |window,cx| {
-            let view=cx.new(|cx| {
-            let mut view=CodeWorkspace::new("11111111-1111-4111-8111-111111111111".into(),"/repo".into(),connection(),cx);
-            view.test_rpc=Some(observed_rpc(move |method,args| {
-                seen.lock().unwrap().push((method.into(),args.clone()));
-                match method {
-                    "files_read_text" => Ok(json!({"path":args["path"],"content":"fn main() {}\n","revision":"original"})),
-                    "files_write_text" => Ok(json!({"path":args["path"],"content":args["content"],"revision":"saved"})),
-                    "files_list" => Ok(json!({"path":args["path"],"entries":[{"name":"main.rs","path":"/repo/main.rs","kind":"file"}]})),
-                    "files_project_index" => Ok(json!({"paths":["main.rs", "src/deep/hidden.rs", "tests/hidden.rs"], "skipped":0})),
-                    _ => panic!("unexpected method {method}"),
-                }
-            }));view
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let view = cx.new(|cx| {
+                let mut view = CodeWorkspace::new(
+                    "11111111-1111-4111-8111-111111111111".into(),
+                    "/repo".into(),
+                    connection(),
+                    cx,
+                );
+                view.test_rpc = Some(observed_rpc(move |method, args| {
+                    seen.lock().unwrap().push((method.into(), args.clone()));
+                    match method {
+                        "files_read_text" => read(&args["path"], "fn main() {}\n", "original"),
+                        "files_write_text" => {
+                            read(&args["path"], args["content"].as_str().unwrap(), "saved")
+                        }
+                        "files_list" => listing(&args["path"], [("/repo/main.rs", File)]),
+                        "files_project_index" => {
+                            index(&["main.rs", "src/deep/hidden.rs", "tests/hidden.rs"])
+                        }
+                        _ => panic!("unexpected method {method}"),
+                    }
+                }));
+                view
             });
-            *saved.borrow_mut()=Some(view.clone());
-            gpui::base::Root::new(view,window,cx)
+            *saved.borrow_mut() = Some(view.clone());
+            gpui::base::Root::new(view, window, cx)
         });
         let view = retained.borrow_mut().take().unwrap();
         cx.simulate_resize(size(px(1000.), px(650.)));
@@ -2313,17 +2642,23 @@ mod interaction_tests {
             v.test_rpc = Some(observed_rpc(move |method, args| {
                 recorded.lock().unwrap().push((method.into(), args.clone()));
                 if method == "files_read_text" {
-                    return Ok(json!({"path":args["path"], "content":"original source", "revision":"initial"}));
+                    return read(&args["path"], "original source", "initial");
                 }
                 assert_eq!(method, "files_list");
                 let children = match args["path"].as_str().unwrap() {
-                    "/repo" => vec![("main.rs", "file"), ("src", "directory"), ("unrelated", "directory")],
-                    "/repo/src" => vec![("deep", "directory")],
-                    "/repo/src/deep" => vec![("hidden.rs", "file")],
+                    "/repo" => vec![
+                        ("main.rs", File),
+                        ("src", Directory),
+                        ("unrelated", Directory),
+                    ],
+                    "/repo/src" => vec![("deep", Directory)],
+                    "/repo/src/deep" => vec![("hidden.rs", File)],
                     other => panic!("must not crawl unrelated folders: {other}"),
                 };
-                let entries: Vec<_> = children.into_iter().map(|(name, kind)| json!({"name":name,"path":format!("{}/{name}",args["path"].as_str().unwrap()),"kind":kind})).collect();
-                Ok(json!({"path":args["path"], "entries":entries}))
+                let entries = children.into_iter().map(|(name, kind)| {
+                    (format!("{}/{name}", args["path"].as_str().unwrap()), kind)
+                });
+                listing(&args["path"], entries)
             }));
         });
         (view, cx, calls)
@@ -2358,12 +2693,13 @@ mod interaction_tests {
             assert_eq!(args.watch, view.watch.id);
             assert!(args.directories.is_empty());
             assert!(args.cursor.is_none());
-            view.connection[0] = json!("33333333-3333-4333-8333-333333333333");
+            view.connection.as_mut().unwrap().settings.server_id =
+                uuid::Uuid::parse_str("33333333-3333-4333-8333-333333333333").unwrap();
             assert!(
                 view.read_request("/repo/main.rs", None, None, true)
                     .is_err()
             );
-            view.connection = json!(["incomplete"]);
+            view.connection = None;
             assert!(view.watch_request(Vec::new(), None).is_err());
         });
     }
@@ -2373,10 +2709,12 @@ mod interaction_tests {
         use crate::connectivity::{Phase, ServerState, Snapshot};
         use std::sync::atomic::{AtomicBool, Ordering};
         let (id, instance) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
-        let scope = newport_domain::connection_scope::connection(
-            &json!({"id": id.to_string(), "sshHost":"host", "sshUser":"user", "sshPort":22,"authMethod":"publicKey"}),
-            &json!({"instanceId": instance.to_string(),"runtime":{"connectionRevisions":{(id.to_string()):1}}}),
-        );
+        let mut server = crate::snapshot_fixture::server(id, "Server");
+        server.ssh_host = "host".into();
+        server.ssh_user = "user".into();
+        let mut snapshot = crate::snapshot_fixture::snapshot(vec![server.clone()]);
+        snapshot.instance_id = instance;
+        let scope = Some(snapshot.connection_scope(&server));
         cx.update(|cx| {
             gpui::component::init(cx);
             crate::theme::install(false, cx);
@@ -2395,9 +2733,7 @@ mod interaction_tests {
                     if !reachable.load(Ordering::SeqCst) {
                         return Err("The connection was lost.".into());
                     }
-                    Ok(json!({"path": args["path"], "entries": [
-                        {"name": "main.rs", "path": "/repo/main.rs", "kind": "file"}
-                    ]}))
+                    listing(&args["path"], [("/repo/main.rs", File)])
                 }));
                 view
             });
@@ -2508,8 +2844,8 @@ mod interaction_tests {
         let read = source.clone();
         view.update(cx, |v, _| {
             v.test_rpc = Some(observed_rpc(move |method, args| match method {
-                "files_read_text" => Ok(json!({"content":*read,"revision":"large-original"})),
-                "files_list" => Ok(json!({"path":args["path"],"entries":[]})),
+                "files_read_text" => reply(document(&read, "large-original")),
+                "files_list" => empty_listing(&args["path"]),
                 "files_write_text" => {
                     assert_eq!(args["revision"], "large-original");
                     assert_eq!(
@@ -2517,7 +2853,7 @@ mod interaction_tests {
                         format!("// edited\n{}", read)
                     );
                     sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Ok(json!({"revision":"large-saved"}))
+                    reply(document("", "large-saved"))
                 }
                 _ => panic!("unexpected method {method}"),
             }))
@@ -2555,19 +2891,27 @@ mod interaction_tests {
     fn large_sections_are_readonly_navigable_and_cannot_be_saved(cx: &mut TestAppContext) {
         let (view, cx, calls) = fixture(cx);
         let seen = calls.clone();
-        view.update(cx, |v, _| v.test_rpc = Some(observed_rpc(move |method, args| {
-            seen.lock().unwrap().push((method.into(), args.clone()));
-            match method {
-                "files_read_text" => {
-                    let offset = args["offset"].as_u64().unwrap_or(0);
-                    if offset > 0 { assert_eq!(args["revision"], "page:original"); }
-                    let (content, next) = if offset == 0 { ("first section", Some(13)) } else { ("last", None) };
-                    Ok(json!({"content":content,"revision":"page:original","page":{"offset":offset,"next":next,"size":17}}))
+        view.update(cx, |v, _| {
+            v.test_rpc = Some(observed_rpc(move |method, args| {
+                seen.lock().unwrap().push((method.into(), args.clone()));
+                match method {
+                    "files_read_text" => {
+                        let offset = args["offset"].as_u64().unwrap_or(0);
+                        if offset > 0 {
+                            assert_eq!(args["revision"], "page:original");
+                        }
+                        let (content, next) = if offset == 0 {
+                            ("first section", Some(13))
+                        } else {
+                            ("last", None)
+                        };
+                        reply(section(content, "page:original", offset, next, 17))
+                    }
+                    "files_list" => empty_listing(&Value::Null),
+                    other => panic!("unexpected call {other}"),
                 }
-                "files_list" => Ok(json!({"entries":[]})),
-                other => panic!("unexpected call {other}"),
-            }
-        })));
+            }))
+        });
         open(&view, cx, "/repo/large.log");
         let first = view.read_with(cx, |v, _| v.buffers[0].editor.entity_id());
         cx.simulate_input("must not edit");
@@ -2597,7 +2941,7 @@ mod interaction_tests {
                 first,
                 "old undo storage is released"
             );
-            assert!(v.buffers[0].page.as_ref().unwrap().next.is_none());
+            assert!(v.buffers[0].page.as_ref().unwrap().section.next.is_none());
         });
         let previous = cx.update(|window, _| {
             gpui::base::test_support::snapshots(window)
@@ -2626,7 +2970,7 @@ mod interaction_tests {
         let (view, cx, _) = fixture(cx);
         view.update(cx, |v, _| {
             v.test_rpc = Some(observed_rpc(|_, _| {
-                Ok(json!({"content":"%PDF-1.7\nobject", "revision":"r"}))
+                reply(document("%PDF-1.7\nobject", "r"))
             }))
         });
         open(&view, cx, "/repo/report.pdf");
@@ -2661,7 +3005,7 @@ mod interaction_tests {
         let (view, cx, _) = fixture(cx);
         view.update(cx, |v, _| {
             v.test_rpc = Some(observed_rpc(|_, _| {
-                Ok(json!({"content":"%PDF-1.7\nobject", "revision":"r"}))
+                reply(document("%PDF-1.7\nobject", "r"))
             }))
         });
         open(&view, cx, "/repo/report.pdf");
@@ -2685,9 +3029,7 @@ mod interaction_tests {
             assert!(v.buffers[0].error.is_none());
         });
         view.update(cx, |v, _| {
-            v.test_rpc = Some(observed_rpc(|_, _| {
-                Ok(json!({"content":"now text", "revision":"r2"}))
-            }))
+            v.test_rpc = Some(observed_rpc(|_, _| reply(document("now text", "r2"))))
         });
         refresh(&view, cx);
         view.read_with(cx, |v, cx| {
@@ -2956,16 +3298,16 @@ mod interaction_tests {
     #[gpui::test]
     fn reveal_scrolls_the_active_file_into_the_virtualized_explorer(cx: &mut TestAppContext) {
         let (view, cx, _) = fixture(cx);
-        view.update(cx, |v,_| v.test_rpc = Some(observed_rpc(|method,args| {
-            match method {
-                "files_read_text" => Ok(json!({"path":args["path"],"content":"visible document", "revision":"original"})),
-                "files_list" => {
-                    let entries: Vec<_> = (0..300).map(|n|json!({"path":format!("/repo/f{n:03}.rs"),"name":format!("f{n:03}.rs"),"kind":"file"})).collect();
-                    Ok(json!({"path":args["path"],"entries":entries}))
-                }
+        view.update(cx, |v, _| {
+            v.test_rpc = Some(observed_rpc(|method, args| match method {
+                "files_read_text" => read(&args["path"], "visible document", "original"),
+                "files_list" => listing(
+                    &args["path"],
+                    (0..300).map(|n| (format!("/repo/f{n:03}.rs"), File)),
+                ),
                 _ => panic!("unexpected {method}"),
-            }
-        })));
+            }))
+        });
         open(&view, cx, "/repo/f299.rs");
         draw(cx);
         cx.update(|window, _| {
@@ -3043,7 +3385,7 @@ mod interaction_tests {
         view.update_in(cx, |v, window, cx| {
             v.test_rpc = Some(observed_rpc(|method, args| {
                 assert_eq!(method, "files_list");
-                Ok(json!({"path":args["path"],"entries":[]}))
+                empty_listing(&args["path"])
             }));
             v.reveal_active(true, window, cx);
             assert_eq!(
@@ -3143,7 +3485,7 @@ mod interaction_tests {
             .unwrap()
             .1;
         assert_eq!(index["root"], "/repo");
-        assert_eq!(index["expectedConnection"], connection());
+        assert_eq!(index["expectedConnection"], observed_connection());
     }
     #[gpui::test]
     fn quick_open_escape_restores_editor_without_opening_a_file(cx: &mut TestAppContext) {
@@ -3210,7 +3552,7 @@ mod interaction_tests {
             v.available = true;
             v.test_rpc = Some(observed_rpc(|method, _| {
                 assert_eq!(method, "files_project_index");
-                Ok(json!({"paths":["../outside.rs"]}))
+                index(&["../outside.rs"])
             }));
             v.open_quick(window, cx);
         });
@@ -3244,7 +3586,7 @@ mod interaction_tests {
             .iter()
             .find(|(m, _)| m == "files_write_text")
             .expect("Save file action sends a save");
-        assert_eq!(save["expectedConnection"], connection());
+        assert_eq!(save["expectedConnection"], observed_connection());
         assert_eq!(save["revision"], "original");
         assert!(save["content"].as_str().unwrap().starts_with("// edited\n"));
         assert!(!view.read_with(cx, |v, cx| v.dirty(cx)));
@@ -3311,8 +3653,11 @@ mod interaction_tests {
         open(&view, cx, "/repo/main.rs");
         let document = project_documents::ReviewDocument {
             key: project_documents::ReviewKey::Commit("123456789".into()),
-            entry: json!({"oid":{"hex":"123456789"}}),
-            status: Value::Null.into(),
+            entry: crate::git_listing::Entry::Commit(crate::git_fixture::commit(
+                "123456789",
+                "Commit",
+            )),
+            status: None,
             preview: false,
         };
         view.update(cx, |v, _| {
@@ -3339,10 +3684,8 @@ mod interaction_tests {
             .collect();
         view.update(cx, |v, _| {
             v.test_rpc = Some(observed_rpc(move |method, args| match method {
-                "files_read_text" => {
-                    Ok(json!({"path":args["path"],"content":source.clone(),"revision":"r"}))
-                }
-                _ => Ok(json!({"path":args["path"],"entries":[]})),
+                "files_read_text" => read(&args["path"], &source, "r"),
+                _ => empty_listing(&args["path"]),
             }));
         });
         cx.simulate_resize(gpui::size(px(1100.), px(800.)));
@@ -3395,8 +3738,11 @@ mod interaction_tests {
                 .documents
                 .open(project_documents::ReviewDocument {
                     key: project_documents::ReviewKey::Commit("123456789".into()),
-                    entry: json!({"oid":{"hex":"123456789"}}),
-                    status: Value::Null.into(),
+                    entry: crate::git_listing::Entry::Commit(crate::git_fixture::commit(
+                        "123456789",
+                        "Commit",
+                    )),
+                    status: None,
                     preview: false,
                 });
         });
@@ -3416,6 +3762,137 @@ mod interaction_tests {
             view.read_with(cx, |v, _| v.active == Some(2)),
             "no seventh tab"
         );
+    }
+    #[gpui::test]
+    fn dragging_a_file_tab_selects_it_and_moves_it_along_the_row(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, MouseButton, point};
+        let (view, cx, _) = fixture(cx);
+        for name in ["one", "two", "three"] {
+            open(&view, cx, &format!("/repo/{name}.rs"));
+        }
+        let order = |cx: &mut VisualTestContext| -> Vec<String> {
+            view.read_with(cx, |v, _| {
+                v.buffers.iter().map(|b| b.path.clone()).collect()
+            })
+        };
+        let start = cx.debug_bounds("code-tab:/repo/one.rs").unwrap().center();
+        let last = cx.debug_bounds("code-tab:/repo/three.rs").unwrap();
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            start + point(px(6.), px(0.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        draw(cx);
+        assert_eq!(
+            view.read_with(cx, |v, _| v.active),
+            Some(0),
+            "the dragged tab is selected"
+        );
+        let end = point(last.right() - px(4.), start.y);
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+        draw(cx);
+        cx.simulate_mouse_move(
+            end + point(px(1.), px(0.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        draw(cx);
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        draw(cx);
+        assert_eq!(
+            order(cx),
+            ["/repo/two.rs", "/repo/three.rs", "/repo/one.rs"]
+        );
+        assert_eq!(
+            view.read_with(cx, |v, _| v.active),
+            Some(2),
+            "still the dragged file"
+        );
+    }
+    #[gpui::test]
+    fn the_selected_file_tab_moves_one_place_from_the_menu(cx: &mut TestAppContext) {
+        let (view, cx, _) = fixture(cx);
+        for name in ["one", "two", "three"] {
+            open(&view, cx, &format!("/repo/{name}.rs"));
+        }
+        let order = |cx: &mut VisualTestContext| -> Vec<String> {
+            view.read_with(cx, |v, _| {
+                v.buffers.iter().map(|b| b.path.clone()).collect()
+            })
+        };
+        menu_action(cx, super::MoveTabLeft);
+        assert_eq!(
+            order(cx),
+            ["/repo/one.rs", "/repo/three.rs", "/repo/two.rs"]
+        );
+        assert_eq!(
+            view.read_with(cx, |v, _| v.active),
+            Some(1),
+            "still selected"
+        );
+        menu_action(cx, super::MoveTabRight);
+        menu_action(cx, super::MoveTabRight);
+        assert_eq!(
+            order(cx),
+            ["/repo/one.rs", "/repo/two.rs", "/repo/three.rs"],
+            "the last stays last"
+        );
+    }
+    #[gpui::test]
+    fn file_tabs_come_back_in_order_and_read_their_files_once_shown(cx: &mut TestAppContext) {
+        let (view, cx, calls) = fixture(cx);
+        let saved = crate::ui_state::SavedFiles {
+            open: vec![
+                "/repo/b.rs".into(),
+                "/repo/a.rs".into(),
+                "/repo/c.rs".into(),
+            ],
+            selected: Some("/repo/a.rs".into()),
+        };
+        cx.update(|_, cx| {
+            cx.set_global(super::RestoredFiles(
+                [(
+                    "11111111-1111-4111-8111-111111111111".to_string(),
+                    [("/repo".to_string(), saved.clone())].into(),
+                )]
+                .into(),
+            ))
+        });
+        view.update_in(cx, |v, window, cx| v.restore_tabs(window, cx));
+        draw(cx);
+        let reads = |calls: &Calls| -> Vec<String> {
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(method, _)| method == "files_read_text")
+                .map(|(_, args)| args["path"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        view.read_with(cx, |v, cx| {
+            let order: Vec<_> = v.buffers.iter().map(|b| b.path.as_str()).collect();
+            assert_eq!(order, ["/repo/b.rs", "/repo/a.rs", "/repo/c.rs"]);
+            assert_eq!(v.active, Some(1));
+            assert!(!v.buffers[1].unread, "the shown tab read its file");
+            assert!(v.buffers[0].unread && v.buffers[2].unread);
+            assert!(!v.buffers[0].dirty(cx), "an unread tab has nothing to save");
+        });
+        assert_eq!(reads(&calls), ["/repo/a.rs"], "only the shown tab's file");
+        // Taken once: another editor for the project starts empty.
+        assert!(cx.update(|_, cx| {
+            cx.global::<super::RestoredFiles>().0["11111111-1111-4111-8111-111111111111"].is_empty()
+        }));
+        // Showing another tab reads its file, in its place.
+        let tab = cx.debug_bounds("code-tab:/repo/c.rs").unwrap().center();
+        cx.simulate_click(tab, gpui::Modifiers::default());
+        draw(cx);
+        assert_eq!(reads(&calls), ["/repo/a.rs", "/repo/c.rs"]);
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.active, Some(2));
+            assert!(!v.buffers[2].unread);
+            assert_eq!(v.saved_tabs.as_ref().map(|s| s.open.len()), Some(3));
+        });
     }
     #[gpui::test]
     fn typing_during_save_or_reload_never_replaces_newer_edits(cx: &mut TestAppContext) {
@@ -3520,7 +3997,7 @@ mod interaction_tests {
             });
             view.buffers[1].saving = true;
             view.opening.insert("/repo/file-2.rs".into());
-            view.retain_conflict(3, json!({"content":"remote changed", "revision":"remote"}))
+            view.retain_conflict(3, document("remote changed", "remote"))
                 .unwrap();
         });
         open(&view, cx, "/repo/new.rs");
@@ -3652,23 +4129,32 @@ mod interaction_tests {
             let owner = cx.new(|cx| crate::page_perf_tests::owner(window, cx));
             owner.update(cx, |o, cx| {
                 o.server = "11111111-1111-4111-8111-111111111111".into();
-                o.git.repo =
-                    json!({"repoId":"repo","root":{"bytesB64":"L3JlcG8=","display":"/repo"}});
-                o.git.page =
-                    json!({"snapshot":"status","entries":[{"entryId":"change","path":{"display":"working.rs","bytesB64":"d29ya2luZy5ycw=="},"unstaged":true}],"metadata":{"totalEntries":1}});
+                o.git.repo = Some(crate::git_fixture::read_only_repository("repo"));
+                let mut status = crate::git_fixture::status_page(
+                    "status",
+                    vec![crate::git_fixture::status_entry("change", "working.rs")],
+                    None,
+                );
+                status.metadata.total_entries = 1;
+                o.git.page = Some(crate::git_listing::Listing::Status(Box::new(status)));
                 o.code_workspaces.push(super::Retained {
                     server: "11111111-1111-4111-8111-111111111111".into(),
                     root: "/repo".into(),
                     editor: view.clone(),
                     _subscription: cx.subscribe(&view, |_, _, _: &super::Saved, _| {}),
                     _observe: cx.observe(&view, |_, _, cx| cx.notify()),
-                    _documents: cx.subscribe(&view, |o, _, event: &project_documents::Event, cx| {
-                        match event {
-                            project_documents::Event::Open(document) => o.project_open_document(document.clone(), cx),
-                            project_documents::Event::CloseRepository => o.project_close_repository_tab(cx),
-                            _ => {},
-                        }
-                    }),
+                    _documents: cx.subscribe(
+                        &view,
+                        |o, _, event: &project_documents::Event, cx| match event {
+                            project_documents::Event::Open(document) => {
+                                o.project_open_document((**document).clone(), cx)
+                            }
+                            project_documents::Event::CloseRepository => {
+                                o.project_close_repository_tab(cx)
+                            }
+                            _ => {}
+                        },
+                    ),
                 });
             });
             let clone = owner.clone();
@@ -3717,8 +4203,12 @@ mod interaction_tests {
             draw(cx);
         };
         view.update(cx, |v, cx| {
-            v.navigator.collections[0].set_page(owner.read(cx).git.page.clone());
-            v.navigator.collections[1].set_page(json!({"snapshot":"history","entries":[{"oid":{"hex":"abc1234"},"message":{"display":"Saved commit"}}]}));
+            v.navigator.collections[0].set_page(owner.read(cx).git.page.clone().unwrap());
+            v.navigator.collections[1].set_page(crate::git_fixture::history_page(
+                "history",
+                vec![crate::git_fixture::commit("abc1234", "Saved commit")],
+                None,
+            ));
         });
         click(cx, "Git");
         assert!(view.read_with(cx, |v, cx| !v.files && !v.reviewing && v.dirty(cx)));
@@ -3745,7 +4235,7 @@ mod interaction_tests {
         );
         click(cx, "Close Commit abc1234");
         assert_eq!(
-            owner.read_with(cx, |o, _| crate::text(&o.git.selected["path"], "display")),
+            owner.read_with(cx, |o, _| o.git.entry().unwrap().path.display.clone()),
             "working.rs"
         );
         click(cx, "main.rs •");
@@ -3977,9 +4467,7 @@ mod interaction_tests {
                 .center()
         });
         view.update(cx, |v, _| {
-            v.test_rpc = Some(observed_rpc(|_, args| {
-                Ok(json!({"path":args["path"],"entries":[]}))
-            }))
+            v.test_rpc = Some(observed_rpc(|_, args| empty_listing(&args["path"])))
         });
         cx.simulate_click(retry, Default::default());
         draw(cx);
@@ -4009,9 +4497,7 @@ mod interaction_tests {
                 .center()
         });
         view.update(cx, |v, _| {
-            v.test_rpc = Some(observed_rpc(|_, _| {
-                Ok(json!({"content":"fn main() {}\n", "revision":"r"}))
-            }))
+            v.test_rpc = Some(observed_rpc(|_, _| reply(document("fn main() {}\n", "r"))))
         });
         cx.simulate_click(retry, Default::default());
         draw(cx);
@@ -4081,13 +4567,20 @@ mod interaction_tests {
         view.update_in(cx, |v, window, cx| {
             v.navigator.repo = "repo-a".into();
             v.navigator.query = "hidden-by-filter".into();
-            v.test_rpc = Some(observed_rpc(move |method, args| {
-                assert_eq!(method, "git_request");
-                let params = &args["request"]["params"];
+            v.test_git = Some(observed_git(move |request| {
+                let params = serde_json::to_value(request).unwrap()["params"].clone();
                 assert_eq!(params["filter"], json!({"text":"","group":"all"}));
                 recorded.lock().unwrap().push(params.clone());
-                let (path, next) = if params["cursor"].is_null() { ("src/first.rs", json!("page2")) } else { ("src/second.rs", Value::Null) };
-                Ok(json!({"snapshot":"one", "entries":[{"path":{"bytesB64":base64::engine::general_purpose::STANDARD.encode(path)},"unstaged":true}], "nextCursor":next,"metadata":{"totalEntries":2}}))
+                let (path, next) = if params["cursor"].is_null() {
+                    ("src/first.rs", Some("page2"))
+                } else {
+                    ("src/second.rs", None)
+                };
+                let mut entry = crate::git_fixture::status_entry("entry", path);
+                entry.path.bytes_b64 = base64::engine::general_purpose::STANDARD.encode(path);
+                let mut page = crate::git_fixture::status_page("one", vec![entry], next);
+                page.metadata.total_entries = 2;
+                Ok(newport_protocol::git::Reply::Status(Box::new(page)))
             }));
             v.refresh_tree_status(false, window, cx);
         });
@@ -4104,7 +4597,7 @@ mod interaction_tests {
                     .is_some()
             );
             assert!(v.tree_status.status("/repo", "/repo/src").is_some());
-            assert!(v.navigator.collections[0].page().is_null());
+            assert!(v.navigator.collections[0].page().is_none());
         });
         assert_eq!(calls.lock().unwrap().len(), 2);
         view.update_in(cx, |v, window, cx| v.refresh_tree_status(false, window, cx));
@@ -4117,9 +4610,19 @@ mod interaction_tests {
         // A failed continuation must not publish a partial new snapshot or
         // retain colors from the old one.
         view.update_in(cx, |v, window, cx| {
-            v.test_rpc = Some(observed_rpc(|_, args| {
-                if args["request"]["params"]["cursor"].is_string() { return Err("snapshot changed".into()); }
-                Ok(json!({"snapshot":"two","entries":[],"nextCursor":"page2","metadata":{"totalEntries":2}}))
+            v.test_git = Some(observed_git(|request| {
+                if matches!(
+                    request,
+                    newport_protocol::git::Request::Status {
+                        cursor: Some(_),
+                        ..
+                    }
+                ) {
+                    return Err("snapshot changed".into());
+                }
+                let mut page = crate::git_fixture::status_page("two", vec![], Some("page2"));
+                page.metadata.total_entries = 2;
+                Ok(newport_protocol::git::Reply::Status(Box::new(page)))
             }));
             v.refresh_tree_status(true, window, cx);
         });
@@ -4147,12 +4650,22 @@ mod interaction_tests {
         let (view, cx, _) = fixture(cx);
         view.update(cx, |v, _| {
             v.navigator.panel = 2;
-            v.navigator.collections[1].set_page(json!({"entries":[
-                {"oid":{"hex":"abc1234"},"message":{"display":"A very long commit subject that must truncate instead of widening the navigator"},"author":{"name":"A very long author name"},"time":0},
-                {"oid":{"hex":"def5678"},"message":{"display":"Second commit"},"author":{"name":"Author"},"time":0}
-            ]}));
+            let mut first = crate::git_fixture::commit(
+                "abc1234",
+                "A very long commit subject that must truncate instead of widening the navigator",
+            );
+            first.author.name = "A very long author name".into();
+            first.time = 0;
+            let mut second = crate::git_fixture::commit("def5678", "Second commit");
+            second.time = 0;
+            v.navigator.collections[1].set_page(crate::git_fixture::history_page(
+                "history",
+                vec![first, second],
+                None,
+            ));
             v.reviewing = true;
-            v.navigator.documents.active = Some(project_documents::ReviewKey::Commit("abc1234".into()));
+            v.navigator.documents.active =
+                Some(project_documents::ReviewKey::Commit("abc1234".into()));
         });
         cx.update(|window, cx| {
             window.replace_root(cx, |window, cx| {
@@ -4217,13 +4730,17 @@ mod interaction_tests {
                 }
             })
         });
-        let first = json!({"entryId":"first", "path":{"display":"src/deep/first.rs"},"unstaged":true,"flags":256});
-        let second = json!({"entryId":"second", "path":{"display":"short.rs"},"untracked":true});
+        let mut first = crate::git_fixture::status_entry("first", "src/deep/first.rs");
+        first.flags = 256;
+        let mut second = crate::git_fixture::status_entry("second", "short.rs");
+        second.unstaged = false;
+        second.untracked = true;
         view.update(cx, |v, _| {
             v.navigator.panel = 1;
             v.navigator.writable = true;
-            v.navigator.collections[0]
-                .set_page(json!({"snapshot":"current","entries":[first,second]}));
+            v.navigator.collections[0].set_page(crate::git_listing::Listing::Status(Box::new(
+                crate::git_fixture::status_page("current", vec![first.clone(), second], None),
+            )));
         });
         cx.update(|window, cx| {
             window.replace_root(cx, |window, cx| {
@@ -4276,23 +4793,33 @@ mod interaction_tests {
         cx: &mut TestAppContext,
     ) {
         let (view, cx, calls) = fixture(cx);
-        let entry = |i| json!({"entryId":format!("e{i}"),"path":{"display":format!("docs/file-{i:03}.md")},"untracked":true});
+        let entry = |i| {
+            let mut entry =
+                crate::git_fixture::status_entry(&format!("e{i}"), &format!("docs/file-{i:03}.md"));
+            entry.unstaged = false;
+            entry.untracked = true;
+            entry
+        };
         let first: Vec<_> = (0..60).map(entry).collect();
         let next: Vec<_> = (60..120).map(entry).collect();
         let seen = calls.clone();
         view.update(cx, |v, _| {
             v.navigator.repo = "repo".into();
             v.navigator.panel = 1;
-            v.navigator.collections[0].set_page(
-                json!({"snapshot":"s","entries":first,"nextCursor":"second","metadata":{}}),
-            );
-            v.test_rpc = Some(observed_rpc(move |method, args| {
-                assert_eq!(method, "git_request");
-                seen.lock().unwrap().push((method.into(), args.clone()));
-                match args["request"]["params"]["cursor"].as_str() {
-                    Some("second") => Ok(
-                        json!({"snapshot":"s","entries":next,"nextCursor":"third","metadata":{}}),
-                    ),
+            v.navigator.collections[0].set_page(crate::git_listing::Listing::Status(Box::new(
+                crate::git_fixture::status_page("s", first, Some("second")),
+            )));
+            v.test_git = Some(observed_git(move |request| {
+                seen.lock()
+                    .unwrap()
+                    .push(("git_request".into(), serde_json::to_value(request).unwrap()));
+                let newport_protocol::git::Request::Status { cursor, .. } = request else {
+                    panic!("unexpected request {request:?}");
+                };
+                match cursor.as_deref() {
+                    Some("second") => Ok(newport_protocol::git::Reply::Status(Box::new(
+                        crate::git_fixture::status_page("s", next.clone(), Some("third")),
+                    ))),
                     Some("third") => Err("Page unavailable".into()),
                     other => panic!("unexpected cursor {other:?}"),
                 }
@@ -4323,10 +4850,7 @@ mod interaction_tests {
         }
         assert_eq!(calls.lock().unwrap().len(), 1);
         assert_eq!(
-            view.read_with(cx, |v, _| v.navigator.collections[0].page()["entries"]
-                .as_array()
-                .unwrap()
-                .len()),
+            view.read_with(cx, |v, _| v.navigator.collections[0].page().unwrap().len()),
             120
         );
         view.update(cx, |v, cx| {
@@ -4454,12 +4978,11 @@ mod interaction_tests {
         let (view, cx, _) = fixture(cx);
         let owner = cx.update(|window, cx| cx.new(|cx| crate::page_perf_tests::owner(window, cx)));
         let oid = "559718aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let commit = json!({"oid":{"hex":oid},"message":{"display":"Retained commit"},
-            "messageTruncated":false,"parents":[],"author":{"name":"Author"},"time":1});
+        let commit = crate::git_fixture::commit(oid, "Retained commit");
         let document = project_documents::ReviewDocument {
             key: project_documents::ReviewKey::Commit(oid.into()),
-            entry: commit.clone(),
-            status: Value::Null.into(),
+            entry: crate::git_listing::Entry::Commit(commit.clone()),
+            status: None,
             preview: false,
         };
         view.update(cx, |v, _| {
@@ -4472,7 +4995,7 @@ mod interaction_tests {
             o.server = "11111111-1111-4111-8111-111111111111".into();
             o.page = crate::Page::Projects;
             o.git.tab = 1;
-            o.git.selected = commit.clone();
+            o.git.selected = Some(crate::git_listing::Entry::Commit(commit.clone()));
             o.git.history.oid = oid.into();
             o.code_workspaces.push(super::Retained {
                 server: "11111111-1111-4111-8111-111111111111".into(), root: "/repo".into(), editor: view.clone(),
@@ -4484,32 +5007,44 @@ mod interaction_tests {
             o.navigate(crate::Page::Ports, cx);
             assert!(o.git.history.oid.is_empty());
             o.navigate(crate::Page::Projects, cx);
-            assert!(!o.resources.complete("git-history-files", stale, Ok(json!({"snapshot":"old"}))));
+            assert!(!o.resources.complete_git(
+                "git-history-files",
+                stale,
+                Err("old".to_owned().into())
+            ));
             // Complete the reopened handle just as navigation's repo.open does.
             o.git.tab = 1;
-            let repo = json!({"repoId":"reopened","root":{"bytesB64":"L3JlcG8=","display":"/repo"},"bare":false});
+            let repo = crate::git_fixture::read_only_repository("reopened");
             let generation = o.resources.begin("repository").unwrap();
-            o.resources.complete("repository", generation, Ok(repo));
+            o.resources.complete_git(
+                "repository",
+                generation,
+                Ok(newport_protocol::git::Reply::Open(Box::new(repo))),
+            );
             o.git_completed("repository");
             requests.try_iter().for_each(drop);
             o.project_restore_document(cx);
             assert_eq!(o.git.history.oid, oid);
-            assert_eq!(o.git.selected, commit);
-            assert_eq!(o.value("git-history-detail")["message"]["display"], "Retained commit");
+            assert_eq!(
+                o.git.selected,
+                Some(crate::git_listing::Entry::Commit(commit.clone()))
+            );
+            assert_eq!(
+                o.git_reply("git-history-detail"),
+                Some(&newport_protocol::git::Reply::Commit(Box::new(commit.clone())))
+            );
             let reads: Vec<_> = requests.try_iter().collect();
             assert!(reads.iter().any(|r| {
                 if r.key != "git-history-files" { return false; }
-                let crate::request_dispatch::Request::Desktop(operation) = &r.request else { return false; };
-                let newport_protocol::desktop::Operation::Git(operation) = operation.as_ref() else { return false; };
-                let newport_protocol::desktop::git::Operation::Request(args) = operation.as_ref() else { return false; };
+                let crate::request_dispatch::Request::Git(args) = &r.request else { return false; };
                 matches!(&args.request, newport_protocol::git::Request::CommitFiles { repo_id, commit_oid, .. }
                     if repo_id == "reopened" && commit_oid == oid)
             }));
             // Rendering again must not restart in-flight reads or clear selection.
-            o.git.history.path = json!({"display":"src/main.rs"});
+            o.git.history.path = Some(newport_protocol::git::Path::new(b"src/main.rs"));
             o.project_restore_document(cx);
             assert!(requests.try_recv().is_err());
-            assert_eq!(o.git.history.path["display"], "src/main.rs");
+            assert_eq!(o.git.history.path.as_ref().unwrap().display, "src/main.rs");
             // A source editor in front must stay in front; inactive review tabs
             // are not a reason to replace the user's active document.
             view.update(cx, |v, _| v.reviewing = false);
@@ -4526,7 +5061,7 @@ mod interaction_tests {
             o.project_restore_document(cx);
             assert!(o.git.history.oid.is_empty());
             o.server = "11111111-1111-4111-8111-111111111111".into();
-            o.git.repo["root"] = json!({"display":"/other","bytesB64":"L290aGVy"});
+            o.git.repo.as_mut().unwrap().root = newport_protocol::git::Path::new(b"/other");
             o.project_restore_document(cx);
             assert!(o.git.history.oid.is_empty());
             assert!(requests.try_recv().is_err());
@@ -4537,36 +5072,63 @@ mod interaction_tests {
     fn reopening_review_retires_failed_or_pending_list_status(cx: &mut TestAppContext) {
         let (_, cx, _) = fixture(cx);
         let owner = cx.update(|window, cx| cx.new(|cx| crate::page_perf_tests::owner(window, cx)));
-        let entry = json!({"entryId":"e","path":{"display":"docs/file.md"},"untracked":true});
-        let status =
-            json!({"snapshot":"current","entries":[entry],"nextCursor":null,"metadata":{}});
+        let mut entry = crate::git_fixture::status_entry("e", "docs/file.md");
+        entry.unstaged = false;
+        entry.untracked = true;
+        let status = crate::git_listing::Listing::Status(Box::new(
+            crate::git_fixture::status_page("current", vec![entry.clone()], None),
+        ));
+        let entry = crate::git_listing::Entry::Change(entry);
         let document = project_documents::ReviewDocument {
             key: project_documents::ReviewKey::File {
                 path: "docs/file.md".into(),
                 staged: false,
             },
             entry: entry.clone(),
-            status: status.clone().into(),
+            status: Some(status.clone().into()),
             preview: true,
         };
-        owner.update(cx,|o,cx| {
-            o.server="11111111-1111-4111-8111-111111111111".into();
-            o.git.repo=json!({"repoId":"repo","bare":false,"capabilities":{"readOnly":false,"workingTree":true}});
-            o.git.tab=0;o.git.page=status.clone();o.git.selected=entry.clone();
-            o.git.diff=json!({"snapshot":"old-diff"});
-            let generation=o.resources.begin("git-list").unwrap();
-            o.resources.complete("git-list",generation,Err("Old read failed".into()));
+        owner.update(cx, |o, cx| {
+            o.server = "11111111-1111-4111-8111-111111111111".into();
+            o.git.repo = Some(crate::git_fixture::repository("repo"));
+            o.git.tab = 0;
+            o.git.page = Some(status.clone());
+            o.git.selected = Some(entry.clone());
+            o.git.diff = Some(crate::git_fixture::diff_page(
+                "old-diff",
+                crate::git_fixture::working_metadata("old", "entry"),
+                vec![],
+                None,
+            ));
+            let generation = o.resources.begin("git-list").unwrap();
+            o.resources
+                .complete("git-list", generation, Err("Old read failed".into()));
             assert!(!o.git_can_change_index(true));
-            o.project_open_document(document.clone(),cx);
-            assert!(o.git_can_change_index(true),"fresh navigator evidence must recover file staging");
-            assert!(o.git.diff.is_null(),"failed same-file review must reload instead of returning early");
+            o.project_open_document(document.clone(), cx);
+            assert!(
+                o.git_can_change_index(true),
+                "fresh navigator evidence must recover file staging"
+            );
+            assert!(
+                o.git.diff.is_none(),
+                "failed same-file review must reload instead of returning early"
+            );
             o.resources.invalidate("git-list");
-            let abandoned=o.resources.begin("git-list").unwrap();
-            o.git.diff=json!({"snapshot":"old-diff"});
-            o.project_open_document(document,cx);
+            let abandoned = o.resources.begin("git-list").unwrap();
+            o.git.diff = Some(crate::git_fixture::diff_page(
+                "old-diff",
+                crate::git_fixture::working_metadata("old", "entry"),
+                vec![],
+                None,
+            ));
+            o.project_open_document(document, cx);
             assert!(o.git_can_change_index(true));
-            assert!(!o.resources.complete("git-list",abandoned,Ok(json!({"snapshot":"wrong"}))));
-            assert_eq!(o.git.page,status);
+            assert!(!o.resources.complete_git(
+                "git-list",
+                abandoned,
+                Ok(crate::git_fixture::history_page("wrong", vec![], None).into_reply())
+            ));
+            assert_eq!(o.git.page, Some(status));
         });
     }
     #[gpui::test]
@@ -4580,14 +5142,11 @@ mod interaction_tests {
             v.test_rpc = Some(observed_rpc(move |method, args| {
                 seen.lock().unwrap().push((method.into(), args.clone()));
                 assert_eq!(method, "files_read_text");
-                Ok(json!({"path":args["path"],"content":"external update","revision":"external"}))
+                read(&args["path"], "external update", "external")
             }))
         });
         view.update_in(cx, |v, window, cx| {
-            v.apply_file_events(
-                &json!({"paths":["/repo/elsewhere.rs"],"reset":false}),
-                &Default::default(),
-            );
+            v.apply_file_events(&events(&["/repo/elsewhere.rs"]), &Default::default());
             v.refresh_watched_files(window, cx);
         });
         draw(cx);
@@ -4602,10 +5161,7 @@ mod interaction_tests {
             .filter(|(m, _)| m == "files_read_text")
             .count();
         view.update_in(cx, |v, window, cx| {
-            v.apply_file_events(
-                &json!({"paths":["/repo/main.rs"],"reset":false}),
-                &Default::default(),
-            );
+            v.apply_file_events(&events(&["/repo/main.rs"]), &Default::default());
             v.refresh_watched_files(window, cx);
         });
         draw(cx);
@@ -4644,7 +5200,7 @@ mod interaction_tests {
         let editor = view.read_with(cx, |v, _| v.buffers[0].editor.clone());
         view.update(cx, |v, _| {
             v.test_rpc = Some(observed_rpc(|_, _| {
-                Ok(json!({"content":"disk version","revision":"changed"}))
+                reply(document("disk version", "changed"))
             }))
         });
         editor.update_in(cx, |e, window, cx| e.set_value("unsaved work", window, cx));
@@ -4687,11 +5243,12 @@ mod interaction_tests {
             v.test_rpc = Some(observed_rpc(move |method, args| {
                 seen.lock().unwrap().push((method.into(), args.clone()));
                 match method {
-                    "files_read_text" if args["allowCached"] == true => {
-                        Ok(json!({"content":"a\nb\nc\n","revision":"cached","cached":true}))
-                    }
-                    "files_read_text" => Ok(json!({"content":"A\nb\nc\n","revision":"remote"})),
-                    "files_list" => Ok(json!({"path":args["path"],"entries":[]})),
+                    "files_read_text" if args["allowCached"] == true => reply(files::Document {
+                        cached: true,
+                        ..document("a\nb\nc\n", "cached")
+                    }),
+                    "files_read_text" => reply(document("A\nb\nc\n", "remote")),
+                    "files_list" => empty_listing(&args["path"]),
                     _ => panic!("unexpected {method}"),
                 }
             }));
@@ -4715,7 +5272,7 @@ mod interaction_tests {
                 .update(cx, |e, cx| e.replace_all("A\nb\nC\n", w, cx));
             v.test_rpc = Some(observed_rpc(|method, _| {
                 assert_eq!(method, "files_read_text");
-                Ok(json!({"content":"remote A\nb\nc\n","revision":"remote-2"}))
+                reply(document("remote A\nb\nc\n", "remote-2"))
             }));
             v.refresh_external("/repo/main.rs".into(), w, cx);
         });

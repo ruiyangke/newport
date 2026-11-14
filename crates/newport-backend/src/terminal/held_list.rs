@@ -160,6 +160,7 @@ fn project(reply: Reply) -> Result<Vec<HeldShell>, String> {
                 terminal: Uuid::try_parse(&holder.id).map_err(|error| error.to_string())?,
                 name: holder.name,
                 title: holder.title,
+                agent: holder.agent,
                 creator: Mac {
                     id: holder.creator.id,
                     name: holder.creator.name,
@@ -217,6 +218,7 @@ mod tests {
             started: 7,
             name: Some("build".into()),
             title: Some("dev@host: ~".into()),
+            agent: Some("state=working:app=claude-code".into()),
             creator: service::Computer {
                 id: Uuid::new_v4().to_string(),
                 name: "Studio".into(),
@@ -247,6 +249,10 @@ mod tests {
         assert_eq!(shell.terminal, id);
         assert_eq!(shell.name.as_deref(), Some("build"));
         assert_eq!(shell.title.as_deref(), Some("dev@host: ~"));
+        assert_eq!(
+            shell.agent.as_deref(),
+            Some("state=working:app=claude-code")
+        );
         assert_eq!(shell.creator.name, "Studio");
         assert!(shell.attached[0].active && shell.exited);
         assert!(project(Reply::Ended { ended: true }).is_err());

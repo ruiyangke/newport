@@ -16,6 +16,19 @@ pub const LIMITS: common::Limits = common::Limits {
     metadata: MAX_FRAME,
 };
 
+/// The names Needle announces its services by and leases workers for. A
+/// feature module with a capability of its own names it there, such as
+/// [`crate::browser::CAPABILITY`].
+pub mod service {
+    pub const GIT: &str = "git";
+    pub const MONITOR: &str = "monitor";
+    pub const TERMINAL: &str = "terminal";
+    pub const LSP: &str = "lsp";
+    pub const INTEGRATION: &str = "integration";
+    pub const REMOTE_APPS: &str = "remote-apps";
+    pub const GUI_NOTICES: &str = "gui-notices";
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Capability {
@@ -27,7 +40,7 @@ pub struct Capability {
 #[cfg(feature = "protobuf")]
 pub fn service_contract_id(service: &str) -> Option<&'static str> {
     match service {
-        "monitor" => Some(crate::monitor::CONTRACT_ID),
+        service::MONITOR => Some(crate::monitor::CONTRACT_ID),
         _ => None,
     }
 }
@@ -102,7 +115,8 @@ impl Hello {
             || self.limits.max_workers > MAX_WORKERS
             || self.limits.max_registrations == 0
             || self.limits.max_registrations > MAX_REGISTRATIONS
-            || (self.product == product::Variant::Core && self.services.contains_key("remote-apps"))
+            || (self.product == product::Variant::Core
+                && self.services.contains_key(service::REMOTE_APPS))
         {
             return Err(Invalid("runtime announcement"));
         }
@@ -499,4 +513,34 @@ pub(crate) fn validate_error(error: &common::Error) -> Result<(), Invalid> {
         return Err(Invalid("runtime error"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod service_names {
+    use super::service;
+
+    /// The names are on the wire: a renamed constant must keep its value.
+    #[test]
+    fn service_names_keep_their_wire_values() {
+        assert_eq!(
+            [
+                service::GIT,
+                service::MONITOR,
+                service::TERMINAL,
+                service::LSP,
+                service::INTEGRATION,
+                service::REMOTE_APPS,
+                service::GUI_NOTICES,
+            ],
+            [
+                "git",
+                "monitor",
+                "terminal",
+                "lsp",
+                "integration",
+                "remote-apps",
+                "gui-notices"
+            ]
+        );
+    }
 }

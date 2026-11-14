@@ -3,6 +3,7 @@ use super::*;
 use newport_client::git_configuration::{
     settings_action as action, valid_configuration as valid_config,
 };
+use newport_protocol::git::{Reply, RepositoryConfiguration};
 
 const READ_KEYS: [&str; 3] = ["git-list", "git-remote-status", "git-repository-settings"];
 
@@ -67,8 +68,8 @@ fn read_feedback_view(
 
 pub(super) struct Form {
     id: uuid::Uuid,
-    initial: Value,
-    reviewed: Value,
+    initial: RepositoryConfiguration,
+    reviewed: RepositoryConfiguration,
     snapshot: String,
     pub(super) needs_review: bool,
     name: Entity<InputState>,
@@ -118,7 +119,7 @@ impl Newport {
     fn can_configure_repository(&self) -> bool {
         self.git.tab == 6
             && !self.git_mutation_blocks_write()
-            && self.git.repo["capabilities"]["readOnly"] == false
+            && self.git.writable()
             && self.git.error.is_none()
             && ["git-list", "git-remote-status"].iter().all(|key| {
                 self.resources
@@ -129,10 +130,23 @@ impl Newport {
                 .resources
                 .get("git-repository-settings")
                 .is_some_and(|r| !r.pending && r.error.is_none())
-            && valid_config(&self.value("git-repository-settings")["configuration"])
-            && self.value("git-remote-status")["snapshot"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty())
+            && self
+                .git_repository_configuration()
+                .is_some_and(valid_config)
+            && self
+                .git_status("git-remote-status")
+                .is_some_and(|status| !status.snapshot.is_empty())
+    }
+    /// The repository configuration the last settings read returned.
+    fn git_repository_configuration(&self) -> Option<&RepositoryConfiguration> {
+        match self.git_reply("git-repository-settings") {
+            Some(Reply::Remotes(remotes)) => Some(&remotes.configuration),
+            _ => None,
+        }
+    }
+    pub(super) fn remote_status_snapshot(&self) -> String {
+        self.git_status("git-remote-status")
+            .map_or_else(|| "—".into(), |status| status.snapshot.clone())
     }
     fn open_repository_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_configure_repository()
@@ -142,22 +156,16 @@ impl Newport {
         {
             return;
         }
-        let config = self.value("git-repository-settings")["configuration"].clone();
+        let Some(config) = self.git_repository_configuration().cloned() else {
+            return;
+        };
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Author name"));
         let email = cx.new(|cx| InputState::new(window, cx).placeholder("Author email"));
         name.update(cx, |input, cx| {
-            input.set_value(
-                config["userName"].as_str().unwrap_or_default().to_owned(),
-                window,
-                cx,
-            )
+            input.set_value(config.user_name.clone().unwrap_or_default(), window, cx)
         });
         email.update(cx, |input, cx| {
-            input.set_value(
-                config["userEmail"].as_str().unwrap_or_default().to_owned(),
-                window,
-                cx,
-            )
+            input.set_value(config.user_email.clone().unwrap_or_default(), window, cx)
         });
         let subscriptions = vec![
             Self::project_form_input(
@@ -179,11 +187,11 @@ impl Newport {
             id: form_id,
             initial: config.clone(),
             reviewed: config.clone(),
-            snapshot: text(&self.value("git-remote-status"), "snapshot"),
+            snapshot: self.remote_status_snapshot(),
             needs_review: false,
             name,
             email,
-            prune: config["fetchPrune"] == true,
+            prune: config.fetch_prune,
             _subscriptions: subscriptions,
         });
         // The dialog may already be showing its loading placeholder. Its
@@ -237,8 +245,10 @@ impl Newport {
         if !self.can_configure_repository() {
             return;
         }
-        let snapshot = text(&self.value("git-remote-status"), "snapshot");
-        let configuration = self.value("git-repository-settings")["configuration"].clone();
+        let snapshot = self.remote_status_snapshot();
+        let Some(configuration) = self.git_repository_configuration().cloned() else {
+            return;
+        };
         if let Some(form) = self.git.settings.as_mut() {
             form.reviewed = configuration;
             form.snapshot = snapshot;
@@ -251,7 +261,7 @@ impl Newport {
             .label("Repository settings…")
             .disabled(
                 self.git_mutation_blocks_write()
-                    || self.git.repo["capabilities"]["readOnly"] != false
+                    || !self.git.writable()
                     || self.git.settings_open
                     || self.git.settings.is_some()
                     || self.git.remote_edit.is_some()
@@ -272,8 +282,7 @@ impl Newport {
         };
         let busy = self.git_mutation_blocks_write();
         let draft = form.draft(cx);
-        let configuration = self.value("git-repository-settings");
-        let latest = &configuration["configuration"];
+        let latest = self.git_repository_configuration();
         div()
             .flex()
             .flex_col()
@@ -298,9 +307,13 @@ impl Newport {
                         "repository-settings-current",
                         format!(
                             "Current identity: {} <{}> · Prune on fetch: {}",
-                            text(latest, "userName"),
-                            text(latest, "userEmail"),
-                            if latest["fetchPrune"] == true {
+                            latest
+                                .and_then(|latest| latest.user_name.as_deref())
+                                .unwrap_or("—"),
+                            latest
+                                .and_then(|latest| latest.user_email.as_deref())
+                                .unwrap_or("—"),
+                            if latest.is_some_and(|latest| latest.fetch_prune) {
                                 "On"
                             } else {
                                 "Off"
@@ -434,7 +447,6 @@ mod tests {
         self as gpui, Context, Entity, IntoElement, Render, Window, div, prelude::*, px, size,
     };
     use newport_client::resources::Resources;
-    use serde_json::json;
 
     struct FeedbackHost {
         resources: Resources,
@@ -460,10 +472,10 @@ mod tests {
     }
     fn settled(resources: &mut Resources, key: &str, error: Option<&str>) {
         let generation = resources.begin(key).unwrap();
-        resources.complete(
+        resources.complete_owned(
             key,
             generation,
-            error.map_or(Ok(json!({"loaded":true})), |message| Err(message.into())),
+            error.map_or(Ok(true), |message| Err(message.into())),
         );
     }
     #[gpui::test]

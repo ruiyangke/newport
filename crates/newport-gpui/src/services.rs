@@ -3,8 +3,9 @@ use super::*;
 use crate::controls::alert;
 use gpui_kit::component::{input::InputEvent, skeleton::Skeleton};
 use newport_client::services::{LogTarget, Services};
-use newport_domain::services::{
-    self as domain, Privilege, Scope, ServiceUnit, ServiceVerb, ServicesSnapshot, TimerUnit, Tone,
+use newport_domain::services::{self as domain, Tone};
+use newport_protocol::monitor::services::{
+    self as systemd, Privilege, Scope, Service, Timer, Verb,
 };
 use std::rc::Rc;
 
@@ -68,7 +69,7 @@ struct Row {
 #[derive(Clone)]
 enum RowClock {
     Since(i64),
-    Timer(TimerUnit),
+    Timer(Timer),
 }
 #[derive(Default)]
 struct ListCache {
@@ -122,7 +123,7 @@ impl Row {
 struct Review {
     unit: String,
     scope: Scope,
-    verb: ServiceVerb,
+    verb: Verb,
 }
 /// The open Stop/Disable confirmation. Its Kit identity is captured so a
 /// later reconciliation can never dismiss a different dialog.
@@ -133,7 +134,7 @@ struct ReviewDialog {
 }
 
 pub(super) struct ServicesPanel {
-    connection: Value,
+    connection: Option<configuration::ConnectionScope>,
     client: Services,
     search: Entity<InputState>,
     selected: Option<Selection>,
@@ -171,7 +172,7 @@ impl ServicesPanel {
     }
     pub(super) fn new(
         server: String,
-        connection: Value,
+        connection: Option<configuration::ConnectionScope>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -193,7 +194,7 @@ impl ServicesPanel {
             |this: &Self| this.client.server_id(),
             |this, cx| {
                 if !this.retired
-                    && crate::connectivity::for_scope(&this.connection, cx)
+                    && crate::connectivity::for_scope(this.connection.as_ref(), cx)
                         .is_some_and(|state| state.phase == crate::connectivity::Phase::Connected)
                 {
                     this.client.refresh();
@@ -212,7 +213,7 @@ impl ServicesPanel {
         });
         client.refresh();
         Self {
-            connection: Value::Null,
+            connection: None,
             client,
             search,
             selected: None,
@@ -284,7 +285,7 @@ impl ServicesPanel {
         &mut self,
         unit: &str,
         scope: Scope,
-        verb: ServiceVerb,
+        verb: Verb,
         cx: &mut Context<Self>,
     ) {
         self.start_action(unit.into(), scope, verb, cx);
@@ -348,12 +349,12 @@ impl ServicesPanel {
                 }
                 if result.ok && !self.retired {
                     let prefix = match completion.verb {
-                        ServiceVerb::Start => "Started",
-                        ServiceVerb::Stop => "Stopped",
-                        ServiceVerb::Restart => "Restarted",
-                        ServiceVerb::Reload => "Reloaded",
-                        ServiceVerb::Enable => "Will start at boot:",
-                        ServiceVerb::Disable => "Won’t start at boot:",
+                        Verb::Start => "Started",
+                        Verb::Stop => "Stopped",
+                        Verb::Restart => "Restarted",
+                        Verb::Reload => "Reloaded",
+                        Verb::Enable => "Will start at boot:",
+                        Verb::Disable => "Won’t start at boot:",
                     };
                     cx.emit(ServicesEvent::Notification {
                         message: format!("{prefix} {}", domain::short_name(&completion.unit)),
@@ -555,13 +556,7 @@ impl ServicesPanel {
         self.select_from_list(keys[next].1.clone(), window, cx);
         cx.stop_propagation();
     }
-    fn start_action(
-        &mut self,
-        unit: String,
-        scope: Scope,
-        verb: ServiceVerb,
-        cx: &mut Context<Self>,
-    ) {
+    fn start_action(&mut self, unit: String, scope: Scope, verb: Verb, cx: &mut Context<Self>) {
         self.client.action(unit, scope, verb);
         cx.notify();
     }
@@ -914,7 +909,7 @@ impl Render for ServicesPanel {
             .begin_frame(chrono::Local::now().timestamp_millis());
         self.sync_review_dialog(cx);
         let editor_identity = match &self.active_data {
-            ActiveData::File(name, scope) => Some(domain::unit_key(*scope, name)),
+            ActiveData::File(name, scope) => Some(systemd::unit_key(*scope, name)),
             _ => None,
         };
         self.logs
@@ -1021,7 +1016,7 @@ impl Render for ServicesPanel {
 /// Problems, your services and timers. System services follow under "All",
 /// or behind one row that reveals them; a search always includes them.
 fn master_rows(
-    snapshot: &ServicesSnapshot,
+    snapshot: &systemd::Snapshot,
     query: &str,
     system_open: bool,
     collapsed: &std::collections::BTreeSet<String>,
@@ -1137,7 +1132,7 @@ fn master_rows(
     }
     rows
 }
-fn service_row(unit: &ServiceUnit, now: i64) -> Row {
+fn service_row(unit: &Service, now: i64) -> Row {
     Row {
         key: Some(Selection::Unit(unit.key())),
         name: domain::short_name(&unit.name).into(),

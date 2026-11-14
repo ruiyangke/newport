@@ -5,6 +5,7 @@ use super::super::{
     tokens::{EntryRef, SnapshotRef},
 };
 use super::*;
+use newport_protocol::git::code;
 use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 pub(super) fn journal(service: &Service) -> Result<&Journal, Error> {
     service.journal.as_ref().ok_or_else(|| {
@@ -16,13 +17,13 @@ pub(super) fn journal(service: &Service) -> Result<&Journal, Error> {
 }
 fn stale() -> Error {
     Error::new(
-        "STALE_SNAPSHOT",
+        code::STALE_SNAPSHOT,
         "The repository changed. Refresh before applying this operation.",
     )
 }
 fn unknown() -> Error {
     Error::new(
-        "OUTCOME_UNKNOWN",
+        code::OUTCOME_UNKNOWN,
         "Git did not confirm completion. Inspect the repository and saved outcome before repeating this operation.",
     )
 }
@@ -235,7 +236,7 @@ pub(super) fn start(
             record.result = Some(value);
         }
         Err(e) => {
-            record.state = if e.code == "OUTCOME_UNKNOWN" {
+            record.state = if e.code == code::OUTCOME_UNKNOWN {
                 "outcome_unknown"
             } else {
                 "failed"

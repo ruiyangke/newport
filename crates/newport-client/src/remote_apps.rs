@@ -6,12 +6,10 @@ use crate::{
         Backend,
         exchange::{Error, Phase as ExchangePhase},
     },
-    desktop_inputs,
 };
 pub use newport_protocol::desktop::applications::{Application as Handle, Target};
 use newport_protocol::desktop::applications::{Ending, Outcome, State as Phase};
 use newport_protocol::desktop::{self, applications as protocol};
-use serde_json::Value;
 use std::{
     sync::{
         Arc, Mutex,
@@ -31,10 +29,13 @@ pub struct Scope {
     expected: desktop::configuration::ConnectionScope,
 }
 impl Scope {
-    pub fn new(server: &str, expected: Value) -> Result<Self, String> {
+    pub fn new(
+        server: &str,
+        expected: desktop::configuration::ConnectionScope,
+    ) -> Result<Self, String> {
         let id: uuid::Uuid = server.parse().map_err(|_| "Invalid server identity")?;
         let expected =
-            desktop_inputs::connection_scope(&expected).map_err(|error| error.to_string())?;
+            crate::desktop_inputs::captured(Some(&expected)).map_err(|error| error.to_string())?;
         if expected.settings.server_id != id {
             return Err("Refresh the server connection before opening applications.".into());
         }
@@ -309,7 +310,7 @@ impl Drop for Polling {
     }
 }
 fn refusal(error: Error) -> Status {
-    if error.code() == "APPLICATION_NOT_SUBMITTED" {
+    if error.code() == protocol::APPLICATION_NOT_SUBMITTED {
         return Status::Refused {
             message: error.to_string(),
             action: None,
@@ -342,7 +343,7 @@ fn observe(exchange: &Exchange, scope: &Scope, group: &[(Application, Handle)]) 
     let value = match exchange(operation, READ_TIMEOUT) {
         Ok(value) => value,
         Err(error) => {
-            let phase = if error.code() == "APPLICATION_CONNECTION_CHANGED" {
+            let phase = if error.code() == protocol::APPLICATION_CONNECTION_CHANGED {
                 Status::Unavailable(error.to_string())
             } else {
                 Status::Unknown(error.to_string())

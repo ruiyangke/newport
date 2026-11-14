@@ -12,7 +12,7 @@ pub(super) struct Welcome {
     /// Ticked aliases; seeded with the suggested hosts once the config is read.
     chosen: Option<BTreeSet<String>>,
     /// Imports run one at a time so a long config can't flood the work queue.
-    queue: VecDeque<Value>,
+    queue: VecDeque<desktop::connection::ConfigHost>,
     current: Option<String>,
     imported: usize,
     failed: Vec<String>,
@@ -22,10 +22,8 @@ impl Newport {
     pub(super) fn welcome_visible(&self) -> bool {
         self.page != Page::Settings
             && self.server.is_empty()
-            && !self.snapshot.is_null()
-            && self.snapshot["config"]["servers"]
-                .as_array()
-                .is_none_or(|servers| servers.is_empty())
+            && self.snapshot.is_some()
+            && self.servers().is_empty()
     }
 
     pub(super) fn poll_welcome(&mut self) -> bool {
@@ -37,23 +35,15 @@ impl Newport {
         }
         let mut changed = false;
         if visible && self.resources.get(HOSTS).is_none() {
-            self.request(
-                HOSTS,
-                desktop::Operation::Connection(Box::new(
-                    desktop::connection::Operation::SshConfigHosts(Box::new(
-                        newport_protocol::common::Present {},
-                    )),
-                )),
-            );
+            self.request_config_hosts();
             changed = true;
         }
-        if self.welcome.chosen.is_none()
-            && let Some(resource) = self.resources.get(HOSTS).filter(|r| !r.pending)
-        {
+        if self.welcome.chosen.is_none() && self.resources.get(HOSTS).is_some_and(|r| !r.pending) {
             self.welcome.chosen = Some(
-                config_hosts(&resource.value)
-                    .filter(|host| host["suggested"] == true)
-                    .filter_map(|host| host["alias"].as_str().map(str::to_owned))
+                self.config_hosts()
+                    .iter()
+                    .filter(|host| host.suggested)
+                    .map(|host| host.alias.clone())
                     .collect(),
             );
             changed = true;
@@ -74,15 +64,12 @@ impl Newport {
             self.welcome.current = None;
             changed = true;
         }
-        if let Some(server) = self.welcome.queue.pop_front() {
-            let key = format!(
-                "server-import:{}",
-                server["name"].as_str().unwrap_or_default()
-            );
+        if let Some(host) = self.welcome.queue.pop_front() {
+            let key = format!("server-import:{}", host.alias);
             self.resources.invalidate(&key);
-            self.request_result(
+            self.request_typed(
                 &key,
-                desktop_server_record(&server).map(|server| {
+                imported_server(host).map(|server| {
                     desktop::Operation::Configuration(Box::new(
                         desktop::configuration::Operation::SaveServer(Box::new(
                             desktop::configuration::SaveServerArgs {
@@ -132,40 +119,22 @@ impl Newport {
         let Some(chosen) = self.welcome.chosen.clone() else {
             return;
         };
-        let Some(resource) = self.resources.get(HOSTS) else {
+        if self.resources.get(HOSTS).is_none() {
             return;
-        };
+        }
+        let hosts = self.config_hosts();
         // A chosen host brings the hosts it jumps through, which the list
         // puts before it so they are saved first.
         let mut wanted = chosen.clone();
-        for host in config_hosts(&resource.value) {
-            if host["alias"].as_str().is_some_and(|a| chosen.contains(a)) {
-                wanted.extend(
-                    host["through"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|alias| alias.as_str().map(str::to_owned)),
-                );
+        for host in hosts {
+            if chosen.contains(&host.alias) {
+                wanted.extend(host.through.iter().cloned());
             }
         }
-        self.welcome.queue = config_hosts(&resource.value)
-            .filter(|host| host["importable"] == true)
-            .filter(|host| host["alias"].as_str().is_some_and(|a| wanted.contains(a)))
-            .map(|host| {
-                json!({
-                    "id": host["id"],
-                    "name": host["alias"],
-                    "sshHost": host["host"],
-                    "sshUser": host["user"],
-                    "sshPort": host["port"],
-                    "identityFile": host["identityFile"],
-                    "agentSource": null,
-                    "agentKeyFingerprint": null,
-                    "authMethod": "publicKey",
-                    "proxy": host["proxy"],
-                })
-            })
+        self.welcome.queue = hosts
+            .iter()
+            .filter(|host| host.importable && wanted.contains(&host.alias))
+            .cloned()
             .collect();
         self.welcome.imported = 0;
         self.welcome.failed.clear();
@@ -178,23 +147,20 @@ impl Newport {
 
     pub(super) fn welcome(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let resource = self.resources.get(HOSTS);
-        let hosts: Vec<Value> = resource
-            .map(|r| config_hosts(&r.value).cloned().collect())
-            .unwrap_or_default();
-        let reading = resource.is_none_or(|r| r.pending && r.value.is_null());
+        let hosts = self.config_hosts().to_vec();
+        let reading = resource.is_none_or(|r| r.pending && !r.has_value());
         let error = resource.and_then(|r| r.error.clone());
-        let path = resource
-            .and_then(|r| r.value["path"].as_str())
-            .unwrap_or("~/.ssh/config")
-            .to_owned();
+        let path = match self.connection_reply(HOSTS) {
+            Some(desktop::connection::Reply::SshConfigHosts(config)) => config.path.clone(),
+            _ => "~/.ssh/config".to_owned(),
+        };
         let chosen = self.welcome.chosen.clone().unwrap_or_default();
         let count = hosts
             .iter()
-            .filter(|h| h["importable"] == true)
-            .filter(|h| h["alias"].as_str().is_some_and(|a| chosen.contains(a)))
+            .filter(|h| h.importable && chosen.contains(&h.alias))
             .count();
         let importing = self.importing();
-        let any_importable = hosts.iter().any(|h| h["importable"] == true);
+        let any_importable = hosts.iter().any(|h| h.importable);
         let offer_import = error.is_some() || !hosts.is_empty();
 
         let title = crate::controls::page_title(
@@ -211,18 +177,18 @@ impl Newport {
             .flex()
             .flex_col()
             .children(hosts.iter().enumerate().map(|(index, host)| {
-                let alias = host["alias"].as_str().unwrap_or_default().to_owned();
-                let importable = host["importable"] == true;
+                let alias = host.alias.clone();
+                let importable = host.importable;
                 let address = format!(
                     "{}@{}{}",
-                    host["user"].as_str().unwrap_or_default(),
-                    host["host"].as_str().unwrap_or_default(),
-                    match host["port"].as_u64() {
-                        Some(22) | None => String::new(),
-                        Some(port) => format!(":{port}"),
+                    host.user,
+                    host.host,
+                    match host.port {
+                        22 => String::new(),
+                        port => format!(":{port}"),
                     }
                 );
-                let note = host["note"].as_str().map(str::to_owned);
+                let note = host.note.clone();
                 let checked = importable && chosen.contains(&alias);
                 let line = div()
                     .flex()
@@ -336,14 +302,7 @@ impl Newport {
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.resources.invalidate(HOSTS);
                                     this.welcome.chosen = None;
-                                    this.request(
-                                        HOSTS,
-                                        desktop::Operation::Connection(Box::new(
-                                            desktop::connection::Operation::SshConfigHosts(
-                                                Box::new(newport_protocol::common::Present {}),
-                                            ),
-                                        )),
-                                    );
+                                    this.request_config_hosts();
                                     cx.notify();
                                 })),
                         ),
@@ -496,8 +455,51 @@ impl Newport {
     }
 }
 
-fn config_hosts(value: &Value) -> impl Iterator<Item = &Value> {
-    value["hosts"].as_array().into_iter().flatten()
+impl Newport {
+    fn request_config_hosts(&mut self) {
+        self.request_typed(
+            HOSTS,
+            Ok(desktop::Operation::Connection(Box::new(
+                desktop::connection::Operation::SshConfigHosts(Box::new(
+                    newport_protocol::common::Present {},
+                )),
+            ))),
+        );
+    }
+    /// The hosts the SSH config read found, while that read shows them.
+    fn config_hosts(&self) -> &[desktop::connection::ConfigHost] {
+        match self.connection_reply(HOSTS) {
+            Some(desktop::connection::Reply::SshConfigHosts(config)) => &config.hosts,
+            _ => &[],
+        }
+    }
+}
+
+/// The server an imported SSH config host saves as.
+fn imported_server(
+    host: desktop::connection::ConfigHost,
+) -> Result<configuration::Server, newport_client::request_error::RequestError> {
+    if host.port == 0 {
+        return Err(newport_client::desktop_inputs::Invalid("SSH port")
+            .to_string()
+            .into());
+    }
+    Ok(configuration::Server {
+        id: host.id,
+        name: host.alias,
+        ssh_user: host.user,
+        ssh_host: host.host,
+        ssh_port: host.port,
+        identity_file: host.identity_file,
+        agent_source: None,
+        agent_key_fingerprint: None,
+        auth_method: configuration::AuthMethod::PublicKey,
+        clipboard_enabled: false,
+        browser_enabled: false,
+        agent_install_approved: false,
+        setup_complete: false,
+        proxy: host.proxy,
+    })
 }
 
 #[cfg(test)]

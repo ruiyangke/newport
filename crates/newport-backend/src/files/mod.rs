@@ -66,14 +66,8 @@ impl Remote {
         self.server.id
     }
 
-    /// The saved connection identity without the transient connection
-    /// revision: staging cleanup may retry after reconnecting, but never on a
-    /// different endpoint, user, authentication profile or server record.
-    fn cleanup_scope(&self) -> Result<serde_json::Value> {
-        Ok(newport_domain::connection_scope::connection(
-            &serde_json::to_value(&self.server)?,
-            &serde_json::Value::Null,
-        ))
+    fn cleanup_scope(&self) -> cleanup::Scope {
+        cleanup::Scope(self.server.connection_settings())
     }
 }
 
@@ -299,7 +293,7 @@ pub async fn files_list(
     id: Uuid,
     operation: Uuid,
     path: String,
-    expected_connection: Option<serde_json::Value>,
+    expected_connection: Option<newport_protocol::desktop::configuration::ConnectionScope>,
 ) -> Result<Listing, String> {
     files_list_query(
         state,
@@ -321,7 +315,7 @@ pub(crate) async fn files_list_query(
     id: Uuid,
     operation: Uuid,
     path: String,
-    expected_connection: Option<serde_json::Value>,
+    expected_connection: Option<newport_protocol::desktop::configuration::ConnectionScope>,
     force: bool,
     project_root: Option<String>,
 ) -> Result<Listing, String> {
@@ -365,7 +359,7 @@ pub async fn files_preview(
     id: Uuid,
     operation: Uuid,
     path: String,
-    expected_connection: Option<serde_json::Value>,
+    expected_connection: Option<newport_protocol::desktop::configuration::ConnectionScope>,
 ) -> Result<Preview, String> {
     operations
         .run_with_connection(
@@ -495,7 +489,7 @@ mod tests {
                 server.id,
                 Uuid::new_v4(),
                 "/".into(),
-                Some(serde_json::json!(["obsolete"]))
+                Some(server.connection_scope(0, Uuid::new_v4()))
             )
             .await
             .is_err()

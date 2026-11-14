@@ -7,8 +7,11 @@
 
 use crate::{forwarding, port_discovery as discovery};
 mod port;
+use newport_protocol::desktop::{
+    configuration::{Direction, Tunnel},
+    preferences::Project as Bookmark,
+};
 pub use port::Port;
-use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 pub const OTHER: &str = "";
@@ -20,7 +23,7 @@ pub struct Entry {
     pub port: Port,
     /// Every observed listening address, sorted for display.
     pub addresses: Vec<String>,
-    pub forwards: Vec<Value>,
+    pub forwards: Vec<Tunnel>,
 }
 
 impl Entry {
@@ -61,7 +64,7 @@ impl ListenerSelection {
                 }
                 entry.forwards.retain(|forward| {
                     row.members.iter().any(|member| {
-                        forwarding::reaches_member(forward, text(forward, "serverId"), member)
+                        forwarding::reaches_member(forward, forward.server_id, member)
                     })
                 });
                 entry.addresses = entry.port.addresses();
@@ -94,47 +97,50 @@ pub struct Worktree {
 /// explicitly assigned project changes. Names are deliberately not copied.
 #[derive(Default)]
 pub struct WorktreeAssociations {
-    entries: HashMap<(String, String), WorktreeAssociation>,
+    entries: HashMap<(uuid::Uuid, uuid::Uuid), WorktreeAssociation>,
 }
 
 struct WorktreeAssociation {
-    signature: Value,
+    signature: Signature,
     project: String,
     worktree: Worktree,
 }
 
-fn association_signature(tunnel: &Value) -> Value {
-    serde_json::json!([
-        tunnel["direction"],
-        tunnel["remoteHost"],
-        tunnel["remotePort"],
-        tunnel["remotePortEnd"],
-        tunnel["project"]
-    ])
+/// The parts of a saved forward that decide which checkout it reaches.
+type Signature = (Direction, String, u16, Option<u16>, Option<String>);
+
+fn association_signature(tunnel: &Tunnel) -> Signature {
+    (
+        tunnel.direction,
+        tunnel.remote_host.clone(),
+        tunnel.remote_port,
+        tunnel.remote_port_end,
+        tunnel.project.clone(),
+    )
 }
 
 impl WorktreeAssociations {
     pub fn group(
         &mut self,
         ports: Vec<discovery::Member>,
-        saved: &[Value],
-        server: &str,
-        known: &[Value],
+        saved: &[Tunnel],
+        server: uuid::Uuid,
+        known: &[Bookmark],
     ) -> Vec<Project> {
         // The supplied saved configuration contains all servers. Prune deleted
         // forwards globally, but never infer an association from another server.
         self.entries.retain(|(server, id), association| {
             saved.iter().any(|tunnel| {
-                text(tunnel, "serverId") == server
-                    && text(tunnel, "id") == id
+                tunnel.server_id == *server
+                    && tunnel.id == *id
                     && association.signature == association_signature(tunnel)
             })
         });
         group_inner(ports, saved, server, known, Some(self))
     }
 
-    fn observe(&mut self, server: &str, projects: &[Project]) {
-        let mut observed: HashMap<&str, Option<(&Value, &str, Worktree)>> = HashMap::new();
+    fn observe(&mut self, server: uuid::Uuid, projects: &[Project]) {
+        let mut observed: HashMap<uuid::Uuid, Option<(&Tunnel, &str, Worktree)>> = HashMap::new();
         let mut live_checkouts = HashMap::new();
         for project in projects {
             for entry in &project.entries {
@@ -147,7 +153,7 @@ impl WorktreeAssociations {
                     let candidate = worktree_of(&entry.port)
                         .map(|worktree| (tunnel, project.key.as_str(), worktree));
                     observed
-                        .entry(text(tunnel, "id"))
+                        .entry(tunnel.id)
                         .and_modify(|previous| {
                             if previous
                                 .as_ref()
@@ -164,7 +170,7 @@ impl WorktreeAssociations {
             }
         }
         for (id, observed) in observed {
-            let key = (server.to_owned(), id.to_owned());
+            let key = (server, id);
             if let Some((tunnel, project, worktree)) = observed {
                 self.entries.insert(
                     key,
@@ -185,7 +191,7 @@ impl WorktreeAssociations {
         // is stopped. Refresh the remembered value as well as this render, so
         // the old branch cannot return after the final listener disappears.
         for ((entry_server, _), association) in &mut self.entries {
-            if entry_server == server
+            if *entry_server == server
                 && let Some(worktree) = live_checkouts.get(&(
                     association.project.as_str(),
                     association.worktree.path.clone(),
@@ -208,10 +214,6 @@ pub struct Project {
     pub entries: Vec<Entry>,
     /// Distinct Git checkouts, with the main checkout first.
     pub worktrees: Vec<Worktree>,
-}
-
-fn text<'a>(value: &'a Value, field: &str) -> &'a str {
-    value[field].as_str().unwrap_or("")
 }
 
 fn trim(path: &str) -> &str {
@@ -259,15 +261,13 @@ pub fn worktree_of(port: &Port) -> Option<Worktree> {
     port.worktree()
 }
 
-fn known_path(project: &Value) -> Option<&str> {
-    project["path"]
-        .as_str()
-        .or_else(|| project["path"]["display"].as_str())
+fn known_path(project: &Bookmark) -> Option<&str> {
+    Some(project.path.display.as_str())
         .filter(|path| !path.is_empty())
         .map(trim)
 }
 
-fn describe(key: &str, port: Option<&Port>, known: &[&Value]) -> Project {
+fn describe(key: &str, port: Option<&Port>, known: &[&Bookmark]) -> Project {
     let marker = port.and_then(|p| {
         p.project()
             .map(|project| project.marker.clone())
@@ -290,7 +290,7 @@ fn describe(key: &str, port: Option<&Port>, known: &[&Value]) -> Project {
         )
     } else if let Some(saved) = known.iter().find(|p| known_path(p) == Some(key)) {
         (
-            text(saved, "name").to_owned(),
+            saved.name.clone(),
             Some(key.to_owned()),
             Source::Saved,
             marker,
@@ -333,29 +333,29 @@ fn describe(key: &str, port: Option<&Port>, known: &[&Value]) -> Project {
 
 /// Group the current server's discoveries and saved forwards.
 ///
-/// Known projects may use the UI's string path or the protocol's `path.display`
-/// form. Explicitly foreign `serverId` records are ignored. Input order is
-/// preserved for equal-rank listeners and equal-name entries (stable sorting);
-/// hash maps are only indexes and never determine row order.
+/// Known projects name the roots they hold by their path's display form;
+/// another server's projects are ignored. Input order is preserved for
+/// equal-rank listeners and equal-name entries (stable sorting); hash maps are
+/// only indexes and never determine row order.
 pub fn group(
     ports: Vec<discovery::Member>,
-    saved: &[Value],
-    server: &str,
-    known: &[Value],
+    saved: &[Tunnel],
+    server: uuid::Uuid,
+    known: &[Bookmark],
 ) -> Vec<Project> {
     group_inner(ports, saved, server, known, None)
 }
 
 fn group_inner(
     ports: Vec<discovery::Member>,
-    saved: &[Value],
-    server: &str,
-    known: &[Value],
+    saved: &[Tunnel],
+    server: uuid::Uuid,
+    known: &[Bookmark],
     mut associations: Option<&mut WorktreeAssociations>,
 ) -> Vec<Project> {
     let known: Vec<_> = known
         .iter()
-        .filter(|p| p["serverId"].as_str().is_none_or(|id| id == server) && known_path(p).is_some())
+        .filter(|p| p.server == server && known_path(p).is_some())
         .collect();
     let mut roots: Vec<_> = known.iter().filter_map(|p| known_path(p)).collect();
     roots.sort_by_key(|path| std::cmp::Reverse(path.len()));
@@ -371,7 +371,7 @@ fn group_inner(
             key.to_owned()
         }
     };
-    let mine: Vec<_> = saved.iter().filter(|t| t["serverId"] == server).collect();
+    let mine: Vec<_> = saved.iter().filter(|t| t.server_id == server).collect();
     let listeners = discovery::group(ports)
         .into_iter()
         .flat_map(|group| group.rows);
@@ -384,11 +384,9 @@ fn group_inner(
         let mut seen = HashSet::new();
         for listener in port.row().into_iter().flat_map(|row| &row.members) {
             for &tunnel in &mine {
-                if forwarding::reaches_member(tunnel, server, listener)
-                    && seen.insert(text(tunnel, "id"))
-                {
+                if forwarding::reaches_member(tunnel, server, listener) && seen.insert(tunnel.id) {
                     forwards.push(tunnel.clone());
-                    placed.insert(text(tunnel, "id"));
+                    placed.insert(tunnel.id);
                 }
             }
         }
@@ -396,7 +394,7 @@ fn group_inner(
         let key = if own == OTHER {
             forwards
                 .iter()
-                .map(|t| text(t, "project"))
+                .map(|t| t.project.as_deref().unwrap_or(""))
                 .find(|key| !key.is_empty())
                 .map(&fold)
                 .unwrap_or(own)
@@ -417,18 +415,16 @@ fn group_inner(
         associations.observe(server, &projects);
     }
     for tunnel in mine {
-        if placed.contains(text(tunnel, "id")) {
+        if placed.contains(&tunnel.id) {
             continue;
         }
-        let association = associations.as_ref().and_then(|associations| {
-            associations
-                .entries
-                .get(&(server.to_owned(), text(tunnel, "id").to_owned()))
-        });
+        let association = associations
+            .as_ref()
+            .and_then(|associations| associations.entries.get(&(server, tunnel.id)));
         let key = fold(
             association
                 .map(|a| a.project.as_str())
-                .unwrap_or_else(|| text(tunnel, "project")),
+                .unwrap_or_else(|| tunnel.project.as_deref().unwrap_or("")),
         );
         let port = Port::Saved {
             definition: tunnel.clone(),

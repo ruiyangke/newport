@@ -3,10 +3,10 @@
 //! Review state is immutable: a refresh must never silently substitute a newer
 //! branch OID, tracking token, or repository snapshot into a pending action.
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use newport_protocol::git::{Action, Request};
-use serde_json::Value;
-#[cfg(test)]
-use serde_json::json;
+use newport_protocol::git::{Action, Branch, ObjectId, Page, Path, Reply, Request, TotalEntries};
+
+/// One page of a branch listing.
+pub type BranchPage = Page<Branch, TotalEntries>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchReview {
@@ -24,49 +24,40 @@ impl BranchReview {
     /// Capture a local row from `repo.branches` together with its reviewed
     /// status snapshot. Display strings are usable as Git arguments only when
     /// they exactly round-trip the protocol's original bytes.
-    pub fn from_entry(repo_id: &str, snapshot: &str, entry: &Value) -> Result<Self, String> {
+    pub fn from_entry(repo_id: &str, snapshot: &str, entry: &Branch) -> Result<Self, String> {
         if repo_id.is_empty() || snapshot.is_empty() {
             return Err("A reviewed repository and snapshot are required.".into());
         }
-        if entry["remote"] != false {
+        if entry.remote {
             return Err("Select a local branch.".into());
         }
-        let name = exact_text(&entry["name"])
+        let name = exact_text(&entry.name)
             .ok_or("The branch name is unavailable or cannot be represented exactly.")?;
         let reference = branch_reference(entry)
             .ok_or("The branch reference is unavailable or cannot be represented exactly.")?;
-        let oid = object_id(entry).ok_or("The branch's complete commit ID is unavailable.")?;
-        let current = entry["current"]
-            .as_bool()
-            .ok_or("The branch's checked-out state is unavailable.")?;
-        let upstream = match &entry["upstream"] {
-            Value::Null => None,
-            // This is display-only. A selected target is independently checked
-            // against its original bytes before it can become a Git argument.
-            value => Some(
-                value["display"]
-                    .as_str()
-                    .ok_or("Invalid upstream display.")?
-                    .to_owned(),
-            ),
-        };
-        let tracking_token = (entry["tracking"]["editable"] == true)
-            .then(|| entry["tracking"]["token"].as_str())
-            .flatten()
-            .filter(|token| !token.is_empty())
-            .map(str::to_owned);
+        let oid = object_id(&entry.oid).ok_or("The branch's complete commit ID is unavailable.")?;
+        // The upstream is display-only. A selected target is independently
+        // checked against its original bytes before it can become a Git argument.
+        let upstream = entry
+            .upstream
+            .as_ref()
+            .map(|upstream| upstream.display.clone());
+        let tracking_token = entry
+            .tracking
+            .as_ref()
+            .filter(|tracking| tracking.editable && !tracking.token.is_empty())
+            .map(|tracking| tracking.token.clone());
         Ok(Self {
             repo_id: repo_id.to_owned(),
             snapshot: snapshot.to_owned(),
             name: name.to_owned(),
             reference: reference.to_owned(),
             oid: oid.to_owned(),
-            current,
+            current: entry.current,
             upstream,
             tracking_token,
         })
     }
-
     pub fn repo_id(&self) -> &str {
         &self.repo_id
     }
@@ -115,7 +106,7 @@ impl BranchReview {
     /// Preserve its full reference to avoid collisions between `origin/main`
     /// as a local name and the remote-tracking branch of the same short name.
     /// `None` clears tracking. This writes local config only, with no fetch/push.
-    pub fn set_upstream_action(&self, upstream: Option<&Value>) -> Result<Action, String> {
+    pub fn set_upstream_action(&self, upstream: Option<&Branch>) -> Result<Action, String> {
         let token = self
             .tracking_token
             .as_deref()
@@ -137,8 +128,8 @@ impl BranchReview {
 
     /// Filter paginated picker rows without allocating actions or accumulating
     /// the entire branch list. Invalid/missing OIDs and lossy names are excluded.
-    pub fn upstream_reference<'a>(&self, entry: &'a Value) -> Option<&'a str> {
-        object_id(entry)?;
+    pub fn upstream_reference<'a>(&self, entry: &'a Branch) -> Option<&'a str> {
+        object_id(&entry.oid)?;
         let reference = branch_reference(entry)?;
         (reference != self.reference).then_some(reference)
     }
@@ -149,50 +140,41 @@ impl BranchReview {
 #[derive(Clone, Debug)]
 pub struct BranchChoices {
     snapshot: String,
-    metadata: Value,
-    entries: Vec<Value>,
+    metadata: TotalEntries,
+    entries: Vec<Branch>,
     next_cursor: Option<String>,
 }
 
 impl BranchChoices {
-    pub fn from_page(page: &Value) -> Result<Self, String> {
-        let snapshot = page["snapshot"]
-            .as_str()
-            .filter(|snapshot| !snapshot.is_empty())
-            .ok_or("Invalid branch listing snapshot.")?;
-        if !page["metadata"].is_object() {
-            return Err("Invalid branch listing metadata.".into());
+    pub fn from_page(page: &BranchPage) -> Result<Self, String> {
+        if page.snapshot.is_empty() {
+            return Err("Invalid branch listing snapshot.".into());
         }
-        let entries = page["entries"]
-            .as_array()
-            .ok_or("Invalid branch listing.")?;
         let mut keys = std::collections::HashSet::new();
-        let mut unique = Vec::with_capacity(entries.len());
-        for entry in entries {
-            let key = entry["reference"]["bytesB64"]
-                .as_str()
-                .filter(|key| !key.is_empty())
-                .ok_or("Invalid branch listing reference.")?;
+        let mut unique = Vec::with_capacity(page.entries.len());
+        for entry in &page.entries {
+            let key = entry.reference.bytes_b64.as_str();
+            if key.is_empty() {
+                return Err("Invalid branch listing reference.".into());
+            }
             if keys.insert(key) {
                 unique.push(entry.clone());
             }
         }
-        let next_cursor = match page.get("nextCursor") {
-            Some(Value::Null) => None,
-            Some(Value::String(cursor)) if !cursor.is_empty() => Some(cursor.clone()),
-            _ => return Err("Invalid branch listing cursor.".into()),
-        };
+        if page.next_cursor.as_deref() == Some("") {
+            return Err("Invalid branch listing cursor.".into());
+        }
         Ok(Self {
-            snapshot: snapshot.to_owned(),
-            metadata: page["metadata"].clone(),
+            snapshot: page.snapshot.clone(),
+            metadata: page.metadata.clone(),
             entries: unique,
-            next_cursor,
+            next_cursor: page.next_cursor.clone(),
         })
     }
 
     /// A rejected page leaves the existing list untouched. The caller owns
     /// request generation checks so a late response cannot replace a new picker.
-    pub fn append(&mut self, page: &Value, expected_cursor: &str) -> Result<(), String> {
+    pub fn append(&mut self, page: &BranchPage, expected_cursor: &str) -> Result<(), String> {
         let incoming = Self::from_page(page)?;
         if self.next_cursor.as_deref() != Some(expected_cursor)
             || incoming.snapshot != self.snapshot
@@ -204,12 +186,12 @@ impl BranchChoices {
         let known = self
             .entries
             .iter()
-            .map(|entry| &entry["reference"]["bytesB64"])
+            .map(|entry| &entry.reference.bytes_b64)
             .collect::<std::collections::HashSet<_>>();
         let additions = incoming
             .entries
             .into_iter()
-            .filter(|entry| !known.contains(&entry["reference"]["bytesB64"]))
+            .filter(|entry| !known.contains(&entry.reference.bytes_b64))
             .collect::<Vec<_>>();
         if additions.is_empty() && incoming.next_cursor.is_some() {
             return Err("The next page did not add any branches. Refresh the list.".into());
@@ -219,37 +201,38 @@ impl BranchChoices {
         Ok(())
     }
 
-    pub fn entries(&self) -> &[Value] {
+    pub fn entries(&self) -> &[Branch] {
         &self.entries
     }
     pub fn next_cursor(&self) -> Option<&str> {
         self.next_cursor.as_deref()
     }
-    pub fn candidates<'a>(&'a self, review: &'a BranchReview) -> impl Iterator<Item = &'a Value> {
+    pub fn candidates<'a>(&'a self, review: &'a BranchReview) -> impl Iterator<Item = &'a Branch> {
         self.entries
             .iter()
             .filter(|entry| review.upstream_reference(entry).is_some())
     }
     /// A full reference is the identity; shortened display names are ambiguous.
-    pub fn find_reference(&self, reference: &str) -> Option<&Value> {
+    pub fn find_reference(&self, reference: &str) -> Option<&Branch> {
         self.entries
             .iter()
             .find(|entry| branch_reference(entry) == Some(reference))
     }
 }
 
-fn exact_text(value: &Value) -> Option<&str> {
-    let display = value["display"].as_str()?;
+/// The text of a path whose bytes are exactly that printable UTF-8 text.
+fn exact_text(path: &Path) -> Option<&str> {
+    let display = path.display.as_str();
     (!display.is_empty()
         && !display.chars().any(char::is_control)
-        && value["bytesB64"].as_str()? == STANDARD.encode(display))
+        && path.bytes_b64 == STANDARD.encode(display))
     .then_some(display)
 }
 
-fn branch_reference(entry: &Value) -> Option<&str> {
-    let name = exact_text(&entry["name"])?;
-    let reference = exact_text(&entry["reference"])?;
-    let prefix = if entry["remote"].as_bool()? {
+fn branch_reference(entry: &Branch) -> Option<&str> {
+    let name = exact_text(&entry.name)?;
+    let reference = exact_text(&entry.reference)?;
+    let prefix = if entry.remote {
         "refs/remotes/"
     } else {
         "refs/heads/"
@@ -257,17 +240,14 @@ fn branch_reference(entry: &Value) -> Option<&str> {
     (!name.starts_with('-') && reference.strip_prefix(prefix)? == name).then_some(reference)
 }
 
-fn object_id(entry: &Value) -> Option<&str> {
-    let oid = &entry["oid"];
-    let expected = match oid["algorithm"]
-        .as_str()
-        .or_else(|| oid["format"].as_str())?
-    {
+/// A complete, nonzero object ID in its declared format.
+fn object_id(oid: &ObjectId) -> Option<&str> {
+    let expected = match oid.algorithm.as_str() {
         "sha1" => 40,
         "sha256" => 64,
         _ => return None,
     };
-    let hex = oid["hex"].as_str()?;
+    let hex = oid.hex.as_str();
     (hex.len() == expected
         && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
         && hex.bytes().any(|byte| byte != b'0'))
@@ -286,29 +266,26 @@ pub enum WorktreeBranchUse {
     StartingPoint,
 }
 impl WorktreeBranchUse {
-    pub fn candidate(self, entry: &Value, bare: bool) -> Option<WorktreeBranch> {
+    pub fn candidate(self, entry: &Branch, bare: bool) -> Option<WorktreeBranch> {
         match self {
             Self::Existing => WorktreeBranch::from_entry(entry, bare),
             Self::StartingPoint => Some(WorktreeBranch {
-                name: exact_text(&entry["name"])?.into(),
+                name: exact_text(&entry.name)?.into(),
                 reference: branch_reference(entry)?.into(),
-                oid: object_id(entry)?.into(),
+                oid: object_id(&entry.oid)?.into(),
             }),
         }
     }
 }
 impl WorktreeBranch {
-    pub fn from_entry(entry: &Value, bare: bool) -> Option<Self> {
-        if entry["remote"] != false
-            || (!bare && entry["current"] != false)
-            || !entry["current"].is_boolean()
-        {
+    pub fn from_entry(entry: &Branch, bare: bool) -> Option<Self> {
+        if entry.remote || (!bare && entry.current) {
             return None;
         }
         Some(Self {
-            name: exact_text(&entry["name"])?.into(),
+            name: exact_text(&entry.name)?.into(),
             reference: branch_reference(entry)?.into(),
-            oid: object_id(entry)?.into(),
+            oid: object_id(&entry.oid)?.into(),
         })
     }
 }
@@ -319,7 +296,7 @@ impl crate::backend::Backend {
         repo: &str,
         filter: &str,
         cursor: Option<&str>,
-    ) -> Result<Value, String> {
+    ) -> Result<BranchPage, String> {
         self.worktree_branch_choices(server, repo, filter, cursor, WorktreeBranchUse::Existing)
     }
     pub fn worktree_branch_choices(
@@ -329,10 +306,10 @@ impl crate::backend::Backend {
         filter: &str,
         cursor: Option<&str>,
         purpose: WorktreeBranchUse,
-    ) -> Result<Value, String> {
+    ) -> Result<BranchPage, String> {
         let server = uuid::Uuid::parse_str(server).map_err(|error| error.to_string())?;
-        let result = self
-            .request_git(
+        let reply = self
+            .git(
                 server,
                 Request::Branches {
                     repo_id: repo.into(),
@@ -344,14 +321,14 @@ impl crate::backend::Backend {
                 false,
             )
             .map_err(|error| error.to_string())?;
-        if result["entries"]
-            .as_array()
-            .is_none_or(|entries| entries.len() > 20)
-        {
+        let Reply::Branches(page) = reply else {
+            return Err("Invalid worktree branch page.".into());
+        };
+        if page.entries.len() > 20 {
             return Err("Invalid worktree branch page.".into());
         }
-        BranchChoices::from_page(&result)?;
-        Ok(result)
+        BranchChoices::from_page(&page)?;
+        Ok(*page)
     }
     pub fn worktree_branch_owner(
         &self,
@@ -360,8 +337,8 @@ impl crate::backend::Backend {
         branch: &WorktreeBranch,
     ) -> Result<Option<String>, String> {
         let server = uuid::Uuid::parse_str(server).map_err(|error| error.to_string())?;
-        let result = self
-            .request_git(
+        let reply = self
+            .git(
                 server,
                 Request::Worktrees {
                     repo_id: repo.into(),
@@ -375,48 +352,70 @@ impl crate::backend::Backend {
                 false,
             )
             .map_err(|error| error.to_string())?;
-        let entries = result["entries"]
-            .as_array()
-            .ok_or("Invalid worktree ownership response.")?;
-        if entries.len() > 1 || result.get("nextCursor") != Some(&Value::Null) {
+        let Reply::Worktrees(page) = reply else {
+            return Err("Invalid worktree ownership response.".into());
+        };
+        if page.entries.len() > 1 || page.next_cursor.is_some() {
             return Err("Invalid worktree ownership response.".into());
         }
-        let Some(entry) = entries.first() else {
+        let Some(entry) = page.entries.first() else {
             return Ok(None);
         };
-        if entry["head"]["name"]["bytesB64"] != STANDARD.encode(&branch.reference) {
+        if entry.head.name.as_ref().map(|name| name.bytes_b64.as_str())
+            != Some(STANDARD.encode(&branch.reference).as_str())
+        {
             return Err("Worktree ownership changed. Select the branch again.".into());
         }
-        Ok(Some(
-            entry["path"]["display"]
-                .as_str()
-                .unwrap_or("another worktree")
-                .into(),
-        ))
+        Ok(Some(entry.path.display.clone()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use newport_protocol::git::{Tracking, TrackingConfiguration};
 
-    fn wire(text: &str) -> Value {
-        json!({"display":text,"bytesB64":STANDARD.encode(text)})
+    fn wire(text: &str) -> Path {
+        Path::new(text.as_bytes())
     }
-    fn entry(name: &str, remote: bool) -> Value {
-        json!({
-            "name":wire(name),
-            "reference":wire(&format!("refs/{}/{name}", if remote {"remotes"} else {"heads"})),
-            "oid":{"algorithm":"sha1","hex":"a".repeat(40)},
-            "remote":remote,"current":false,"upstream":null,
-            "tracking":{"editable":true,"token":"tracking-at-review"}
-        })
+    fn entry(name: &str, remote: bool) -> Branch {
+        Branch {
+            name: wire(name),
+            reference: wire(&format!(
+                "refs/{}/{name}",
+                if remote { "remotes" } else { "heads" }
+            )),
+            oid: ObjectId {
+                algorithm: "sha1".into(),
+                hex: "a".repeat(40),
+            },
+            remote,
+            current: false,
+            upstream: None,
+            tracking: Some(tracking(true, "tracking-at-review")),
+        }
+    }
+    fn tracking(editable: bool, token: &str) -> Tracking {
+        Tracking {
+            token: token.into(),
+            editable,
+            configuration: TrackingConfiguration {
+                remote: vec![],
+                merge: vec![],
+            },
+        }
+    }
+    fn oid(algorithm: &str, hex: String) -> ObjectId {
+        ObjectId {
+            algorithm: algorithm.into(),
+            hex,
+        }
     }
 
     #[test]
     fn starting_points_allow_current_and_remote_branches_but_keep_exact_identity() {
         let mut local = entry("origin/topic", false);
-        local["current"] = json!(true);
+        local.current = true;
         let remote = entry("origin/topic", true);
         let local_base = WorktreeBranchUse::StartingPoint
             .candidate(&local, false)
@@ -436,14 +435,14 @@ mod tests {
                 .candidate(&remote, false)
                 .is_none()
         );
-        local["reference"]["bytesB64"] = json!(STANDARD.encode("refs/heads/other"));
+        local.reference.bytes_b64 = STANDARD.encode("refs/heads/other");
         assert!(
             WorktreeBranchUse::StartingPoint
                 .candidate(&local, false)
                 .is_none()
         );
         let mut short = remote;
-        short["oid"]["hex"] = json!("abcdef");
+        short.oid.hex = "abcdef".into();
         assert!(
             WorktreeBranchUse::StartingPoint
                 .candidate(&short, false)
@@ -458,18 +457,16 @@ mod tests {
             WorktreeBranch::from_entry(&local, false).unwrap().reference,
             "refs/heads/topic"
         );
-        local["current"] = json!(true);
+        local.current = true;
         assert!(WorktreeBranch::from_entry(&local, false).is_none());
         assert!(WorktreeBranch::from_entry(&local, true).is_some());
-        local["current"] = Value::Null;
-        assert!(WorktreeBranch::from_entry(&local, true).is_none());
-        local["current"] = json!(false);
-        local["name"]["display"] = json!("different");
+        local.current = false;
+        local.name.display = "different".into();
         assert!(WorktreeBranch::from_entry(&local, false).is_none());
         local = entry("topic", false);
-        local["oid"]["hex"] = json!("a".repeat(8));
+        local.oid.hex = "a".repeat(8);
         assert!(WorktreeBranch::from_entry(&local, false).is_none());
-        local["oid"] = json!({"algorithm":"sha256","hex":"b".repeat(64)});
+        local.oid = oid("sha256", "b".repeat(64));
         assert!(WorktreeBranch::from_entry(&local, false).is_some());
         assert!(WorktreeBranch::from_entry(&entry("origin/topic", true), false).is_none());
     }
@@ -477,10 +474,10 @@ mod tests {
     #[test]
     fn review_pins_scope_oid_and_tracking_config_after_source_refreshes() {
         let mut source = entry("topic", false);
-        source["upstream"] = wire("refs/remotes/origin/main");
+        source.upstream = Some(wire("refs/remotes/origin/main"));
         let review = BranchReview::from_entry("repo-a", "snapshot-a", &source).unwrap();
-        source["oid"]["hex"] = json!("b".repeat(40));
-        source["tracking"]["token"] = json!("tracking-after-review");
+        source.oid.hex = "b".repeat(40);
+        source.tracking = Some(tracking(true, "tracking-after-review"));
         assert!(review.matches("repo-a", "snapshot-a"));
         assert!(!review.matches("repo-b", "snapshot-a"));
         assert!(!review.matches("repo-a", "snapshot-b"));
@@ -498,7 +495,7 @@ mod tests {
         let review = BranchReview::from_entry("repo", "snapshot", &source).unwrap();
         assert_eq!(
             serde_json::to_value(review.delete_action(false).unwrap()).unwrap(),
-            json!({
+            serde_json::json!({
                 "kind":"branch.delete","name":"topic","expectedOid":"a".repeat(40),"force":false
             })
         );
@@ -510,7 +507,7 @@ mod tests {
             serde_json::to_value(review.delete_action(false).unwrap()).unwrap()["force"],
             false
         );
-        source["current"] = json!(true);
+        source.current = true;
         let review = BranchReview::from_entry("repo", "snapshot", &source).unwrap();
         assert!(!review.can_delete());
         assert!(review.delete_action(false).is_err());
@@ -537,13 +534,12 @@ mod tests {
     #[test]
     fn uneditable_missing_or_empty_tracking_disables_set_and_clear_only() {
         for tracking in [
-            Value::Null,
-            json!({"editable":false,"token":"inherited"}),
-            json!({"editable":true,"token":""}),
-            json!({"editable":true}),
+            None,
+            Some(tracking(false, "inherited")),
+            Some(tracking(true, "")),
         ] {
             let mut source = entry("topic", false);
-            source["tracking"] = tracking;
+            source.tracking = tracking;
             let review = BranchReview::from_entry("repo", "snapshot", &source).unwrap();
             assert!(!review.can_set_upstream());
             assert!(review.set_upstream_action(None).is_err());
@@ -561,31 +557,30 @@ mod tests {
         let source = entry("topic", false);
         let review = BranchReview::from_entry("repo", "snapshot", &source).unwrap();
         let mut bad_rows = vec![entry("topic", true)];
-        for (field, replacement) in [
-            ("name", wire("other")),
-            ("reference", wire("refs/tags/topic")),
-            ("oid", json!({"algorithm":"sha1","hex":"a".repeat(8)})),
-            ("oid", json!({"algorithm":"sha256","hex":"a".repeat(40)})),
-            ("oid", json!({"algorithm":"sha1","hex":"0".repeat(40)})),
-            ("current", Value::Null),
-        ] {
+        let changes: [&dyn Fn(&mut Branch); 6] = [
+            &|row| row.name = wire("other"),
+            &|row| row.reference = wire("refs/tags/topic"),
+            &|row| row.oid = oid("sha1", "a".repeat(8)),
+            &|row| row.oid = oid("sha256", "a".repeat(40)),
+            &|row| row.oid = oid("sha1", "0".repeat(40)),
+            &|row| row.name.bytes_b64 = STANDARD.encode(b"topic\xff"),
+        ];
+        for change in changes {
             let mut row = source.clone();
-            row[field] = replacement;
+            change(&mut row);
             bad_rows.push(row);
         }
-        for field in ["name", "reference"] {
-            let mut row = source.clone();
-            row[field]["bytesB64"] = json!(STANDARD.encode(b"topic\xff"));
-            bad_rows.push(row);
-        }
+        let mut row = source.clone();
+        row.reference.bytes_b64 = STANDARD.encode(b"refs/heads/topic\xff");
+        bad_rows.push(row);
         for row in bad_rows {
             assert!(
                 BranchReview::from_entry("repo", "snapshot", &row).is_err(),
-                "{row}"
+                "{row:?}"
             );
         }
         let mut target = entry("main", false);
-        target["reference"]["bytesB64"] = json!(STANDARD.encode(b"refs/heads/main\xff"));
+        target.reference.bytes_b64 = STANDARD.encode(b"refs/heads/main\xff");
         assert!(review.upstream_reference(&target).is_none());
         assert!(review.set_upstream_action(Some(&target)).is_err());
         assert!(BranchReview::from_entry("", "snapshot", &source).is_err());
@@ -595,7 +590,7 @@ mod tests {
     #[test]
     fn unicode_branch_names_and_sha256_objects_round_trip_without_normalization() {
         let mut row = entry("feature/café", false);
-        row["oid"] = json!({"algorithm":"sha256","hex":"b".repeat(64)});
+        row.oid = oid("sha256", "b".repeat(64));
         let review = BranchReview::from_entry("repo", "snapshot", &row).unwrap();
         assert_eq!(review.name(), "feature/café");
         assert_eq!(review.reference(), "refs/heads/feature/café");
@@ -605,8 +600,13 @@ mod tests {
         );
     }
 
-    fn page(entries: &[Value], next: Option<&str>) -> Value {
-        json!({"snapshot":"branch-list-snapshot","metadata":{"totalEntries":3},"entries":entries,"nextCursor":next})
+    fn page(entries: &[Branch], next: Option<&str>) -> BranchPage {
+        Page {
+            snapshot: "branch-list-snapshot".into(),
+            entries: entries.to_vec(),
+            next_cursor: next.map(Into::into),
+            metadata: TotalEntries { total_entries: 3 },
+        }
     }
 
     #[test]
@@ -642,32 +642,17 @@ mod tests {
     fn branch_choices_reject_changed_snapshots_cursors_and_no_progress_without_mutating() {
         let first = page(&[entry("topic", false)], Some("cursor-2"));
         let valid = page(&[entry("main", false)], Some("cursor-3"));
+        let mut snapshot = valid.clone();
+        snapshot.snapshot = "new-read".into();
+        let mut metadata = valid.clone();
+        metadata.metadata.total_entries = 4;
+        let mut repeated = valid.clone();
+        repeated.next_cursor = Some("cursor-2".into());
         for (page, cursor) in [
             (valid.clone(), "obsolete-cursor"),
-            (
-                {
-                    let mut v = valid.clone();
-                    v["snapshot"] = json!("new-read");
-                    v
-                },
-                "cursor-2",
-            ),
-            (
-                {
-                    let mut v = valid.clone();
-                    v["metadata"]["totalEntries"] = json!(4);
-                    v
-                },
-                "cursor-2",
-            ),
-            (
-                {
-                    let mut v = valid.clone();
-                    v["nextCursor"] = json!("cursor-2");
-                    v
-                },
-                "cursor-2",
-            ),
+            (snapshot, "cursor-2"),
+            (metadata, "cursor-2"),
+            (repeated, "cursor-2"),
             (page(&[entry("topic", false)], Some("cursor-3")), "cursor-2"),
         ] {
             let mut choices = BranchChoices::from_page(&first).unwrap();

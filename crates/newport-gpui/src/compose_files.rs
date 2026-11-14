@@ -1,13 +1,12 @@
 //! Read-only Compose files. The client owns reads; this view retains only file
-//! choice, decoded presentation data, and the current editor's local viewport.
+//! choice, the project's last reading, and the current editor's local viewport.
 use super::*;
 use gpui_kit::component::Selectable;
 use gpui_kit::component::{
     input::{Editor, EditorState},
     tab::Tab,
 };
-use newport_domain::compose::ComposeProject;
-use serde::Deserialize;
+use newport_protocol::monitor::compose::Project;
 use std::time::Instant;
 
 #[cfg(test)]
@@ -17,8 +16,7 @@ mod tests;
 pub(super) struct Files {
     project: Option<String>,
     stamp: Option<(u64, Option<Instant>)>,
-    data: Option<ComposeProject>,
-    decode_error: Option<String>,
+    data: Option<Project>,
     error: Option<String>,
     pending: bool,
     pub(super) selected_path: Option<String>,
@@ -36,7 +34,6 @@ impl Files {
             project: None,
             stamp: None,
             data: None,
-            decode_error: None,
             error: None,
             pending: false,
             selected_path: None,
@@ -63,7 +60,6 @@ impl Files {
             self.project = project.map(str::to_owned);
             self.stamp = None;
             self.data = None;
-            self.decode_error = None;
             self.selected_path = None;
             self.tabs.clear();
             self.tab_scroll.set_offset(point(px(0.), px(0.)));
@@ -75,18 +71,9 @@ impl Files {
         let mut changed_data = false;
         if project.is_some() && stamp != self.stamp {
             self.stamp = stamp;
-            if let Some(value) = client.compose_project() {
-                match ComposeProject::deserialize(value) {
-                    Ok(data) => {
-                        self.data = Some(data);
-                        self.decode_error = None;
-                        changed_data = true;
-                    }
-                    Err(error) => {
-                        self.decode_error =
-                            Some(format!("Couldn’t read the Compose files response: {error}"))
-                    }
-                }
+            if let Some(data) = client.compose_project() {
+                self.data = Some(data.clone());
+                changed_data = true;
             }
         }
         if changed_project || changed_data {
@@ -227,7 +214,7 @@ impl Files {
         let Some(project) = self.project.as_ref() else {
             return div().into_any_element();
         };
-        let error = self.error.as_ref().or(self.decode_error.as_ref());
+        let error = self.error.as_ref();
         let mut view = div()
             .id("compose-files")
             .debug_selector(|| "compose-files".into())

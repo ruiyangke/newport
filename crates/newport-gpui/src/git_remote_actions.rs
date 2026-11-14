@@ -1,7 +1,7 @@
 //! Destructive remote actions keep exact reviewed object/configuration identities.
 use super::*;
 use base64::Engine as _;
-use newport_protocol::git::Action;
+use newport_protocol::git::{Action, Remote, RemoteReference};
 #[derive(Clone)]
 pub(super) struct Review {
     action: Action,
@@ -10,22 +10,22 @@ pub(super) struct Review {
     source: Option<(String, String)>,
     pub(super) stale: bool,
 }
-fn target(entry: &Value) -> Option<(String, String, bool)> {
-    let tag = match entry["kind"].as_str()? {
+fn target(entry: Option<&RemoteReference>) -> Option<(String, String, bool)> {
+    let entry = entry?;
+    let tag = match entry.kind.as_str() {
         "branch" => false,
         "tag" => true,
         _ => return None,
     };
-    if !entry["symbolicTarget"].is_null() {
+    if entry.symbolic_target.is_some() {
         return None;
     }
-    let reference = entry["reference"]["display"].as_str()?;
-    if entry["reference"]["bytesB64"] != base64::engine::general_purpose::STANDARD.encode(reference)
-    {
+    let reference = entry.reference.display.as_str();
+    if entry.reference.bytes_b64 != base64::engine::general_purpose::STANDARD.encode(reference) {
         return None;
     }
     let name = reference.strip_prefix(if tag { "refs/tags/" } else { "refs/heads/" })?;
-    let oid = entry["oid"]["hex"].as_str()?;
+    let oid = entry.oid.hex.as_str();
     if name.is_empty()
         || !matches!(oid.len(), 40 | 64)
         || !oid.bytes().all(|b| b.is_ascii_hexdigit())
@@ -35,10 +35,14 @@ fn target(entry: &Value) -> Option<(String, String, bool)> {
     }
     Some((name.to_owned(), oid.to_owned(), tag))
 }
-fn action(remote: &Value, entry: &Value, source: Option<&(String, String)>) -> Option<Action> {
+fn action(
+    remote: &Remote,
+    entry: Option<&RemoteReference>,
+    source: Option<&(String, String)>,
+) -> Option<Action> {
     let (name, oid, tag) = target(entry)?;
-    let remote_name = remote["name"].as_str().filter(|s| !s.is_empty())?;
-    let token = remote["token"].as_str().filter(|s| !s.is_empty())?;
+    let remote_name = Some(remote.name.as_str()).filter(|s| !s.is_empty())?;
+    let token = Some(remote.token.as_str()).filter(|s| !s.is_empty())?;
     if let Some((branch, local_oid)) = source {
         if tag {
             return None;
@@ -113,7 +117,7 @@ impl Newport {
         };
         self.page == Page::Projects
             && self.git.tab == 6
-            && self.git.repo["capabilities"]["readOnly"] == false
+            && self.git.writable()
             && !self.git_mutation_blocks_write()
             && browser.error.is_none()
             && browser.debounce.is_none()
@@ -128,9 +132,13 @@ impl Newport {
                 .resources
                 .get("git-remote-refs-more")
                 .is_some_and(|r| r.pending || r.error.is_some())
-            && self.value("git-remote-status")["snapshot"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty())
+            && self
+                .git_status("git-remote-status")
+                .is_some_and(|status| !status.snapshot.is_empty())
+    }
+    fn remote_head(&self) -> Option<&newport_protocol::git::Head> {
+        self.git_status("git-remote-status")
+            .map(|status| &status.metadata.head)
     }
     fn prepare_remote_ref(&mut self, push: bool, cx: &mut Context<Self>) {
         if !self.can_review_remote_ref() {
@@ -138,22 +146,24 @@ impl Newport {
         }
         let browser = self.git.remote_refs.as_ref().unwrap();
         let source = if push {
-            let Some(source) =
-                git_pull::push_source(&self.value("git-remote-status")["metadata"]["head"])
-            else {
+            let Some(source) = git_pull::push_source(self.remote_head()) else {
                 return;
             };
             Some(source)
         } else {
             None
         };
-        let Some(action) = action(&browser.remote, &browser.selected, source.as_ref()) else {
+        let Some(action) = action(&browser.remote, browser.selected.as_ref(), source.as_ref())
+        else {
             return;
         };
         self.git.remote_ref_review = Some(Review {
             action,
-            reference: text(&browser.selected["reference"], "display"),
-            snapshot: text(&self.value("git-remote-status"), "snapshot"),
+            reference: browser
+                .selected
+                .as_ref()
+                .map_or_else(|| "—".into(), |selected| selected.reference.display.clone()),
+            snapshot: self.remote_status_snapshot(),
             source,
             stale: false,
         });
@@ -161,10 +171,9 @@ impl Newport {
     }
     fn remote_review_current(&self, review: &Review) -> bool {
         !review.stale
-            && review.snapshot == text(&self.value("git-remote-status"), "snapshot")
+            && review.snapshot == self.remote_status_snapshot()
             && review.source.as_ref().is_none_or(|source| {
-                git_pull::push_source(&self.value("git-remote-status")["metadata"]["head"]).as_ref()
-                    == Some(source)
+                git_pull::push_source(self.remote_head()).as_ref() == Some(source)
             })
     }
     fn submit_remote_ref(&mut self, cx: &mut Context<Self>) {
@@ -206,7 +215,7 @@ impl Newport {
             return div().into_any_element();
         };
         let can_review = self.can_review_remote_ref();
-        let target = target(&browser.selected);
+        let target = target(browser.selected.as_ref());
         let mut view = div().flex().flex_col().gap_2().px_4().py_2();
         if let Some(review) = &self.git.remote_ref_review {
             let push = review.source.is_some();
@@ -239,10 +248,7 @@ impl Newport {
                             .disabled(
                                 !can_review
                                     || !target.is_some_and(|(_, _, tag)| !tag)
-                                    || git_pull::push_source(
-                                        &self.value("git-remote-status")["metadata"]["head"],
-                                    )
-                                    .is_none(),
+                                    || git_pull::push_source(self.remote_head()).is_none(),
                             )
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.prepare_remote_ref(true, cx)),
@@ -256,20 +262,33 @@ impl Newport {
 #[cfg(test)]
 mod tests {
     use super::target;
+    use newport_protocol::git::{Path, Remote, RemoteReference};
     fn action(
-        remote: &serde_json::Value,
-        entry: &serde_json::Value,
+        remote: &Remote,
+        entry: &RemoteReference,
         source: Option<&(String, String)>,
     ) -> Option<serde_json::Value> {
-        super::action(remote, entry, source).map(|action| serde_json::to_value(action).unwrap())
+        super::action(remote, Some(entry), source)
+            .map(|action| serde_json::to_value(action).unwrap())
     }
-    use base64::Engine as _;
-    use serde_json::json;
+    fn reference(name: &str, kind: &str, oid: &str) -> RemoteReference {
+        RemoteReference {
+            reference: Path::new(name.as_bytes()),
+            kind: kind.into(),
+            oid: crate::git_fixture::object(oid),
+            symbolic_target: None,
+        }
+    }
     #[test]
     fn remote_actions_capture_exact_objects_and_exclude_symbolic_or_lossy_refs() {
         let oid = "a".repeat(40);
-        let mut entry = json!({"reference":{"display":"refs/heads/topic","bytesB64":base64::engine::general_purpose::STANDARD.encode("refs/heads/topic")},"kind":"branch","oid":{"hex":oid},"symbolicTarget":null});
-        let remote = json!({"name":"origin","token":"config"});
+        let mut entry = reference("refs/heads/topic", "branch", &oid);
+        let remote = Remote {
+            name: "origin".into(),
+            url: None,
+            push_url: None,
+            token: "config".into(),
+        };
         let source = ("main".into(), "b".repeat(40));
         let push = action(&remote, &entry, Some(&source)).unwrap();
         assert_eq!(push["destinationBranch"], "topic");
@@ -279,18 +298,19 @@ mod tests {
             action(&remote, &entry, None).unwrap()["kind"],
             "branch.delete_remote"
         );
-        entry["symbolicTarget"] = json!({"display":"refs/heads/main"});
-        assert!(target(&entry).is_none());
-        entry["symbolicTarget"] = serde_json::Value::Null;
-        entry["reference"]["bytesB64"] = json!("/w==");
-        assert!(target(&entry).is_none());
-        let mut tag = json!({"reference":{"display":"refs/tags/v1","bytesB64":base64::engine::general_purpose::STANDARD.encode("refs/tags/v1")},"kind":"tag","oid":{"hex":"c".repeat(40)},"symbolicTarget":null});
+        entry.symbolic_target = Some(Path::new(b"refs/heads/main"));
+        assert!(target(Some(&entry)).is_none());
+        entry.symbolic_target = None;
+        entry.reference.bytes_b64 = "/w==".into();
+        assert!(target(Some(&entry)).is_none());
+        let mut tag = reference("refs/tags/v1", "tag", &"c".repeat(40));
         assert_eq!(
             action(&remote, &tag, None).unwrap()["kind"],
             "tag.delete_remote"
         );
         assert!(action(&remote, &tag, Some(&source)).is_none());
-        tag["kind"] = json!("peeled_tag");
-        assert!(target(&tag).is_none());
+        tag.kind = "peeled_tag".into();
+        assert!(target(Some(&tag)).is_none());
+        assert!(target(None).is_none());
     }
 }

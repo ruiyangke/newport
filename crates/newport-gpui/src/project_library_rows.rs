@@ -1,5 +1,6 @@
 //! Variable-height bookmark rows with demand-driven status reads.
 use super::*;
+use desktop::preferences::Project;
 use gpui_kit::component::spinner::Spinner;
 use newport_client::project_bookmark::reading;
 use project_library::status_key;
@@ -20,7 +21,7 @@ impl Columns {
 
 pub(super) struct LibraryList {
     pub state: ListState,
-    rows: Vec<Value>,
+    rows: Vec<Project>,
     width: f32,
     projection: Option<Projection>,
 }
@@ -28,7 +29,7 @@ struct Projection {
     revision: u64,
     query: String,
     preferences: project_preferences::Preferences,
-    rows: std::rc::Rc<Vec<Value>>,
+    rows: std::rc::Rc<Vec<Project>>,
 }
 impl Default for LibraryList {
     fn default() -> Self {
@@ -41,7 +42,7 @@ impl Default for LibraryList {
     }
 }
 impl LibraryList {
-    pub fn visible_projects(&self) -> &[Value] {
+    pub fn visible_projects(&self) -> &[Project] {
         let start = self.state.logical_scroll_top().item_ix;
         let mut end = start;
         // Rows wrap at narrow widths. Follow measured geometry rather than an
@@ -56,20 +57,22 @@ impl LibraryList {
         }
         &self.rows[start.min(self.rows.len())..end.min(self.rows.len())]
     }
+    /// The rows to show for `projects`, recomputed only when `revision`, the
+    /// query or the preferences change.
     pub fn prepare(
         &mut self,
-        resource: Option<&newport_client::resources::Resource>,
+        revision: u64,
+        projects: &[Project],
         preferences: &project_preferences::Preferences,
         query: &str,
         width: f32,
-    ) -> std::rc::Rc<Vec<Value>> {
-        let revision = resource.map_or(0, |r| r.data_revision);
+    ) -> std::rc::Rc<Vec<Project>> {
         let query = query.trim().to_lowercase();
         let changed = self.projection.as_ref().is_none_or(|old| {
             old.revision != revision || old.query != query || old.preferences != *preferences
         });
         if changed {
-            let source = resource.map(|r| rows(&r.value)).unwrap_or_default();
+            let source = projects.to_vec();
             self.projection = Some(Projection {
                 revision,
                 query: query.clone(),
@@ -84,7 +87,7 @@ impl LibraryList {
         rows
     }
 
-    pub fn sync(&mut self, rows: &[Value], width: f32) {
+    pub fn sync(&mut self, rows: &[Project], width: f32) {
         if self.rows == rows && self.width == width {
             return;
         }
@@ -92,7 +95,7 @@ impl LibraryList {
         offset.item_ix = self
             .rows
             .get(offset.item_ix)
-            .and_then(|old| rows.iter().position(|row| row["id"] == old["id"]))
+            .and_then(|old| rows.iter().position(|row| row.id == old.id))
             .unwrap_or(offset.item_ix.min(rows.len().saturating_sub(1)));
         self.state.splice(0..self.rows.len(), rows.len());
         self.state.scroll_to(offset);
@@ -214,14 +217,14 @@ impl Newport {
     }
 }
 impl Newport {
-    fn check_project(&mut self, project: &Value, cx: &mut Context<Self>) {
-        if project["serverId"].as_str() != Some(&self.server) {
+    fn check_project(&mut self, project: &Project, cx: &mut Context<Self>) {
+        if project.server.to_string() != self.server {
             return;
         }
         let key = status_key(project);
         let generation = self.resources.begin_refresh(&key, true);
         match newport_client::project_checks::status_request(project) {
-            Ok(request) => self.dispatch_git_request(&key, request, generation),
+            Ok(request) => self.dispatch_git_typed(&key, request, generation),
             Err(error) => {
                 if let Some(generation) = generation {
                     self.resources
@@ -231,11 +234,11 @@ impl Newport {
         }
         cx.notify();
     }
-    fn toggle_project_favorite(&mut self, project: &Value, cx: &mut Context<Self>) {
-        if project["serverId"].as_str() != Some(&self.server) {
+    fn toggle_project_favorite(&mut self, project: &Project, cx: &mut Context<Self>) {
+        if project.server.to_string() != self.server {
             return;
         }
-        let id = text(project, "id");
+        let id = project.id.to_string();
         let prefs = self
             .project_preferences
             .entry(self.server.clone())
@@ -248,19 +251,19 @@ impl Newport {
     }
     pub(super) fn project_library_row(
         &self,
-        project: &Value,
+        project: &Project,
         index: usize,
         columns: Columns,
         busy: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let group = SharedString::from(format!("project-row:{}", status_key(project)));
-        let name = text(project, "name");
-        let path = text(&project["path"], "display");
+        let name = project.name.clone();
+        let path = project.path.display.clone();
         let favorite = self
             .project_preferences
             .get(&self.server)
-            .is_some_and(|p| p.favorites.contains(&text(project, "id")));
+            .is_some_and(|p| p.favorites.contains(&project.id.to_string()));
         let resource = self.resources.get(&status_key(project));
         let reading = reading(resource);
         let pending = reading.pending || resource.is_none();
@@ -544,7 +547,7 @@ impl Newport {
 /// The row's actions, from its "…" button or a right-click.
 fn project_menu(
     mut menu: PopupMenu,
-    project: &Value,
+    project: &Project,
     view: &WeakEntity<Newport>,
     pending: bool,
 ) -> PopupMenu {
@@ -639,24 +642,38 @@ fn identity(
 #[cfg(test)]
 mod tests {
     use super::{LibraryList, identity};
-    use crate::text;
+    use crate::project_library_state::typed_fixture::{TYPED_SERVER, bookmark};
+    use desktop::preferences::Project;
     use gpui::{
         AppContext, Context, InteractiveElement, IntoElement, ListOffset, ParentElement, Render,
         Styled, TestAppContext, Window, div, list, px, size,
     };
     use gpui_kit as gpui;
-    use serde_json::{Value, json};
+    use newport_protocol::desktop;
+    /// A bookmark known only by its number and name.
+    fn named(id: u128, name: &str) -> Project {
+        bookmark(id, TYPED_SERVER, name, "/repo")
+    }
 
     #[test]
     #[ignore = "manual project-library preparation benchmark; excludes GPUI layout and paint"]
     fn benchmark_project_library_preparation() {
         use std::{hint::black_box, time::Instant};
-        let data = Value::Array((0..5000).map(|i| json!({"id":format!("project-{i}"), "serverId":"fixture", "name":format!("Project {}", 5000-i), "path":{"display":format!("/srv/projects/project-{i}"),"bytes":format!("path-{i}")}})).collect());
+        let data: Vec<_> = (0..5000)
+            .map(|i| {
+                bookmark(
+                    i,
+                    TYPED_SERVER,
+                    &format!("Project {}", 5000 - i),
+                    &format!("/srv/projects/project-{i}"),
+                )
+            })
+            .collect();
         let preferences = crate::project_preferences::Preferences::default();
         let mut list = LibraryList::default();
         let start = Instant::now();
         for _ in 0..30 {
-            let projects = preferences.visible(crate::rows(&data.clone()), "");
+            let projects = preferences.visible(data.clone(), "");
             list.sync(&projects, 900.);
             black_box(projects.clone());
             black_box(projects);
@@ -665,13 +682,10 @@ mod tests {
             "Projects 5000 bookmarks preparation: {:.3} ms/redraw",
             start.elapsed().as_secs_f64() * 1000. / 30.
         );
-        let mut resources = newport_client::resources::Resources::default();
-        let generation = resources.begin("page").unwrap();
-        resources.complete("page", generation, Ok(data));
-        black_box(list.prepare(resources.get("page"), &preferences, "", 900.));
+        black_box(list.prepare(1, &data, &preferences, "", 900.));
         let start = Instant::now();
         for _ in 0..30 {
-            let projects = list.prepare(resources.get("page"), &preferences, "", 900.);
+            let projects = list.prepare(1, &data, &preferences, "", 900.);
             black_box(projects.clone());
             black_box(projects);
         }
@@ -684,70 +698,46 @@ mod tests {
     #[test]
     fn project_projection_reuses_data_and_tracks_preferences_and_successful_replies() {
         use std::rc::Rc;
-        let mut resources = newport_client::resources::Resources::default();
         let mut preferences = crate::project_preferences::Preferences::default();
         let mut list = LibraryList::default();
-        let generation = resources.begin("page").unwrap();
-        resources.complete(
-            "page",
-            generation,
-            Ok(json!([
-                {"id":"a","name":"Zulu","path":{"display":"/a"}},
-                {"id":"b","name":"Alpha","path":{"display":"/z"}}
-            ])),
-        );
-        let initial = list.prepare(resources.get("page"), &preferences, "", 900.);
-        assert_eq!(initial[0]["id"], "b");
+        let a = bookmark(1, TYPED_SERVER, "Zulu", "/a");
+        let b = bookmark(2, TYPED_SERVER, "Alpha", "/z");
+        let data = vec![a.clone(), b.clone()];
+        let initial = list.prepare(1, &data, &preferences, "", 900.);
+        assert_eq!(initial[0], b);
         assert!(Rc::ptr_eq(
             &initial,
-            &list.prepare(resources.get("page"), &preferences, "", 900.)
+            &list.prepare(1, &data, &preferences, "", 900.)
         ));
         // A resize remeasures geometry, without repeating data preparation.
         assert!(Rc::ptr_eq(
             &initial,
-            &list.prepare(resources.get("page"), &preferences, "", 500.)
+            &list.prepare(1, &data, &preferences, "", 500.)
         ));
         preferences.sort_path = true;
-        assert_eq!(
-            list.prepare(resources.get("page"), &preferences, "", 500.)[0]["id"],
-            "a"
-        );
+        assert_eq!(list.prepare(1, &data, &preferences, "", 500.)[0], a);
         preferences.favorites_only = true;
-        preferences.favorites.insert("b".into());
-        let favorite = list.prepare(resources.get("page"), &preferences, "", 500.);
+        preferences.favorites.insert(b.id.to_string());
+        let favorite = list.prepare(1, &data, &preferences, "", 500.);
         assert_eq!(favorite.len(), 1);
-        assert_eq!(favorite[0]["id"], "b");
+        assert_eq!(favorite[0], b);
         assert!(
-            list.prepare(resources.get("page"), &preferences, "zulu", 500.)
+            list.prepare(1, &data, &preferences, "zulu", 500.)
                 .is_empty()
         );
-        let favorite = list.prepare(resources.get("page"), &preferences, "", 500.);
-        let generation = resources.begin_refresh("page", false).unwrap();
+        let favorite = list.prepare(1, &data, &preferences, "", 500.);
+        // An unchanged revision reuses the prepared rows.
         assert!(Rc::ptr_eq(
             &favorite,
-            &list.prepare(resources.get("page"), &preferences, "", 500.)
+            &list.prepare(1, &data, &preferences, "", 500.)
         ));
-        resources.complete("page", generation, Err("offline".into()));
-        assert!(Rc::ptr_eq(
-            &favorite,
-            &list.prepare(resources.get("page"), &preferences, "", 500.)
-        ));
-        let generation = resources.begin_refresh("page", false).unwrap();
-        resources.complete("page", generation, Ok(json!([])));
-        assert!(
-            list.prepare(resources.get("page"), &preferences, "", 500.)
-                .is_empty()
-        );
-        resources.invalidate("page");
-        assert!(
-            list.prepare(resources.get("page"), &preferences, "", 500.)
-                .is_empty()
-        );
+        assert!(list.prepare(2, &[], &preferences, "", 500.).is_empty());
+        assert!(list.prepare(0, &[], &preferences, "", 500.).is_empty());
     }
 
     struct Gallery {
         list: LibraryList,
-        rows: Vec<Value>,
+        rows: Vec<Project>,
     }
     #[gpui::test]
     fn automatic_status_demand_tracks_wrapped_rows_and_one_prefetch(cx: &mut TestAppContext) {
@@ -759,10 +749,14 @@ mod tests {
         let (_, visual) = cx.add_window_view(|window, cx| {
             let gallery = cx.new(|_| Gallery {
                 list: LibraryList::default(),
-                rows: (0..1000).map(|i| json!({
-                    "id":i.to_string(),
-                    "name":format!("Project {i}: production repository with a long descriptive name that wraps")
-                })).collect(),
+                rows: (0..1000)
+                    .map(|i| {
+                        named(
+                            i,
+                            &format!("Project {i}: production repository with a long descriptive name that wraps"),
+                        )
+                    })
+                    .collect(),
             });
             entity = Some(gallery.clone());
             gpui::base::Root::new(gallery, window, cx)
@@ -785,8 +779,8 @@ mod tests {
                     .find(|i| view.list.state.item_is_below_viewport(*i) == Some(true))
                     .expect("layout measures the first row below this viewport");
                 let demand = view.list.visible_projects();
-                assert_eq!(demand.first().unwrap()["id"], anchor.to_string());
-                assert_eq!(demand.last().unwrap()["id"], first_below.to_string());
+                assert_eq!(demand.first().unwrap().id.as_u128(), anchor as u128);
+                assert_eq!(demand.last().unwrap().id.as_u128(), first_below as u128);
                 assert_eq!(demand.len(), first_below - anchor + 1);
                 assert!(
                     demand.len() < 5,
@@ -812,7 +806,7 @@ mod tests {
                             .debug_selector(move || format!("test-row-{index}"))
                             .child(identity(
                                 index,
-                                text(&this.rows[index], "name"),
+                                this.rows[index].name.clone(),
                                 "/home/fixture/long-path-to-a-repository".into(),
                                 false,
                                 |_, _, _| {},
@@ -835,13 +829,15 @@ mod tests {
             crate::theme::install(false, cx);
         });
         let mut entity = None;
-        let (_, visual) = cx.add_window_view(|window,cx| {
-            let gallery = cx.new(|_|Gallery {list:LibraryList::default(),rows:vec![
-                json!({"id":"long","name":"Marketplace production repository with a long descriptive project name"}),
-                json!({"id":"short","name":"Second project"}),
+        let (_, visual) =
+            cx.add_window_view(|window, cx| {
+                let gallery = cx.new(|_|Gallery {list:LibraryList::default(),rows:vec![
+                named(1, "Marketplace production repository with a long descriptive project name"),
+                named(2, "Second project"),
             ]});
-            entity=Some(gallery.clone());gpui::base::Root::new(gallery,window,cx)
-        });
+                entity = Some(gallery.clone());
+                gpui::base::Root::new(gallery, window, cx)
+            });
         let entity = entity.unwrap();
         let mut wide_height = px(0.);
         for width in [650., 180., 320.] {
@@ -869,7 +865,7 @@ mod tests {
         }
         entity.update(visual, |view, cx| {
             view.rows = (0..1000)
-                .map(|i| json!({"id":i.to_string(),"name":format!("Project {i}")}))
+                .map(|i| named(i, &format!("Project {i}")))
                 .collect();
             cx.notify();
         });
@@ -896,16 +892,14 @@ mod tests {
     #[test]
     fn library_remeasurement_preserves_anchor_and_removed_bookmarks_clamp_safely() {
         let mut list = LibraryList::default();
-        let rows: Vec<_> = (0..10)
-            .map(|i| json!({"id":i.to_string(),"name":i.to_string()}))
-            .collect();
+        let rows: Vec<_> = (0..10).map(|i| named(i, &i.to_string())).collect();
         list.sync(&rows, 700.);
         list.state.scroll_to(ListOffset {
             item_ix: 5,
             offset_in_item: px(7.),
         });
         let mut changed = rows.clone();
-        changed.insert(0, json!({"id":"new","name":"New project"}));
+        changed.insert(0, named(100, "New project"));
         list.sync(&changed, 400.);
         assert_eq!(list.state.logical_scroll_top().item_ix, 6);
         assert_eq!(list.state.logical_scroll_top().offset_in_item, px(7.));

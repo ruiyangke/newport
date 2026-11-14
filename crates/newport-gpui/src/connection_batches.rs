@@ -1,10 +1,10 @@
 //! Project/worktree controls. Planning and write sequencing live in shared crates.
 use super::*;
+use configuration::{Direction, Tunnel};
 use connections_grouped::Entry;
 use newport_client::tunnel_operations::Action;
 use newport_domain::{
     forwarding_batch::{self, Plan},
-    model::{Direction, Tunnel},
     port_grouping::ListenerSelection,
 };
 use std::collections::HashSet;
@@ -48,16 +48,13 @@ impl CheckoutSelection {
             forwards: entries
                 .iter()
                 .flat_map(|entry| &entry.forwards)
-                .filter_map(|forward| serde_json::from_value::<Tunnel>(forward.clone()).ok())
                 .filter(|forward| forward.direction == Direction::Local)
+                .cloned()
                 .collect(),
         }
     }
 
-    fn contains_forward(&self, value: &Value) -> bool {
-        let Ok(current) = serde_json::from_value::<Tunnel>(value.clone()) else {
-            return false;
-        };
+    fn contains_forward(&self, current: &Tunnel) -> bool {
         self.forwards.iter().any(|captured| {
             captured.id == current.id
                 && captured.server_id == current.server_id
@@ -170,17 +167,22 @@ impl Newport {
     }
     pub(super) fn plan_port_batch(&self, project: &str, entries: &[Entry]) -> Result<Plan, String> {
         let server = self.server.parse().map_err(|_| "Choose a server")?;
-        let mut allocated: Vec<Tunnel> =
-            serde_json::from_value(self.snapshot["config"]["tunnels"].clone())
-                .map_err(|e| e.to_string())?;
+        let mut allocated = self.saved_forwards()?;
+        let runtime = self
+            .runtime()
+            .ok_or("Server configuration is unavailable.")?;
         allocated.extend(self.tunnel_operations.reserved_creations());
         let active = allocated
             .iter()
             .filter(|t| {
-                matches!(
-                    self.snapshot["runtime"]["tunnels"][t.id.to_string()]["status"].as_str(),
-                    Some("connected" | "connecting" | "reconnecting")
-                )
+                runtime.tunnel(t.id).is_some_and(|state| {
+                    matches!(
+                        state.status,
+                        configuration::ConnectionStatus::Connected
+                            | configuration::ConnectionStatus::Connecting
+                            | configuration::ConnectionStatus::Reconnecting
+                    )
+                })
             })
             .map(|t| t.id)
             .collect::<HashSet<_>>();
@@ -206,10 +208,8 @@ impl Newport {
                 let forwards = e
                     .forwards
                     .iter()
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .collect::<Result<Vec<Tunnel>, _>>()
-                    .map_err(|e| e.to_string())?;
+                    .map(newport_domain::model::Tunnel::from)
+                    .collect();
                 Ok(forwarding_batch::Entry {
                     destination,
                     forwards,
@@ -381,14 +381,21 @@ impl Newport {
 mod tests {
     use super::Scope;
     use crate::connections::fixtures::Listener;
+    use crate::snapshot_fixture::SERVER;
     use newport_domain::port_grouping::{Port, Worktree};
-    use serde_json::json;
+    use newport_protocol::desktop::configuration::{Direction, Tunnel};
     fn saved_entry() -> crate::connections_grouped::Entry {
-        let forward = json!({
-            "id": uuid::Uuid::new_v4(), "serverId": uuid::Uuid::new_v4(),
-            "name": "Vite", "localPort": 5173, "remoteHost": "127.0.0.1",
-            "remotePort": 5173, "direction": "local", "project": "/repo"
-        });
+        let forward = Tunnel {
+            name: "Vite".into(),
+            remote_host: "127.0.0.1".into(),
+            project: Some("/repo".into()),
+            ..crate::snapshot_fixture::tunnel(
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4(),
+                5173,
+                5173,
+            )
+        };
         let port = Port::Saved {
             definition: forward.clone(),
             worktree: Some(Worktree {
@@ -423,14 +430,14 @@ mod tests {
             worktree.as_mut().unwrap().path = "/repo/other".into();
         }
         let mut retargeted = saved.clone();
-        retargeted.forwards[0]["remotePort"] = json!(8000);
+        retargeted.forwards[0].remote_port = 8000;
         let mut rebound = saved.clone();
-        rebound.forwards[0]["localPort"] = json!(9000);
+        rebound.forwards[0].local_port = 9000;
         let mut reverse = saved.clone();
         if let Port::Saved { definition, .. } = &mut reverse.port {
-            definition["direction"] = json!("remote");
+            definition.direction = Direction::Remote;
         }
-        reverse.forwards[0]["direction"] = json!("remote");
+        reverse.forwards[0].direction = Direction::Remote;
         assert!(!scope.includes_checkout(&reverse));
         assert!(
             scope
@@ -442,7 +449,7 @@ mod tests {
         );
 
         let mut renamed = saved.clone();
-        renamed.forwards[0]["name"] = json!("Renamed service");
+        renamed.forwards[0].name = "Renamed service".into();
         if let Port::Saved { definition, .. } = &mut renamed.port {
             *definition = renamed.forwards[0].clone();
         }
@@ -504,7 +511,7 @@ mod tests {
                     .member()
             })
             .collect();
-        let project = newport_domain::port_grouping::group(ports, &[], "s", &[]).remove(0);
+        let project = newport_domain::port_grouping::group(ports, &[], SERVER, &[]).remove(0);
         let scope = Scope {
             project: "/repo".into(),
             worktree: Some("/repo/feature".into()),
@@ -529,7 +536,7 @@ mod tests {
                     .member()
             })
             .collect();
-        let original = newport_domain::port_grouping::group(ports, &[], "s", &[]).remove(0);
+        let original = newport_domain::port_grouping::group(ports, &[], SERVER, &[]).remove(0);
         let captured = vec![original.entries[0].clone(), original.entries[2].clone()];
         let worktree = Scope {
             project: "/repo".into(),

@@ -1,6 +1,7 @@
 //! Searchable, sortable monitoring rows; process data remains read-only.
 use super::*;
 use gpui_kit::component::input::InputEvent;
+use newport_protocol::monitor::metrics::{Process, Snapshot};
 const PAGE_SIZE: usize = 20;
 const ROW_HEIGHT: f32 = crate::ui::TWO_LINE_ROW_HEIGHT;
 const SORT_NAMES: [&str; 6] = ["CPU", "Memory", "Process", "PID", "User", "Time"];
@@ -18,17 +19,17 @@ pub(super) struct State {
 #[derive(Default)]
 struct ProcessCache {
     key: Option<(u64, String, usize, bool)>,
-    rows: std::rc::Rc<Vec<Value>>,
+    rows: std::rc::Rc<Vec<Process>>,
 }
 impl ProcessCache {
     fn get(
         &mut self,
         revision: u64,
-        source: &[Value],
+        source: &[Process],
         query: &str,
         sort: usize,
         ascending: bool,
-    ) -> std::rc::Rc<Vec<Value>> {
+    ) -> std::rc::Rc<Vec<Process>> {
         let key = (
             revision,
             query.trim().to_lowercase(),
@@ -42,41 +43,50 @@ impl ProcessCache {
         self.rows.clone()
     }
 }
-fn ordered(mut rows: Vec<Value>, query: &str, sort: usize, ascending: bool) -> Vec<Value> {
+fn ordered(mut rows: Vec<Process>, query: &str, sort: usize, ascending: bool) -> Vec<Process> {
     let query = query.trim().to_lowercase();
     rows.retain(|row| {
-        ["name", "command", "user", "pid"]
-            .iter()
-            .any(|key| text(row, key).to_lowercase().contains(&query))
+        [
+            row.name.as_str(),
+            row.command.as_deref().unwrap_or("—"),
+            row.user.as_str(),
+            &row.pid.to_string(),
+        ]
+        .iter()
+        .any(|text| text.to_lowercase().contains(&query))
     });
-    let key = ["cpu", "memory", "name", "pid", "user", "elapsed"][sort.min(5)];
-    if matches!(key, "name" | "user") {
+    let sort = sort.min(5);
+    if matches!(sort, 2 | 4) {
+        let text = |row: &Process| {
+            if sort == 2 {
+                row.name.to_lowercase()
+            } else {
+                row.user.to_lowercase()
+            }
+        };
         // Normalize once per row, not once per comparison. PID remains an
         // ascending tie-breaker even when the primary sort is descending.
         if ascending {
-            rows.sort_by_cached_key(|row| (text(row, key).to_lowercase(), row["pid"].as_u64()));
+            rows.sort_by_cached_key(|row| (text(row), row.pid));
         } else {
-            rows.sort_by_cached_key(|row| {
-                (
-                    std::cmp::Reverse(text(row, key).to_lowercase()),
-                    row["pid"].as_u64(),
-                )
-            });
+            rows.sort_by_cached_key(|row| (std::cmp::Reverse(text(row)), row.pid));
         }
     } else {
+        let measure = |row: &Process| match sort {
+            0 => row.cpu,
+            1 => row.memory as f64,
+            3 => f64::from(row.pid),
+            _ => row.elapsed.map_or(-1., |elapsed| elapsed as f64),
+        };
         rows.sort_by(|a, b| {
-            let order = a[key]
-                .as_f64()
-                .unwrap_or(-1.)
-                .total_cmp(&b[key].as_f64().unwrap_or(-1.));
-            (if ascending { order } else { order.reverse() })
-                .then_with(|| a["pid"].as_u64().cmp(&b["pid"].as_u64()))
+            let order = measure(a).total_cmp(&measure(b));
+            (if ascending { order } else { order.reverse() }).then_with(|| a.pid.cmp(&b.pid))
         });
     }
     rows
 }
-fn elapsed(value: &Value) -> String {
-    let Some(seconds) = value.as_u64() else {
+fn elapsed(value: Option<u64>) -> String {
+    let Some(seconds) = value else {
         return "—".into();
     };
     if seconds >= 86400 {
@@ -121,7 +131,7 @@ fn magnitude(value: String, share: f64, width: f32, bars: bool, cx: &App) -> Any
 // but construct/layout only intersecting read-only rows during prepaint. These
 // rows contain no focusable controls; sort, filter and pagination remain in flow.
 fn process_rows(
-    processes: std::rc::Rc<Vec<Value>>,
+    processes: std::rc::Rc<Vec<Process>>,
     range: std::ops::Range<usize>,
     wide: bool,
     memory_total: f64,
@@ -168,9 +178,9 @@ fn process_rows(
     .flex_shrink_0()
 }
 
-fn process_row(p: &Value, wide: bool, memory_total: f64, cx: &App) -> AnyElement {
-    let selector = format!("overview-process-{}", text(p, "pid"));
-    let state = match p["state"].as_str().unwrap_or("") {
+fn process_row(p: &Process, wide: bool, memory_total: f64, cx: &App) -> AnyElement {
+    let selector = format!("overview-process-{}", p.pid);
+    let state = match p.state.as_str() {
         "D" => " · Waiting on I/O",
         "Z" => " · Zombie",
         "T" => " · Stopped",
@@ -201,17 +211,13 @@ fn process_row(p: &Value, wide: bool, memory_total: f64, cx: &App) -> AnyElement
                     div()
                         .truncate()
                         .font_weight(FontWeight::MEDIUM)
-                        .child(format!("{}{state}", text(p, "name"))),
+                        .child(format!("{}{state}", p.name)),
                 )
                 .child(
                     label(
-                        p["command"]
-                            .as_str()
-                            .unwrap_or(if p["memory"].as_u64() == Some(0) {
-                                "Kernel thread"
-                            } else {
-                                ""
-                            })
+                        p.command
+                            .as_deref()
+                            .unwrap_or(if p.memory == 0 { "Kernel thread" } else { "" })
                             .to_owned(),
                     )
                     .text_size(px(crate::ui::FONT_SIZE))
@@ -219,30 +225,30 @@ fn process_row(p: &Value, wide: bool, memory_total: f64, cx: &App) -> AnyElement
                 ),
         )
         .child(
-            cell(text(p, "pid"), 72.)
+            cell(p.pid.to_string(), 72.)
                 .px(px(8.))
                 .text_right()
                 .text_color(cx.theme().muted_foreground),
         )
         .when(wide, |v| {
             v.child(
-                cell(text(p, "user"), 90.)
+                cell(p.user.clone(), 90.)
                     .px(px(8.))
                     .truncate()
                     .text_color(cx.theme().muted_foreground),
             )
         })
         .child(magnitude(
-            format!("{:.1}%", p["cpu"].as_f64().unwrap_or(0.)),
-            p["cpu"].as_f64().unwrap_or(0.),
+            format!("{:.1}%", p.cpu),
+            p.cpu,
             if wide { 124. } else { 65. },
             wide,
             cx,
         ))
         .child(magnitude(
-            bytes(&p["memory"]),
+            byte_size(p.memory as f64),
             if memory_total > 0. {
-                p["memory"].as_f64().unwrap_or(0.) / memory_total * 100.
+                p.memory as f64 / memory_total * 100.
             } else {
                 0.
             },
@@ -252,7 +258,7 @@ fn process_row(p: &Value, wide: bool, memory_total: f64, cx: &App) -> AnyElement
         ))
         .when(wide, |v| {
             v.child(
-                cell(elapsed(&p["elapsed"]), 85.)
+                cell(elapsed(p.elapsed), 85.)
                     .px(px(8.))
                     .text_right()
                     .text_color(cx.theme().muted_foreground),
@@ -314,7 +320,11 @@ impl Newport {
             state.input = Some(input);
         }
     }
-    pub(super) fn overview_processes(&self, data: &Value, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn overview_processes(
+        &self,
+        data: Option<&Snapshot>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(state) = self.overview_state.processes.get(&self.server) else {
             return div().into_any_element();
         };
@@ -323,15 +333,12 @@ impl Newport {
         };
         let requested_page = state.page;
         let preferences = self.overview_state.prefs(&self.server);
-        let source = data["processes"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
+        let source = data.map_or(&[][..], |data| &data.processes);
         let total = source.len();
         let filtering = !input.read(cx).value().trim().is_empty();
         let revision = self
             .resources
-            .get("page")
+            .get("overview")
             .map_or(0, |resource| resource.data_revision);
         let processes = state.ordered.borrow_mut().get(
             revision,
@@ -345,7 +352,8 @@ impl Newport {
         let range = page_range(count, requested_page);
         let page = range.start / PAGE_SIZE;
         let wide = self.content_width >= 720.;
-        let memory_total = data["memoryTotal"].as_f64().unwrap_or(0.);
+        let memory_total = data.map_or(0., |data| data.memory_total as f64);
+        let process_count = data.map_or_else(|| "—".into(), |data| data.process_count.to_string());
         let columns = if wide {
             vec![
                 (2, "Process", 0.),
@@ -378,7 +386,7 @@ impl Newport {
                         div()
                             .flex_1()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("Processes · {}", text(data, "processCount"))),
+                            .child(format!("Processes · {process_count}")),
                     )
                     .child(
                         div().w(px(crate::controls::SEARCH_WIDTH)).child(
@@ -411,7 +419,7 @@ impl Newport {
             .child(label(if filtering {
                 format!("Showing {count} of {total} collected processes")
             } else {
-                format!("The busiest and largest {total} of {} · CPU over the last second, as a share of one core", text(data, "processCount"))
+                format!("The busiest and largest {total} of {process_count} · CPU over the last second, as a share of one core")
             }).text_size(px(crate::ui::FONT_SIZE)))
             .child(
                 div()
@@ -473,11 +481,22 @@ mod tests {
         self as gpui, Context, IntoElement, Render, ScrollHandle, TestAppContext, Window, div,
         point, prelude::*, px, size,
     };
-    use serde_json::Value;
-    use serde_json::json;
+    use newport_protocol::monitor::metrics::Process;
+
+    fn process(pid: u32, name: &str, cpu: f64) -> Process {
+        Process {
+            pid,
+            name: name.into(),
+            cpu,
+            ..Default::default()
+        }
+    }
+    fn pids(rows: &[Process]) -> Vec<u32> {
+        rows.iter().map(|row| row.pid).collect()
+    }
 
     struct RowsFixture {
-        rows: std::rc::Rc<Vec<Value>>,
+        rows: std::rc::Rc<Vec<Process>>,
         range: std::ops::Range<usize>,
         scroll: ScrollHandle,
         wide: bool,
@@ -514,7 +533,14 @@ mod tests {
             theme::install(false, cx);
         });
         let (view, visual) = cx.add_window_view(|_, _| RowsFixture {
-            rows: std::rc::Rc::new((0..40).map(|pid| json!({"pid":pid,"name":format!("worker-{pid}"),"cpu":pid,"memory":1024})).collect()),
+            rows: std::rc::Rc::new(
+                (0..40)
+                    .map(|pid| Process {
+                        memory: 1024,
+                        ..process(pid, &format!("worker-{pid}"), f64::from(pid))
+                    })
+                    .collect(),
+            ),
             range: 0..20,
             scroll: ScrollHandle::new(),
             wide: true,
@@ -597,13 +623,15 @@ mod tests {
     fn benchmark_process_preparation() {
         use std::{hint::black_box, time::Instant};
         let rows: Vec<_> = (0..5000)
-            .map(|pid| {
-                json!({
-                    "pid": pid, "name": format!("worker-{}", 5000 - pid),
-                    "command": format!("/usr/bin/worker --project /srv/project-{pid} --listen"),
-                    "user": "service", "cpu": pid % 100, "memory": pid * 4096,
-                    "elapsed": pid * 10, "state": "S"
-                })
+            .map(|pid| Process {
+                command: Some(format!(
+                    "/usr/bin/worker --project /srv/project-{pid} --listen"
+                )),
+                user: "service".into(),
+                memory: u64::from(pid) * 4096,
+                elapsed: Some(u64::from(pid) * 10),
+                state: "S".into(),
+                ..process(pid, &format!("worker-{}", 5000 - pid), f64::from(pid % 100))
             })
             .collect();
         let start = Instant::now();
@@ -627,13 +655,10 @@ mod tests {
     }
     #[test]
     fn process_cache_reuses_redraws_and_invalidates_on_data_filter_and_sort() {
-        let source = vec![
-            json!({"pid":1,"cpu":1,"name":"node"}),
-            json!({"pid":2,"cpu":9,"name":"worker"}),
-        ];
+        let source = vec![process(1, "node", 1.), process(2, "worker", 9.)];
         let mut cache = ProcessCache::default();
         let first = cache.get(1, &source, "", 0, false);
-        assert_eq!(first[0]["pid"], 2);
+        assert_eq!(first[0].pid, 2);
         assert!(std::rc::Rc::ptr_eq(
             &first,
             &cache.get(1, &source, "", 0, false)
@@ -644,10 +669,10 @@ mod tests {
             &filtered,
             &cache.get(1, &source, "node", 0, false)
         ));
-        assert_eq!(cache.get(1, &source, "", 0, true)[0]["pid"], 1);
-        assert_eq!(cache.get(1, &source, "", 3, false)[0]["pid"], 2);
-        let updated = vec![json!({"pid":3,"cpu":20})];
-        assert_eq!(cache.get(2, &updated, "", 0, false)[0]["pid"], 3);
+        assert_eq!(cache.get(1, &source, "", 0, true)[0].pid, 1);
+        assert_eq!(cache.get(1, &source, "", 3, false)[0].pid, 2);
+        let updated = vec![process(3, "", 20.)];
+        assert_eq!(cache.get(2, &updated, "", 0, false)[0].pid, 3);
         assert!(cache.get(0, &[], "", 0, false).is_empty());
     }
     #[test]
@@ -661,34 +686,29 @@ mod tests {
     #[test]
     fn numeric_sort_and_ties_are_stable_before_pagination() {
         let rows = vec![
-            json!({"pid":10,"cpu":2}),
-            json!({"pid":2,"cpu":10}),
-            json!({"pid":1,"cpu":10}),
+            process(10, "", 2.),
+            process(2, "", 10.),
+            process(1, "", 10.),
         ];
         let sorted = ordered(rows.clone(), "", 0, false);
-        assert_eq!(
-            sorted
-                .iter()
-                .map(|p| p["pid"].as_u64().unwrap())
-                .collect::<Vec<_>>(),
-            vec![1, 2, 10]
-        );
-        assert_eq!(ordered(rows, "", 3, true)[2]["pid"], 10);
+        assert_eq!(pids(&sorted), vec![1, 2, 10]);
+        assert_eq!(ordered(rows, "", 3, true)[2].pid, 10);
     }
     #[test]
     fn text_sort_normalizes_case_and_keeps_pid_ties_ascending_in_both_directions() {
+        let row = |pid, name: &str| Process {
+            user: name.into(),
+            ..process(pid, name, 0.)
+        };
         let rows = vec![
-            json!({"pid":4,"name":"Beta","user":"Beta"}),
-            json!({"pid":2,"name":"alpha","user":"alpha"}),
-            json!({"pid":1,"name":"ALPHA","user":"ALPHA"}),
-            json!({"pid":3,"name":"beta","user":"beta"}),
+            row(4, "Beta"),
+            row(2, "alpha"),
+            row(1, "ALPHA"),
+            row(3, "beta"),
         ];
         for column in [2, 4] {
             for (ascending, expected) in [(true, vec![1, 2, 3, 4]), (false, vec![3, 4, 1, 2])] {
-                let actual: Vec<_> = ordered(rows.clone(), "", column, ascending)
-                    .iter()
-                    .map(|row| row["pid"].as_u64().unwrap())
-                    .collect();
+                let actual = pids(&ordered(rows.clone(), "", column, ascending));
                 assert_eq!(actual, expected);
             }
         }
@@ -698,13 +718,19 @@ mod tests {
     #[test]
     fn process_search_sort_and_missing_elapsed() {
         let rows = vec![
-            json!({"pid":2,"name":"node","command":"node /project/api","cpu":3}),
-            json!({"pid":1,"name":"worker","user":"service","cpu":20}),
+            Process {
+                command: Some("node /project/api".into()),
+                ..process(2, "node", 3.)
+            },
+            Process {
+                user: "service".into(),
+                ..process(1, "worker", 20.)
+            },
         ];
-        assert_eq!(ordered(rows.clone(), "", 0, false)[0]["pid"], 1);
-        assert_eq!(ordered(rows.clone(), "API", 0, false)[0]["pid"], 2);
+        assert_eq!(ordered(rows.clone(), "", 0, false)[0].pid, 1);
+        assert_eq!(ordered(rows.clone(), "API", 0, false)[0].pid, 2);
         assert_eq!(ordered(rows, "service", 0, false).len(), 1);
-        assert_eq!(elapsed(&json!(3661)), "1h 1m");
-        assert_eq!(elapsed(&json!(null)), "—");
+        assert_eq!(elapsed(Some(3661)), "1h 1m");
+        assert_eq!(elapsed(None), "—");
     }
 }

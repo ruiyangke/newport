@@ -165,6 +165,8 @@ impl Client {
             self.next().unwrap(),
             ServerMessage::Attached { .. }
         ));
+        // The shell's size, which the screen is drawn at, comes first.
+        assert!(matches!(self.next().unwrap(), ServerMessage::Size { .. }));
         assert!(matches!(self.next().unwrap(), ServerMessage::Screen(_)));
         let ServerMessage::Full(full) = self.next().unwrap() else {
             panic!("missing full snapshot")
@@ -174,6 +176,14 @@ impl Client {
             .read_to_end(&mut decoded)
             .unwrap();
         decoded
+    }
+    /// The next shell size the holder tells this client.
+    fn shell_size(&mut self) -> Option<(u16, u16)> {
+        loop {
+            if let ServerMessage::Size { columns, rows } = self.next()? {
+                return Some((columns, rows));
+            }
+        }
     }
     fn active(&mut self) -> Option<bool> {
         loop {
@@ -282,7 +292,11 @@ fn several_macs_share_a_shell_and_the_one_last_used_sets_its_size() {
     assert_eq!(holder.record()["columns"], 80, "the Air is still active");
 
     studio.send(ClientMessage::Activate);
+    // Every Mac draws the shell at its one size, as tmux's clients do: the
+    // Air is told the Studio's size before any output drawn at it.
+    assert_eq!(studio.shell_size(), Some((100, 30)));
     assert_eq!(studio.active(), Some(true));
+    assert_eq!(air.shell_size(), Some((100, 30)));
     assert_eq!(air.active(), Some(false));
     until(|| holder.record()["columns"] == 100, "the Studio's size");
     let names = |record: serde_json::Value| -> Vec<(String, bool)> {
@@ -300,7 +314,9 @@ fn several_macs_share_a_shell_and_the_one_last_used_sets_its_size() {
     );
 
     air.send(ClientMessage::Activate);
+    assert_eq!(air.shell_size(), Some((80, 24)));
     assert_eq!(air.active(), Some(true));
+    assert_eq!(studio.shell_size(), Some((80, 24)));
     assert_eq!(studio.active(), Some(false));
     air.input(b"stty size\n");
     air.output_until("24 80");
@@ -424,6 +440,55 @@ fn the_record_carries_the_title_for_tabs_not_attached_yet() {
     until(|| holder.record()["title"] == "dev@host: ~", "the title");
     let mut client = holder.attach();
     client.greeting();
+    client.send(ClientMessage::End);
+}
+
+#[test]
+fn a_status_lasts_only_as_long_as_the_program_that_reported_it() {
+    let server = Server::new();
+    // Reports that it is working, then dies without clearing it, as an
+    // agent killed with SIGKILL does. The record follows within a tick, so
+    // it runs long enough to still be running after the check below.
+    let agent = server.home.join("agent.sh");
+    std::fs::write(
+        &agent,
+        "printf '\\033]7501;state=working:app=claude-code\\033\\\\'\nsleep 5\nkill -9 $$\n",
+    )
+    .unwrap();
+    // Job control runs each command in its own foreground process group,
+    // as an interactive shell does.
+    let holder =
+        server.start(r#"exec sh -c 'set -m; while IFS= read -r line; do eval "$line"; done'"#);
+    let mut client = holder.attach();
+    client.greeting();
+    client.input(format!("sh {}\n", agent.display()).as_bytes());
+    until(
+        || holder.record()["agent"] == "state=working:app=claude-code",
+        "the status",
+    );
+    std::thread::sleep(Duration::from_millis(1200));
+    assert_eq!(
+        holder.record()["agent"],
+        "state=working:app=claude-code",
+        "it lasts while its program runs"
+    );
+    until(
+        || holder.record()["agent"].is_null(),
+        "the status to go with its program",
+    );
+    client.output_until("\x1b]7501;state=clear");
+    client.send(ClientMessage::End);
+}
+
+#[test]
+fn the_status_producer_finds_its_reports_supported() {
+    let server = Server::new();
+    let producer = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/agent-status/osc7501.sh");
+    let holder = server.start(&format!("sh {} probe; sleep 1000", producer.display()));
+    let mut client = holder.attach();
+    client.greeting();
+    client.output_until("supported: the terminal answered OSC 7501 before DA1");
     client.send(ClientMessage::End);
 }
 
@@ -556,6 +621,196 @@ fn end_stops_the_shell_and_removes_the_files() {
     until(|| holder.files().is_empty(), "the holder's files to go");
 }
 
+/// A field of `/proc/<pid>/stat` after the command name, which may itself
+/// hold spaces and parentheses: 1 is the parent, 2 the process group.
+fn stat_field(pid: libc::pid_t, field: usize) -> libc::pid_t {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let fields = &stat[stat.rfind(')').unwrap() + 2..];
+    fields
+        .split_whitespace()
+        .nth(field)
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+fn parent_of(pid: libc::pid_t) -> libc::pid_t {
+    stat_field(pid, 1)
+}
+
+fn alive(pid: libc::pid_t) -> bool {
+    // A collected process is gone; a zombie still has its stat, in state Z.
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .is_ok_and(|stat| !stat[stat.rfind(')').unwrap() + 2..].starts_with('Z'))
+}
+
+fn send_signal(pid: libc::pid_t, signal: libc::c_int) {
+    // SAFETY: kill takes scalar arguments; the pid is one this test started.
+    assert_eq!(
+        unsafe { libc::kill(pid, signal) },
+        0,
+        "signal {signal} to {pid}"
+    );
+}
+
+/// The running reapers of the terminal `id`.
+fn reapers(id: &str) -> Vec<libc::pid_t> {
+    let needle = format!("terminal\0reaper\0{id}\0");
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<libc::pid_t>().ok())
+        .filter(|&pid| {
+            alive(pid)
+                && std::fs::read(format!("/proc/{pid}/cmdline"))
+                    .is_ok_and(|line| String::from_utf8_lossy(&line).contains(&needle))
+        })
+        .collect()
+}
+
+impl Holder {
+    fn pid(&self) -> libc::pid_t {
+        self.record()["pid"].as_i64().unwrap() as libc::pid_t
+    }
+}
+
+impl Client {
+    /// How the shell ended, once the holder says so and closes.
+    fn exit(&mut self) -> Option<Exit> {
+        let mut exit = None;
+        while let Some(frame) = self.next() {
+            if let ServerMessage::Exit(value) = frame {
+                exit = Some(value);
+            }
+        }
+        exit
+    }
+}
+
+/// Leaves a process whose parent has exited, as the `( … ) &` of a cleanup
+/// that is itself killed does; returns its pid.
+fn orphan(server: &Server, client: &mut Client) -> libc::pid_t {
+    let pid_file = server.home.join("orphan");
+    client.input(
+        format!(
+            "(sleep 1000 & echo $! > {}.new; mv {0}.new {0})\n",
+            pid_file.display()
+        )
+        .as_bytes(),
+    );
+    until(|| pid_file.exists(), "the orphan's pid");
+    std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn a_kill_aimed_at_an_orphans_parent_never_ends_the_terminal() {
+    let server = Server::new();
+    let holder = server.start(SHELL);
+    let mut client = holder.attach();
+    client.greeting();
+    let orphan = orphan(&server, &mut client);
+    // `kill $(ps -o ppid= -p <orphan>)`: the cleanup's guess at a parent.
+    until(
+        || parent_of(orphan) != holder.pid() && reapers(&holder.id).contains(&parent_of(orphan)),
+        "the reaper to adopt it",
+    );
+    let parent = parent_of(orphan);
+    // `kill -- -<its group>` reaches the reaper alone, never the holder.
+    let group = stat_field(parent, 2);
+    assert_ne!(group, stat_field(holder.pid(), 2));
+    send_signal(-group, libc::SIGTERM);
+    for signal in [
+        libc::SIGTERM,
+        libc::SIGINT,
+        libc::SIGHUP,
+        libc::SIGQUIT,
+        libc::SIGUSR1,
+    ] {
+        send_signal(parent, signal);
+    }
+    client.input(b"echo still-$((40 + 2))\n");
+    client.output_until("still-42");
+    assert!(
+        alive(parent),
+        "the reaper ignores what a mistaken kill sends"
+    );
+    // A reaper killed outright leaves the terminal running too: the holder
+    // takes the shell back and still learns how it ends.
+    send_signal(parent, libc::SIGKILL);
+    until(|| !alive(parent), "the reaper to go");
+    client.input(b"echo again-$((40 + 2))\n");
+    client.output_until("again-42");
+    client.send(ClientMessage::End);
+    assert_eq!(client.exit(), Some(Exit::Signal(libc::SIGHUP as u32)));
+    until(|| holder.files().is_empty(), "the holder's files to go");
+}
+
+#[test]
+fn a_holder_ignores_stray_signals_and_ends_its_shell_on_sigterm() {
+    let server = Server::new();
+    let holder = server.start(SHELL);
+    let mut client = holder.attach();
+    client.greeting();
+    for signal in [
+        libc::SIGHUP,
+        libc::SIGQUIT,
+        libc::SIGTSTP,
+        libc::SIGUSR1,
+        libc::SIGUSR2,
+        libc::SIGPIPE,
+    ] {
+        send_signal(holder.pid(), signal);
+    }
+    client.input(b"echo still-$((40 + 2))\n");
+    client.output_until("still-42");
+    send_signal(holder.pid(), libc::SIGTERM);
+    // Ended as Close ends it: the shell hung up, every client told.
+    assert_eq!(client.exit(), Some(Exit::Signal(libc::SIGHUP as u32)));
+    until(|| holder.files().is_empty(), "the holder's files to go");
+    until(|| reapers(&holder.id).is_empty(), "the reaper to leave");
+}
+
+#[test]
+fn a_shell_starts_with_the_signals_of_one_started_anywhere_else() {
+    // Shells ignore some signals for what they run, so the shell is compared
+    // with one this test starts the same way, not with all defaults.
+    const PROBE: &str = "grep -E '^Sig(Ign|Blk)' /proc/self/status";
+    let started_here = Command::new("/bin/sh")
+        .args(["-c", &format!("exec sh -c \"{PROBE}; true\"")])
+        .output()
+        .unwrap();
+    let expected = String::from_utf8(started_here.stdout).unwrap();
+    let server = Server::new();
+    let holder = server.start(SHELL);
+    let mut client = holder.attach();
+    client.greeting();
+    client.input(format!("{PROBE}; echo done-$((40 + 2))\n").as_bytes());
+    let seen = client.output_until("done-42").replace('\r', "");
+    for line in expected.lines() {
+        assert!(seen.contains(line), "{line:?} missing from {seen:?}");
+    }
+    client.send(ClientMessage::End);
+}
+
+#[test]
+fn the_reaper_leaves_with_the_shell_and_its_orphans() {
+    let server = Server::new();
+    let holder = server.start(SHELL);
+    let mut client = holder.attach();
+    client.greeting();
+    let orphan = orphan(&server, &mut client);
+    assert_eq!(reapers(&holder.id).len(), 1);
+    client.send(ClientMessage::End);
+    client.exit();
+    // The orphan is in the shell's process group, so the hangup reaches it.
+    until(|| !alive(orphan), "the orphan to end");
+    until(|| reapers(&holder.id).is_empty(), "the reaper to leave");
+}
+
 #[test]
 fn a_shell_that_exits_while_detached_reports_on_the_next_attach() {
     let server = Server::new();
@@ -596,6 +851,75 @@ fn a_client_that_stops_reading_never_stalls_the_shell() {
     let mut fresh = holder.attach();
     fresh.greeting();
     fresh.send(ClientMessage::End);
+}
+
+#[test]
+fn a_shell_whose_history_outgrows_one_snapshot_can_still_be_opened() {
+    use std::fmt::Write;
+    let server = Server::new();
+    // Attributes and three colours on every cell: kilobytes a row once
+    // written back, so a full scrollback passes the snapshot limit.
+    let mut heavy = String::new();
+    for i in 0..newport_terminal::SCROLLBACK_ROWS + 24 {
+        let _ = write!(heavy, "row-{i:05}");
+        for x in 9..80 {
+            let _ = write!(
+                heavy,
+                "\x1b[1;3;4;38;2;{};{};{};48;2;{};{};{};58;2;{};{};{}mx",
+                (i + x) % 256,
+                (i * 3 + x) % 256,
+                (i * 7 + x) % 256,
+                (i * 11 + x) % 256,
+                (i * 13 + x) % 256,
+                (i * 17 + x) % 256,
+                (i * 19 + x) % 256,
+                (i * 23 + x) % 256,
+                (i * 29 + x) % 256,
+            );
+        }
+        heavy.push_str("\x1b[m\r\n");
+    }
+    assert!(
+        heavy.len() > protocol::MAX_SNAPSHOT,
+        "written back whole, the history would not fit one snapshot"
+    );
+    let file = server.home.join("heavy");
+    std::fs::write(&file, heavy).unwrap();
+
+    let holder = server.start(SHELL);
+    let mut client = holder.attach();
+    client.greeting();
+    client.input(format!("cat {}\n", file.display()).as_bytes());
+    drop(client);
+
+    let last = format!("row-{:05}", newport_terminal::SCROLLBACK_ROWS + 23);
+    let check = |snapshot: &[u8]| {
+        assert!(
+            snapshot.len() <= protocol::MAX_SNAPSHOT,
+            "{}",
+            snapshot.len()
+        );
+        assert!(contains(snapshot, "row-04500"), "recent history is kept");
+        assert!(
+            !contains(snapshot, "row-01000"),
+            "older history makes room before the row limit would drop it"
+        );
+    };
+    // Each attach until the holder has read it all must succeed too.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let snapshot = holder.attach().greeting();
+        assert!(snapshot.len() <= protocol::MAX_SNAPSHOT);
+        if contains(&snapshot, &last) {
+            check(&snapshot);
+            break;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {last}");
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let mut again = holder.attach();
+    check(&again.greeting());
+    again.send(ClientMessage::End);
 }
 
 #[test]

@@ -6,6 +6,7 @@ use gpui_kit::{
     base::input::Rope,
     component::highlighter::{HighlightTheme, SyntaxHighlighter},
 };
+use serde_json::json;
 use std::{cell::RefCell, ops::Range, rc::Rc, sync::Arc, time::Duration};
 
 type Span = (Range<usize>, HighlightStyle);

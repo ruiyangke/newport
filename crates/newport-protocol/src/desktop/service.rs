@@ -93,7 +93,7 @@ impl containers::Reply {
             Self::ProjectAction(value) => c::Reply::ProjectAction(value.as_ref().clone()),
             Self::Remove(value) => c::Reply::Removed(value.as_ref().clone()),
             Self::Disk(value) => c::Reply::Disk(value.as_ref().clone()),
-            Self::Prune(value) => c::Reply::Pruned(value.as_ref().clone()),
+            Self::Prune(value) => c::Reply::Pruned(**value),
             Self::ComposeProject(value) => {
                 return monitor::Reply::Compose(compose::Reply::Project(value.as_ref().clone()));
             }

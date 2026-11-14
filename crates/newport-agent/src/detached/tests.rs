@@ -76,9 +76,38 @@ fi"#
             &self.linger(),
             self.path("systemd-run").as_os_str(),
             "newport-display",
+            &[],
             &["--display-process".to_owned()],
         )
         .unwrap();
+    }
+
+    /// Starts a held terminal, as the terminal worker does.
+    fn launch_terminal(&self) {
+        launch_with(
+            &self.linger(),
+            self.path("systemd-run").as_os_str(),
+            "newport-terminal-0123",
+            TERMINAL_SCOPE,
+            &["terminal".to_owned()],
+        )
+        .unwrap();
+    }
+
+    /// The scope properties each systemd-run call asked for, since the last
+    /// call of `calls`.
+    fn scope_properties(&self) -> Vec<Vec<String>> {
+        fs::read_to_string(self.path("log"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.starts_with("systemd-run "))
+            .map(|line| {
+                line.split_whitespace()
+                    .filter_map(|a| a.strip_prefix("--property="))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .collect()
     }
 
     fn launch_until(&self, deadline: Instant) -> io::Result<()> {
@@ -209,6 +238,53 @@ fn an_account_that_lingered_already_is_left_alone() {
 }
 
 #[test]
+fn a_terminal_scope_outlives_one_process_killed_for_memory_and_hangs_up_shells() {
+    let server = Server::new(true);
+    server.launch_terminal();
+    assert_eq!(
+        server.scope_properties(),
+        [["OOMPolicy=continue", "SendSIGHUP=yes"]]
+    );
+    assert_eq!(
+        server.calls(),
+        [
+            "loginctl show-user 1000 -p Linger",
+            "systemd-run --unit=newport-terminal-0123"
+        ]
+    );
+}
+
+#[test]
+fn a_systemd_that_refuses_oom_policy_on_a_scope_still_scopes_the_terminal() {
+    let server = Server::new(true);
+    let log = server.path("log").display().to_string();
+    tool(
+        server.directory.path(),
+        "systemd-run",
+        &format!(
+            r#"echo "systemd-run $*" >> '{log}'
+case "$*" in *OOMPolicy*) exit 1 ;; esac"#
+        ),
+    );
+    server.launch_terminal();
+    assert_eq!(
+        server.scope_properties(),
+        [
+            vec!["OOMPolicy=continue", "SendSIGHUP=yes"],
+            vec!["SendSIGHUP=yes"]
+        ]
+    );
+    assert_eq!(
+        server.calls(),
+        [
+            "loginctl show-user 1000 -p Linger",
+            "systemd-run --unit=newport-terminal-0123",
+            "systemd-run --unit=newport-terminal-0123",
+        ]
+    );
+}
+
+#[test]
 fn an_account_that_may_not_linger_still_starts_its_scope_unmarked() {
     let server = Server::new(false);
     fs::write(server.path("refuse"), "").unwrap();
@@ -286,6 +362,7 @@ fn without_state_lingering_is_never_turned_on() {
         &linger,
         server.path("systemd-run").as_os_str(),
         "newport-display",
+        &[],
         &[],
     )
     .unwrap();

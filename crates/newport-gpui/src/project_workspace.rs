@@ -190,6 +190,130 @@ impl RenderOnce for DocumentTab {
     }
 }
 
+/// A tab being dragged along its strip, known there by `id`. Only the strip
+/// it came from takes it.
+#[derive(Clone)]
+pub(crate) struct DraggedTab<K> {
+    pub strip: EntityId,
+    pub id: K,
+    pub title: SharedString,
+    pub icon: Option<IconName>,
+}
+
+/// The dragged tab under the pointer. It stays in its strip's row, as native
+/// tabs do, so only the pointer's horizontal movement moves it.
+pub(crate) struct DraggedTabView<K> {
+    tab: DraggedTab<K>,
+    row: Pixels,
+}
+
+impl<K: Clone> DraggedTabView<K> {
+    pub(crate) fn new(tab: &DraggedTab<K>, window: &Window) -> Self {
+        Self {
+            tab: tab.clone(),
+            row: window.mouse_position().y,
+        }
+    }
+}
+
+impl<K: 'static> Render for DraggedTabView<K> {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let icon = self.tab.icon.map(|icon| {
+            Icon::new(icon)
+                .size(px(16.))
+                .flex_shrink_0()
+                .into_any_element()
+        });
+        div()
+            .relative()
+            .top(self.row - window.mouse_position().y)
+            .shadow_md()
+            .child(
+                document_tab("dragged-tab", true, icon, cx)
+                    .unfocusable()
+                    .border_1()
+                    .child(document_tab_title(self.tab.title.clone())),
+            )
+    }
+}
+
+/// Where a dragged tab at `from` goes for a pointer at `pointer`, given the
+/// middles of the strip's tabs on screen: past each tab's middle on the far
+/// side from the dragged tab, it takes that tab's place. Measuring from the
+/// middle keeps tabs of different widths from swapping back and forth.
+pub(crate) fn dragged_tab_target(
+    from: usize,
+    middles: &[Option<Pixels>],
+    pointer: Pixels,
+) -> Option<usize> {
+    let past = |index: usize, forward: bool| {
+        middles.get(index).copied().flatten().is_some_and(|middle| {
+            if forward {
+                pointer > middle
+            } else {
+                pointer < middle
+            }
+        })
+    };
+    let mut to = from;
+    while past(to + 1, true) {
+        to += 1;
+    }
+    if to == from {
+        while to > 0 && past(to - 1, false) {
+            to -= 1;
+        }
+    }
+    (to != from).then_some(to)
+}
+
+/// The on-screen middles of `count` tabs that start at child `first` of a
+/// scrolled strip.
+pub(crate) fn tab_middles(
+    scroll: &ScrollHandle,
+    first: usize,
+    count: usize,
+) -> Vec<Option<Pixels>> {
+    let offset = scroll.offset().x;
+    (first..first + count)
+        .map(|child| {
+            scroll
+                .bounds_for_item(child)
+                .map(|tab| tab.center().x + offset)
+        })
+        .collect()
+}
+
+/// How far to scroll a tab strip, at each step while a tab is dragged with the
+/// pointer at `pointer`, so tabs beyond its edges come into reach: faster the
+/// closer the pointer is to the edge, and not at all away from both.
+pub(crate) fn drag_scroll_step(pointer: Pixels, strip: Bounds<Pixels>) -> Pixels {
+    const EDGE: f32 = 32.;
+    const FASTEST: f32 = 12.;
+    let depth = |inside: Pixels| (f32::from(inside) / EDGE).clamp(0., 1.) * FASTEST;
+    let left = strip.left() + px(EDGE) - pointer;
+    let right = pointer - (strip.right() - px(EDGE));
+    if left > px(0.) {
+        px(depth(left))
+    } else if right > px(0.) {
+        px(-depth(right))
+    } else {
+        px(0.)
+    }
+}
+
+/// Scrolls `scroll` horizontally by `step`, within its content. False when
+/// it is already at that end.
+pub(crate) fn scroll_strip(scroll: &ScrollHandle, step: Pixels) -> bool {
+    let offset = scroll.offset();
+    let x = (offset.x + step).clamp(-scroll.max_offset().x, px(0.));
+    if x == offset.x {
+        return false;
+    }
+    scroll.set_offset(point(x, offset.y));
+    true
+}
+
 fn status_view_button(
     id: &'static str,
     icon: IconName,
@@ -516,10 +640,18 @@ impl Newport {
         let unchanged = match &document.key {
             ReviewKey::File { path, staged } => {
                 self.git.tab == 0
-                    && text(&self.git.selected["path"], "display") == *path
+                    && self
+                        .git
+                        .entry()
+                        .map_or("—", |entry| entry.path.display.as_str())
+                        == path.as_str()
                     && self.git.diff_staged == *staged
-                    && !self.git.diff.is_null()
-                    && self.git.page["snapshot"] == document.status["snapshot"]
+                    && self.git.diff.is_some()
+                    && self.git.page.as_ref().map(git_listing::Listing::snapshot)
+                        == document
+                            .status
+                            .as_deref()
+                            .map(git_listing::Listing::snapshot)
                     && self.git.error.is_none()
                     && ["git-list", "git-diff", "git-diff-more"].iter().all(|key| {
                         self.resources
@@ -541,24 +673,25 @@ impl Newport {
                 }
             });
         }
-        self.git.selected = document.entry.clone();
+        self.git.selected = Some(document.entry.clone());
         self.git.detail_open = true;
         match document.key {
             ReviewKey::File { path, staged } => {
                 // A filtered navigator is not evidence that a retained file vanished.
                 // Retain its snapshot; the backend rejects stale comparisons safely.
-                self.git.page = (*document.status).clone();
-                if let Some(editor) = self.code_workspace() {
-                    let page = editor.read(cx).navigator.collections[0].page().clone();
-                    if let Some(entry) = page["entries"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .find(|entry| text(&entry["path"], "display") == path)
-                    {
-                        self.git.page = (*page).clone();
-                        self.git.selected = entry.clone();
-                    }
+                self.git.page = document.status.as_deref().cloned();
+                if let Some(editor) = self.code_workspace()
+                    && let Some(page) = editor.read(cx).navigator.collections[0].page().cloned()
+                    && let Some(entry) = page.status().and_then(|status| {
+                        status
+                            .entries
+                            .iter()
+                            .find(|entry| entry.path.display == path)
+                            .cloned()
+                    })
+                {
+                    self.git.page = Some((*page).clone());
+                    self.git.selected = Some(git_listing::Entry::Change(entry));
                 }
                 // This navigator has already obtained the exact status page
                 // for the selected entry. Retire a suspended/failed list
@@ -566,8 +699,16 @@ impl Newport {
                 self.resources.invalidate("git-list");
                 self.resources.invalidate("git-more");
                 if let Some(generation) = self.resources.begin("git-list") {
-                    self.resources
-                        .complete("git-list", generation, Ok(self.git.page.clone()));
+                    let reply = self.git.page.clone().map(git_listing::Listing::into_reply);
+                    match reply {
+                        Some(reply) => {
+                            self.resources
+                                .complete_git("git-list", generation, Ok(reply));
+                        }
+                        None => {
+                            self.resources.complete("git-list", generation, Ok(()));
+                        }
+                    }
                 }
                 self.git_select_side(staged);
             }
@@ -614,10 +755,13 @@ impl Newport {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let editor = self.code_workspace().expect("workspace exists");
-        if self.git.tab == 0 && editor.read(cx).reviewing {
+        if self.git.tab == 0
+            && editor.read(cx).reviewing
+            && let Some(entry) = self.git.entry().cloned()
+        {
             editor.update(cx, |e, cx| {
                 if e.navigator.documents.reconcile_file(
-                    self.git.selected.clone(),
+                    entry,
                     self.git.page.clone(),
                     self.git.diff_staged,
                 ) {

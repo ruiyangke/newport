@@ -5,7 +5,7 @@ use crate::containers::{
 };
 use gpui_kit as gpui;
 use gpui_kit::{ClipboardItem, Entity, TestAppContext, VisualTestContext, point, px, size};
-use newport_domain::containers::{
+use newport_protocol::monitor::containers::{
     ContainerInspect, EnvVar, HealthResult, Healthcheck, Mount, Network,
 };
 use std::{thread, time::Duration};

@@ -22,7 +22,7 @@ struct Confirmation {
 impl Newport {
     pub(super) fn git_can_discard(&self) -> bool {
         (self.git_can_change_index(true) || self.git_can_change_index(false))
-            && Review::file(&self.git.page, &self.git.selected).is_ok()
+            && Review::file(self.git.status_page(), self.git.entry()).is_ok()
     }
     pub(super) fn prepare_git_discard(
         &mut self,
@@ -34,7 +34,10 @@ impl Newport {
             return;
         }
         let (review, comparison) = if let Some((review, hunks, lines)) = partial {
-            let snapshot = text(self.diff_page(), "snapshot");
+            let snapshot = self
+                .diff_page()
+                .map(|page| page.snapshot.clone())
+                .unwrap_or_default();
             if !git_diff_actions::current(
                 self,
                 &self.server,
@@ -49,7 +52,7 @@ impl Newport {
             };
             (target, Some((review, snapshot)))
         } else {
-            let Ok(review) = Review::file(&self.git.page, &self.git.selected) else {
+            let Ok(review) = Review::file(self.git.status_page(), self.git.entry()) else {
                 return;
             };
             (review, None)
@@ -110,8 +113,12 @@ impl Confirmation {
             && owner.git_repository_id() == self.repo
             && owner.git_can_discard()
             && self.review.matches(
-                &text(&owner.git.page, "snapshot"),
-                &text(&owner.git.selected, "entryId"),
+                owner.git.snapshot(),
+                owner
+                    .git
+                    .entry()
+                    .map(|entry| entry.entry_id.as_str())
+                    .unwrap_or_default(),
             )
             && self.comparison.as_ref().is_none_or(|(review, diff)| {
                 git_diff_actions::current(owner, &self.server, &self.repo, diff, review)

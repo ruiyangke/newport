@@ -46,6 +46,8 @@ It should list commits without asking anything. Answer any host key question the
 
 Saving doesn't commit, and committing doesn't push. Newport asks before you quit with unsaved edits.
 
+Drag a file tab, or choose **Workspace** > **Move tab left** or **Move tab right**, to move it. Your file tabs open again, in the same order, the next time you open the project; each file is read when you first show its tab.
+
 You can keep 20 tabs in each worktree. Opening another file automatically closes the first unchanged tab in tab order. Tabs with unsaved edits, a save or reload in progress, or an unresolved remote conflict stay open. If every tab needs to stay open, save or close one before opening another file. You can edit files up to 16 MiB. Larger files, and files with very long lines, open read-only in sections, with **Previous** and **Next**.
 
 For completion, error marks and refactoring, see [Language tools](language-servers.md).

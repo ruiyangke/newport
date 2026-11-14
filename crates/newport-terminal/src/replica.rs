@@ -7,26 +7,40 @@ use crate::{
     engine::SCROLLBACK_ROWS,
     snapshot::{self, WrittenRow},
 };
-use alacritty_terminal::{grid::Dimensions, index::Line, term::TermMode};
+use alacritty_terminal::{
+    grid::{Dimensions, Grid},
+    index::Line,
+    term::{TermMode, cell::Cell},
+};
 use std::collections::VecDeque;
 
 /// History rows gathered in the engine before they are moved to the text
 /// store, so a burst of output is written out in one pass.
 const SPILL_BATCH: usize = 256;
+/// The most bytes a full [`Snapshot`] takes, unless the screen alone takes
+/// more. The oldest history is left out of a snapshot that would take more.
+pub const SNAPSHOT_BUDGET: usize = 15 << 20;
+/// The bytes of written history text kept. A row with a colour on every cell
+/// takes kilobytes, so heavy output reaches this bound before
+/// [`SCROLLBACK_ROWS`]. The rest of [`SNAPSHOT_BUDGET`] is the screen's.
+const HISTORY_BYTES: usize = SNAPSHOT_BUDGET / 2;
 
 /// Output that brings a fresh [`Engine`] to a replica's state; see
 /// [`Engine::restore`].
 pub struct Snapshot {
     /// The visible screen alone.
     pub screen: Vec<u8>,
-    /// History and screen together. It replaces what `screen` drew: history
-    /// can't be added above a screen that is already drawn.
+    /// The screen with as much of the newest history as fits in
+    /// [`SNAPSHOT_BUDGET`]. It replaces what `screen` drew: history can't be
+    /// added above a screen that is already drawn.
     pub full: Vec<u8>,
 }
 
 pub struct Replica {
     engine: Engine,
     history: VecDeque<WrittenRow>,
+    /// What `history` takes in a snapshot.
+    history_bytes: usize,
     title: Option<String>,
     prompted: bool,
 }
@@ -36,6 +50,7 @@ impl Replica {
         Ok(Self {
             engine: Engine::new(columns, rows)?,
             history: VecDeque::new(),
+            history_bytes: 0,
             title: None,
             prompted: false,
         })
@@ -67,6 +82,15 @@ impl Replica {
         self.title.as_deref()
     }
 
+    /// What the shell's programs report about themselves, for a held
+    /// shell's record: the entry that most needs the person, as its report.
+    pub fn agent_report(&self) -> Option<String> {
+        self.engine
+            .program_statuses()
+            .most_urgent()
+            .map(crate::ProgramStatus::report)
+    }
+
     /// The colours the program's colour queries are answered with: those of
     /// the tab that last used the shell, which the server can't know itself.
     pub fn set_colors(
@@ -96,12 +120,23 @@ impl Replica {
         if term.mode().contains(TermMode::ALT_SCREEN) || term.history_size() < SPILL_BATCH {
             return;
         }
-        let grid = term.grid();
-        for h in (1..=grid.history_size() as i32).rev() {
-            self.history.push_back(snapshot::write_row(grid, Line(-h)));
+        self.move_history();
+    }
+
+    /// Moves the active grid's history to the text store, dropping the
+    /// oldest stored rows past either bound.
+    fn move_history(&mut self) {
+        for mut row in grid_history(self.engine.terminal.grid()) {
+            row.text.shrink_to_fit();
+            self.history_bytes += row.written_len();
+            self.history.push_back(row);
         }
-        let excess = self.history.len().saturating_sub(SCROLLBACK_ROWS);
-        self.history.drain(..excess);
+        while self.history.len() > SCROLLBACK_ROWS || self.history_bytes > HISTORY_BYTES {
+            let Some(row) = self.history.pop_front() else {
+                break;
+            };
+            self.history_bytes -= row.written_len();
+        }
         self.engine.terminal.grid_mut().clear_history();
     }
 
@@ -115,35 +150,29 @@ impl Replica {
             .contains(TermMode::ALT_SCREEN)
             .then(|| {
                 let mut rows = String::new();
-                snapshot::write_grid(&mut rows, engine.terminal.grid(), false);
+                snapshot::write_grid(&mut rows, engine.terminal.grid());
                 let mut cursor = String::new();
                 snapshot::write_active_cursor(&mut cursor, &engine.terminal, &engine.extensions);
                 engine.terminal.swap_alt();
                 (rows, cursor)
             });
-
-        let mut full = String::new();
-        for row in &self.history {
-            full.push_str(&row.text);
-            if !row.wraps {
-                full.push_str("\r\n");
-            }
-        }
-        snapshot::write_grid(&mut full, engine.terminal.grid(), true);
+        // The grid's history, written aside rather than moved: a client
+        // restored from this snapshot keeps it in its grid, and growing the
+        // window pulls it back onto the screen there and here alike.
+        let unspilled = grid_history(engine.terminal.grid());
         let mut screen = String::new();
-        snapshot::write_grid(&mut screen, engine.terminal.grid(), false);
-
-        let mut state = String::new();
+        snapshot::write_grid(&mut screen, engine.terminal.grid());
         snapshot::write_state(
-            &mut state,
+            &mut screen,
             &engine.terminal,
             &engine.extensions,
             alternate.as_ref().map(|(rows, _)| rows.as_str()),
             self.title.as_deref(),
+            &engine.program_statuses,
         );
         match &alternate {
             Some((rows, cursor)) => {
-                state.push_str(cursor);
+                screen.push_str(cursor);
                 // Swapping back would clear the alternate screen; replaying
                 // it restores the replica, entered as the program entered it.
                 let enter = if engine.extensions.primary_saved.is_some() {
@@ -154,13 +183,52 @@ impl Replica {
                 let back = format!("{enter}\x1b[H{rows}{cursor}");
                 let _ = engine.advance(back.as_bytes());
             }
-            None => snapshot::write_active_cursor(&mut state, &engine.terminal, &engine.extensions),
+            None => {
+                snapshot::write_active_cursor(&mut screen, &engine.terminal, &engine.extensions)
+            }
         }
+
+        // The newest history that fits beside the screen, which is never cut.
+        let room = SNAPSHOT_BUDGET.saturating_sub(screen.len());
+        let history = || self.history.iter().chain(&unspilled);
+        let (kept, bytes) = newest_that_fit(history().rev(), room);
+        let mut full = String::with_capacity(bytes + screen.len());
+        for row in history().skip(self.history.len() + unspilled.len() - kept) {
+            full.push_str(&row.text);
+            if !row.wraps {
+                full.push_str("\r\n");
+            }
+        }
+        full.push_str(&screen);
         Snapshot {
-            screen: (screen + &state).into_bytes(),
-            full: (full + &state).into_bytes(),
+            screen: screen.into_bytes(),
+            full: full.into_bytes(),
         }
     }
+}
+
+/// The grid's history rows written out, oldest first.
+fn grid_history(grid: &Grid<Cell>) -> Vec<WrittenRow> {
+    (1..=grid.history_size() as i32)
+        .rev()
+        .map(|h| snapshot::write_row(grid, Line(-h)))
+        .collect()
+}
+
+/// How many of `rows`, newest first, fit in `room` bytes, and the bytes
+/// they take.
+fn newest_that_fit<'a>(rows: impl Iterator<Item = &'a WrittenRow>, room: usize) -> (usize, usize) {
+    let mut left = room;
+    let kept = rows
+        .take_while(|row| match left.checked_sub(row.written_len()) {
+            Some(rest) => {
+                left = rest;
+                true
+            }
+            None => false,
+        })
+        .count();
+    (kept, room - left)
 }
 
 #[cfg(test)]
@@ -447,12 +515,182 @@ mod tests {
     }
 
     #[test]
+    fn restores_what_programs_reported_about_themselves() {
+        let output = concat!(
+            "\x1b]7501;state=working:app=claude-code:id=build\x07",
+            "\x1b]7501;state=blocked:app=claude-code:kind=permission:msg=QmFzaA==\x07",
+        );
+        let mut run = run(80, 24, output.as_bytes());
+        let (full, screen, _) = restored(&mut run);
+        assert!(!run.truth.program_statuses().is_empty());
+        assert_eq!(full.program_statuses(), run.truth.program_statuses());
+        assert_eq!(screen.program_statuses(), run.truth.program_statuses());
+    }
+
+    #[test]
     fn restores_after_a_resize() {
         let mut run = run(80, 24, b"$ seq 100\r\n1\r\n2\r\n$ ");
         run.truth.resize(100, 30, 8, 16).unwrap();
         run.replica.resize(100, 30).unwrap();
         let (full, _, _) = restored(&mut run);
         assert_same(&full, &run.truth, "resized");
+    }
+
+    fn line_text(engine: &Engine, line: i32) -> String {
+        let grid = engine.terminal.grid();
+        let row = &grid[Line(line)];
+        (0..grid.columns()).map(|x| row[Column(x)].c).collect()
+    }
+
+    /// Numbered rows with their own colours on every cell, `pen` added to
+    /// each cell's.
+    fn colour_on_every_cell(count: usize, columns: u16, pen: &str) -> String {
+        let mut output = String::new();
+        for i in 0..count {
+            let _ = write!(output, "{i:06}");
+            for x in 6..columns as usize {
+                let _ = write!(
+                    output,
+                    "\x1b[{pen}38;2;{};{};{}m{}",
+                    (i + x) % 256,
+                    (i * 7 + x) % 256,
+                    (i * 13 + x * 3) % 256,
+                    char::from(b'a' + (x % 26) as u8)
+                );
+            }
+            output.push_str("\x1b[m\r\n");
+        }
+        output
+    }
+
+    /// History rows a snapshot could carry: the text store's and the grid's.
+    fn available(replica: &Replica) -> usize {
+        replica.history.len() + replica.engine.terminal.history_size()
+    }
+
+    /// A client restored from the replica's snapshot, which fits the budget
+    /// and shows the whole screen.
+    fn restored_within_budget(run: &mut Run) -> Engine {
+        let (columns, rows) = (run.truth.size.columns, run.truth.size.rows);
+        let snapshot = run.replica.snapshot();
+        assert!(
+            snapshot.full.len() <= SNAPSHOT_BUDGET,
+            "{}",
+            snapshot.full.len()
+        );
+        let mut restored = Engine::new(columns, rows).unwrap();
+        restored.restore(&snapshot.full).unwrap();
+        assert_eq!(
+            restored.visible_lines().unwrap(),
+            run.truth.visible_lines().unwrap(),
+            "the screen is whole"
+        );
+        restored
+    }
+
+    /// The restored history is the truth's newest; returns how many rows.
+    fn assert_newest_history(restored: &Engine, truth: &Engine) -> usize {
+        let kept = restored.terminal.grid().history_size();
+        assert!(kept > 0, "some history is kept");
+        for y in 1..=kept as i32 {
+            assert_eq!(
+                line_text(restored, -y),
+                line_text(truth, -y),
+                "the newest history rows are the ones kept"
+            );
+        }
+        kept
+    }
+
+    #[test]
+    fn a_full_scrollback_of_colour_on_every_cell_still_fits_one_snapshot() {
+        let (columns, rows) = (200, 60);
+        let output = colour_on_every_cell(SCROLLBACK_ROWS + rows as usize, columns, "");
+        assert!(output.len() > SNAPSHOT_BUDGET, "the output is heavy enough");
+        let mut run = run(columns, rows, output.as_bytes());
+        assert!(run.replica.history_bytes <= HISTORY_BYTES);
+        let restored = restored_within_budget(&mut run);
+        let kept = assert_newest_history(&restored, &run.truth);
+        assert!(kept < SCROLLBACK_ROWS, "{kept} history rows");
+        assert_eq!(kept, available(&run.replica));
+    }
+
+    #[test]
+    fn a_screen_too_large_to_share_the_budget_keeps_the_history_that_fits() {
+        let (columns, rows) = (500, 300);
+        let pen = "1;3;4;48;2;9;99;199;58;2;199;99;9;";
+        let output = colour_on_every_cell(3 * rows as usize, columns, pen);
+        let mut run = run(columns, rows, output.as_bytes());
+        let restored = restored_within_budget(&mut run);
+        let kept = assert_newest_history(&restored, &run.truth);
+        assert!(
+            kept < available(&run.replica),
+            "the oldest kept rows are left out"
+        );
+    }
+
+    #[test]
+    fn heavy_history_under_a_full_screen_program_fits_and_comes_back_after_it() {
+        let (columns, rows) = (200, 60);
+        let mut output = colour_on_every_cell(SCROLLBACK_ROWS + rows as usize, columns, "");
+        output.push_str("\x1b[?1049h\x1b[H\x1b[2J\x1b[33meditor\x1b[m\x1b[2;1Hline two");
+        let mut run = run(columns, rows, output.as_bytes());
+        let mut restored = restored_within_budget(&mut run);
+        let leave = b"\x1b[?1049l";
+        restored.advance(leave).unwrap();
+        run.truth.advance(leave).unwrap();
+        assert_eq!(
+            restored.visible_lines().unwrap(),
+            run.truth.visible_lines().unwrap(),
+            "the shell's screen under the program"
+        );
+        assert_newest_history(&restored, &run.truth);
+    }
+
+    #[test]
+    fn a_snapshot_leaves_the_replica_growing_as_the_client_restored_from_it() {
+        let mut output = String::new();
+        for i in 0..100 {
+            let _ = write!(output, "line {i} {}\r\n", "w".repeat(i % 3 * 60));
+        }
+        output.push_str("$ ");
+        let mut run = run(80, 24, output.as_bytes());
+        assert!(
+            run.replica.engine.terminal.history_size() > 0,
+            "rows not yet in the text store"
+        );
+        let snapshot = run.replica.snapshot();
+        let mut client = Engine::new(80, 24).unwrap();
+        client.restore(&snapshot.full).unwrap();
+        for (columns, rows) in [(80, 40), (120, 50)] {
+            run.replica.resize(columns, rows).unwrap();
+            client.resize(columns, rows, 8, 16).unwrap();
+            let replica = &mut run.replica.engine;
+            assert_eq!(
+                replica.visible_lines().unwrap(),
+                client.visible_lines().unwrap(),
+                "at {columns}x{rows}"
+            );
+            assert_eq!(
+                replica.terminal.grid().cursor.point,
+                client.terminal.grid().cursor.point,
+                "the cursor at {columns}x{rows}"
+            );
+        }
+    }
+
+    #[test]
+    fn history_fits_up_to_the_last_byte_of_room() {
+        let row = |text: &str, wraps| WrittenRow {
+            text: text.into(),
+            wraps,
+        };
+        // Newest first: five bytes with its line break, then two.
+        let rows = [row("abc", false), row("de", true)];
+        assert_eq!(newest_that_fit(rows.iter(), 7), (2, 7));
+        assert_eq!(newest_that_fit(rows.iter(), 6), (1, 5));
+        assert_eq!(newest_that_fit(rows.iter(), 5), (1, 5));
+        assert_eq!(newest_that_fit(rows.iter(), 4), (0, 0));
     }
 
     #[test]

@@ -1,0 +1,223 @@
+Initialize the key event fields gpui-pre's patches add
+
+gpui-pre's patch 001 adds optional physical key and native layout metadata
+(original key text, raw modifiers, lock states) to KeyDownEvent and
+KeyUpEvent. GPUI Kit builds those events itself in its controls and tests,
+so each constructor here sets the new fields to their empty defaults, as a
+synthetic event does; shortcut dispatch is unchanged.
+
+Remove with gpui-pre's patch 001, when GPUI exposes physical keys and layout
+metadata on key events.
+
+diff --git a/src/button.rs b/src/button.rs
+index 16121f8..fa47c8f 100644
+--- a/src/button.rs
++++ b/src/button.rs
+@@ -370,11 +370,21 @@ mod tests {
+             let keystroke =
+                 cx.update(|_, cx| Keystroke::parse_with_os(key, cx.platform_info().os).unwrap());
+             cx.simulate_event(KeyDownEvent {
++                #[cfg(not(feature = "gpui-fast"))]
++                physical_key: None,
++                #[cfg(not(feature = "gpui-fast"))]
++                key_metadata: None,
+                 keystroke: keystroke.clone(),
+                 is_held: false,
+                 prefer_character_input: false,
+             });
+-            cx.simulate_event(KeyUpEvent { keystroke });
++            cx.simulate_event(KeyUpEvent {
++                #[cfg(not(feature = "gpui-fast"))]
++                physical_key: None,
++                #[cfg(not(feature = "gpui-fast"))]
++                key_metadata: None,
++                keystroke,
++            });
+         }
+ 
+         assert_eq!(button_clicks.get(), 2);
+@@ -433,11 +443,21 @@ mod tests {
+         let keystroke =
+             cx.update(|_, cx| Keystroke::parse_with_os(key, cx.platform_info().os).unwrap());
+         cx.simulate_event(KeyDownEvent {
++            #[cfg(not(feature = "gpui-fast"))]
++            physical_key: None,
++            #[cfg(not(feature = "gpui-fast"))]
++            key_metadata: None,
+             keystroke: keystroke.clone(),
+             is_held: false,
+             prefer_character_input: false,
+         });
+-        cx.simulate_event(KeyUpEvent { keystroke });
++        cx.simulate_event(KeyUpEvent {
++            #[cfg(not(feature = "gpui-fast"))]
++            physical_key: None,
++            #[cfg(not(feature = "gpui-fast"))]
++            key_metadata: None,
++            keystroke,
++        });
+         cx.update(|window, cx| window.draw(cx).clear(cx));
+     }
+ 
+diff --git a/src/checkbox.rs b/src/checkbox.rs
+index 6e29b61..90eef06 100644
+--- a/src/checkbox.rs
++++ b/src/checkbox.rs
+@@ -541,11 +541,21 @@ mod tests {
+         for key in ["enter", "space"] {
+             let keystroke = Keystroke::parse(key).unwrap();
+             cx.simulate_event(KeyDownEvent {
++                #[cfg(not(feature = "gpui-fast"))]
++                physical_key: None,
++                #[cfg(not(feature = "gpui-fast"))]
++                key_metadata: None,
+                 keystroke: keystroke.clone(),
+                 is_held: false,
+                 prefer_character_input: false,
+             });
+-            cx.simulate_event(KeyUpEvent { keystroke });
++            cx.simulate_event(KeyUpEvent {
++                #[cfg(not(feature = "gpui-fast"))]
++                physical_key: None,
++                #[cfg(not(feature = "gpui-fast"))]
++                key_metadata: None,
++                keystroke,
++            });
+         }
+ 
+         assert_eq!(
+diff --git a/src/dialog.rs b/src/dialog.rs
+index eb8867f..73ba641 100644
+--- a/src/dialog.rs
++++ b/src/dialog.rs
+@@ -744,11 +744,21 @@ mod tests {
+         });
+         let keystroke = Keystroke::parse("space").unwrap();
+         cx.simulate_event(KeyDownEvent {
++            #[cfg(not(feature = "gpui-fast"))]
++            physical_key: None,
++            #[cfg(not(feature = "gpui-fast"))]
++            key_metadata: None,
+             keystroke: keystroke.clone(),
+             is_held: false,
+             prefer_character_input: false,
+         });
+-        cx.simulate_event(KeyUpEvent { keystroke });
++        cx.simulate_event(KeyUpEvent {
++            #[cfg(not(feature = "gpui-fast"))]
++            physical_key: None,
++            #[cfg(not(feature = "gpui-fast"))]
++            key_metadata: None,
++            keystroke,
++        });
+         cx.run_until_parked();
+         assert_eq!(attempts.get(), 2);
+         assert!(!handle.is_open(), "Space uses the same cancel decision");
+diff --git a/src/link.rs b/src/link.rs
+index 314e5bb..bbd1e44 100644
+--- a/src/link.rs
++++ b/src/link.rs
+@@ -290,11 +290,21 @@ mod tests {
+         let keystroke =
+             cx.update(|_, cx| Keystroke::parse_with_os(key, cx.platform_info().os).unwrap());
+         cx.simulate_event(KeyDownEvent {
++            #[cfg(not(feature = "gpui-fast"))]
++            physical_key: None,
++            #[cfg(not(feature = "gpui-fast"))]
++            key_metadata: None,
+             keystroke: keystroke.clone(),
+             is_held: false,
+             prefer_character_input: false,
+         });
+-        cx.simulate_event(KeyUpEvent { keystroke });
++        cx.simulate_event(KeyUpEvent {
++            #[cfg(not(feature = "gpui-fast"))]
++            physical_key: None,
++            #[cfg(not(feature = "gpui-fast"))]
++            key_metadata: None,
++            keystroke,
++        });
+     }
+ 
+     #[gpui::test]
+diff --git a/src/radio.rs b/src/radio.rs
+index dc9424d..141a868 100644
+--- a/src/radio.rs
++++ b/src/radio.rs
+@@ -360,11 +360,21 @@ mod tests {
+         for key in ["enter", "space"] {
+             let keystroke = Keystroke::parse(key).unwrap();
+             cx.simulate_event(KeyDownEvent {
++                #[cfg(not(feature = "gpui-fast"))]
++                physical_key: None,
++                #[cfg(not(feature = "gpui-fast"))]
++                key_metadata: None,
+                 keystroke: keystroke.clone(),
+                 is_held: false,
+                 prefer_character_input: false,
+             });
+-            cx.simulate_event(KeyUpEvent { keystroke });
++            cx.simulate_event(KeyUpEvent {
++                #[cfg(not(feature = "gpui-fast"))]
++                physical_key: None,
++                #[cfg(not(feature = "gpui-fast"))]
++                key_metadata: None,
++                keystroke,
++            });
+         }
+         assert_eq!(changes.get(), 2);
+         assert_eq!(keyboard_changes.get(), 2);
+diff --git a/src/switch.rs b/src/switch.rs
+index e798662..aaa119f 100644
+--- a/src/switch.rs
++++ b/src/switch.rs
+@@ -585,11 +585,21 @@ mod tests {
+         let keystroke =
+             cx.update(|_, cx| Keystroke::parse_with_os(key, cx.platform_info().os).unwrap());
+         cx.simulate_event(KeyDownEvent {
++            #[cfg(not(feature = "gpui-fast"))]
++            physical_key: None,
++            #[cfg(not(feature = "gpui-fast"))]
++            key_metadata: None,
+             keystroke: keystroke.clone(),
+             is_held: false,
+             prefer_character_input: false,
+         });
+-        cx.simulate_event(KeyUpEvent { keystroke });
++        cx.simulate_event(KeyUpEvent {
++            #[cfg(not(feature = "gpui-fast"))]
++            physical_key: None,
++            #[cfg(not(feature = "gpui-fast"))]
++            key_metadata: None,
++            keystroke,
++        });
+     }
+ 
+     #[gpui::test]
+diff --git a/src/toggle.rs b/src/toggle.rs
+index 4aac3c1..2f7b908 100644
+--- a/src/toggle.rs
++++ b/src/toggle.rs
+@@ -295,11 +295,21 @@ mod tests {
+         for key in ["enter", "space"] {
+             let keystroke = Keystroke::parse(key).unwrap();
+             cx.simulate_event(KeyDownEvent {
++                #[cfg(not(feature = "gpui-fast"))]
++                physical_key: None,
++                #[cfg(not(feature = "gpui-fast"))]
++                key_metadata: None,
+                 keystroke: keystroke.clone(),
+                 is_held: false,
+                 prefer_character_input: false,
+             });
+-            cx.simulate_event(KeyUpEvent { keystroke });
++            cx.simulate_event(KeyUpEvent {
++                #[cfg(not(feature = "gpui-fast"))]
++                physical_key: None,
++                #[cfg(not(feature = "gpui-fast"))]
++                key_metadata: None,
++                keystroke,
++            });
+         }
+         assert_eq!(changes.borrow().as_slice(), &[true, true]);
+         assert_eq!(keyboard_changes.get(), 2);

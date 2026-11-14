@@ -951,6 +951,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "shlex",
+ "signal-hook",
  "socket2",
  "tar",
  "tempfile",
@@ -967,6 +968,7 @@ dependencies = [
 name = "newport-domain"
 version = "0.1.0"
 dependencies = [
+ "newport-protocol",
  "serde",
  "serde_json",
  "sha2",
@@ -1000,6 +1002,7 @@ name = "newport-terminal"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "base64 0.23.1",
  "bitflags",
  "newport-domain",
  "unicode-segmentation",

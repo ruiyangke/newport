@@ -154,7 +154,7 @@ fn main() {
                     |product| product.variant == newport_protocol::product::Variant::Full
                         && product
                             .services
-                            .get("remote-apps")
+                            .get(newport_protocol::runtime::service::REMOTE_APPS)
                             .is_some_and(|versions| versions.contains(&1))
                 ),
             "Remote Apps desktop builds must bundle the full agent with remote-apps v1"

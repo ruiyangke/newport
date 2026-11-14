@@ -1,7 +1,8 @@
 //! Every package the dependency advice names exists in its distribution's
 //! repositories, asked of each package index in a container.
-use newport_domain::requirements::{Host, Requirement};
+use newport_domain::requirements::packages;
 use newport_domain::server_os::{PackageManager, ServerOs};
+use newport_protocol::desktop::applications::{Elevation, Host, Requirement};
 use std::process::Command;
 
 const REQUIREMENTS: [Requirement; 6] = [
@@ -63,12 +64,12 @@ fn every_advised_package_exists() {
         let mut names: Vec<String> = Vec::new();
         for user_services in [false, true] {
             let host = Host {
+                elevation: Elevation::Sudo,
+                updater: None,
                 user_services,
-                ..Host::default()
             };
             for requirement in REQUIREMENTS {
-                let name = requirement
-                    .packages(Some(&os), &host)
+                let name = packages(requirement, Some(&os), &host)
                     .get(manager)
                     .unwrap()
                     .to_owned();

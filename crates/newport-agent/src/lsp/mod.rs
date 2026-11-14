@@ -9,7 +9,8 @@ mod process;
 mod workspace;
 
 use crate::transport::{Cancellation, DeadlineWriter};
-use serde_json::{Value, json};
+use newport_protocol::lsp::{Configuration, Notification, Server as ServerState};
+use serde_json::json;
 use std::{
     fs::File,
     io::{self, BufReader, Write},
@@ -90,9 +91,7 @@ pub(crate) fn serve_bound(args: &[String], cancellation: Cancellation) -> io::Re
     };
     let output = stdout(&cancellation)?;
     let login = environment::login_environment(&root);
-    let loaded = environment::load(&root, login, use_envrc, &mut |state| {
-        notify(&output, "$/newport/environment", state)
-    })?;
+    let loaded = environment::load(&root, login, use_envrc, &mut |state| send(&output, &state))?;
     let Some(loaded) = loaded else {
         return Ok(());
     };
@@ -100,10 +99,11 @@ pub(crate) fn serve_bound(args: &[String], cancellation: Cancellation) -> io::Re
     let Some((name, program, arguments)) = server.commands.iter().find_map(|(name, arguments)| {
         environment::find_program(name, path).map(|program| (*name, program, *arguments))
     }) else {
-        return notify(
+        return send(
             &output,
-            "$/newport/server",
-            json!({"state": "missing", "server": server.id}),
+            &ServerState::Missing {
+                server: server.id.into(),
+            },
         );
     };
     let config_server = if name == "basedpyright-langserver" {
@@ -127,7 +127,7 @@ fn run(
     id: &str,
     (program, arguments): (&Path, &[&str]),
     loaded: environment::Loaded,
-    config: Value,
+    config: Configuration,
     output: Output,
     cancellation: Cancellation,
 ) -> io::Result<()> {
@@ -144,26 +144,35 @@ fn run(
     {
         Ok(child) => child,
         Err(error) => {
-            return notify(
+            return send(
                 &output,
-                "$/newport/server",
-                json!({"state": "exited", "server": id, "error": format!("{} couldn't start: {error}", program.display())}),
+                &ServerState::Exited {
+                    server: id.into(),
+                    status: None,
+                    signal: None,
+                    stderr: None,
+                    error: Some(format!("{} couldn't start: {error}", program.display())),
+                },
             );
         }
     };
     let stopping = Arc::new(AtomicBool::new(false));
     let result = (|| -> io::Result<()> {
         let watcher = workspace::watch(root, output.clone(), stopping.clone());
-        let mut config = config;
-        config["fileWatch"] = json!(watcher.is_ok());
-        if let Err(error) = &watcher {
-            config["watchError"] = json!(error.to_string());
-        }
-        notify(&output, "$/newport/configuration", config)?;
-        notify(
+        send(
             &output,
-            "$/newport/server",
-            json!({"state": "started", "server": id, "command": program.to_string_lossy()}),
+            &Configuration {
+                file_watch: watcher.is_ok(),
+                watch_error: watcher.as_ref().err().map(io::Error::to_string),
+                ..config
+            },
+        )?;
+        send(
+            &output,
+            &ServerState::Started {
+                server: id.into(),
+                command: program.to_string_lossy().into_owned(),
+            },
         )?;
 
         // Desktop to server: bytes as written.
@@ -208,11 +217,7 @@ fn run(
                         continue;
                     }
                     if environment::changed(&direnv, &vars, &root) {
-                        let _ = notify(
-                            &output,
-                            "$/newport/environment",
-                            json!({"state": "changed"}),
-                        );
+                        let _ = send(&output, &newport_protocol::lsp::Environment::Changed);
                         return;
                     }
                     next = Instant::now() + ENVIRONMENT_CHECK;
@@ -267,17 +272,15 @@ fn run(
             _ => None,
         };
         let stderr = stderr.finish(Duration::from_secs(1));
-        let _ = notify(
+        let _ = send(
             &output,
-            "$/newport/server",
-            json!({
-                "state": "exited",
-                "server": id,
-                "status": status.and_then(|s| s.code()),
-                "signal": status.and_then(|s| s.signal()),
-                "stderr": String::from_utf8_lossy(&stderr),
-                "error": protocol,
-            }),
+            &ServerState::Exited {
+                server: id.into(),
+                status: status.and_then(|s| s.code()),
+                signal: status.and_then(|s| s.signal()),
+                stderr: Some(String::from_utf8_lossy(&stderr).into_owned()),
+                error: protocol,
+            },
         );
         Ok(())
     })();
@@ -302,9 +305,10 @@ fn stdout(cancellation: &Cancellation) -> io::Result<Output> {
     })))
 }
 
-fn notify<W: Write>(output: &Mutex<W>, method: &str, params: Value) -> io::Result<()> {
-    let body = serde_json::to_vec(&json!({"jsonrpc": "2.0", "method": method, "params": params}))
-        .map_err(io::Error::other)?;
+fn send<W: Write, N: Notification>(output: &Mutex<W>, notification: &N) -> io::Result<()> {
+    let body =
+        serde_json::to_vec(&json!({"jsonrpc": "2.0", "method": N::METHOD, "params": notification}))
+            .map_err(io::Error::other)?;
     output
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -314,11 +318,18 @@ fn notify<W: Write>(output: &Mutex<W>, method: &str, params: Value) -> io::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     #[test]
     fn notifications_are_whole_lsp_messages() {
         let output = Mutex::new(Vec::new());
-        notify(&output, "$/newport/server", json!({"state": "missing"})).unwrap();
+        send(
+            &output,
+            &ServerState::Missing {
+                server: "gopls".into(),
+            },
+        )
+        .unwrap();
         let bytes = output.into_inner().unwrap();
         let message = framing::read_message(&mut &bytes[..]).unwrap().unwrap();
         assert_eq!(message, bytes);

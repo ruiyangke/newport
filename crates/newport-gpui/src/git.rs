@@ -1,13 +1,12 @@
 //! The native Git workspace consumes the same bounded, snapshot-based pages.
 use super::*;
 use base64::Engine as _;
+use git_listing::{Entry, Listing, StatusPage};
 use gpui_kit::base::Selectable;
 use gpui_kit::component::resizable::resizable_panel;
-use newport_client::git_page::merge as merge_page;
 use newport_client::resources::{ResourceGroup, Resources};
-use newport_protocol::{
-    desktop,
-    git::{Request as GitRequest, Side},
+use newport_protocol::git::{
+    Branch, Head, Path as GitPath, Repository, Request as GitRequest, Side, StatusEntry,
 };
 #[derive(Default)]
 pub(super) struct Workspace {
@@ -24,10 +23,10 @@ pub(super) struct Workspace {
     pub(super) settings: Option<git_settings::Form>,
     pub(super) settings_open: bool,
     pub(super) remote_edit: Option<git_remote_edit::Form>,
-    pub(super) opening_path: Value,
+    pub(super) opening_path: Option<GitPath>,
     // The displayed checkout remains authoritative until repo.open succeeds.
-    pub(super) switching_path: Option<Value>,
-    switching_repo: Value,
+    pub(super) switching_path: Option<GitPath>,
+    switching_repo: Option<Repository>,
     pub(super) worktree_create: Option<git_worktree_create::Form>,
     pub(super) worktree_remove: Option<git_worktrees::RemoveReview>,
     pub(super) worktree_repair: Option<git_worktrees::RepairForm>,
@@ -44,25 +43,27 @@ pub(super) struct Workspace {
     pub(super) branch_manage: Option<git_branch_manage::Form>,
     pub(super) returned_from_missing_checkout: Option<String>,
     server: String,
-    pub(super) repo: Value,
+    pub(super) repo: Option<Repository>,
     pub(super) restore_document: bool,
     pub(super) tab: usize,
     pub(super) history: git_history::History,
-    pub(super) page: Value,
-    pub selected: Value,
+    pub(super) page: Option<Listing>,
+    pub selected: Option<Entry>,
     pub(super) detail_open: bool,
     pub diff_staged: bool,
     pub(super) diff_context: git_diff::ContextLines,
     pub(super) diff_presentation: git_diff::Cache,
     pub(super) diff_text: git_diff_text::Cache,
     pub(super) diff_find: Option<git_diff_search::Controls>,
-    pub(super) diff: Value,
+    pub(super) diff: Option<newport_client::git_diff_page::DiffPage>,
     pub(super) diff_demand: git_diff::ScrollDemand,
     pub(super) diff_recovery: newport_client::git_read_recovery::Recovery,
     pub(super) index_refresh: Option<git_index_refresh::Refresh>,
     diff_cursor: Option<String>,
     pub diff_scroll: UniformListScrollHandle,
     pub(super) continuation: Option<String>,
+    /// The repository each repository refresh read reported, by request key.
+    pub(super) refreshed: std::collections::HashMap<String, String>,
     pub scroll: UniformListScrollHandle,
     pub error: Option<String>,
 }
@@ -70,27 +71,87 @@ impl Workspace {
     /// An open repository with no switch under way: it can be set aside
     /// whole while another page shows.
     pub(super) fn settled(&self) -> bool {
-        self.repo["repoId"].is_string()
-            && self.switching_path.is_none()
-            && !self.switching_repo["repoId"].is_string()
+        self.repo.is_some() && self.switching_path.is_none() && self.switching_repo.is_none()
     }
     /// Releases the repositories it holds open on the server.
     pub(super) fn release(&mut self) {
-        let pending = std::mem::take(&mut self.switching_repo);
-        if pending["repoId"].is_string() && pending["repoId"] != self.repo["repoId"] {
-            let server = self.server.clone();
-            std::thread::spawn(move || {
-                backend::Backend::discover().release_repository(&server, &pending)
-            });
+        if let Some(pending) = self.switching_repo.take()
+            && Some(pending.repo_id.as_str()) != self.repo_id()
+        {
+            release_repository(self.server.clone(), pending.repo_id);
         }
-        let repo = std::mem::take(&mut self.repo);
-        let server = self.server.clone();
-        if repo["repoId"].is_string() {
-            std::thread::spawn(move || {
-                backend::Backend::discover().release_repository(&server, &repo)
-            });
+        if let Some(repo) = self.repo.take() {
+            release_repository(self.server.clone(), repo.repo_id);
         }
     }
+    /// The open repository's ID.
+    pub(super) fn repo_id(&self) -> Option<&str> {
+        self.repo.as_ref().map(|repo| repo.repo_id.as_str())
+    }
+    /// Whether the open repository accepts writes.
+    pub(super) fn writable(&self) -> bool {
+        self.repo
+            .as_ref()
+            .is_some_and(|repo| !repo.capabilities.read_only)
+    }
+    /// Whether the open repository has a working tree.
+    pub(super) fn has_working_tree(&self) -> bool {
+        self.repo
+            .as_ref()
+            .is_some_and(|repo| repo.capabilities.working_tree)
+    }
+    /// Whether the open repository is bare, once one is open.
+    pub(super) fn bare(&self) -> Option<bool> {
+        self.repo.as_ref().map(|repo| repo.bare)
+    }
+    /// The open repository's checkout root.
+    pub(super) fn root(&self) -> Option<&GitPath> {
+        self.repo.as_ref().map(|repo| &repo.root)
+    }
+    /// The open repository's root as text, when its bytes are UTF-8.
+    pub(super) fn root_path(&self) -> Option<String> {
+        project_editor::root_path(self.root()?)
+    }
+    /// Shows a newer HEAD reported by a status read. Returns whether it
+    /// differed from the one shown.
+    pub(super) fn observe_head(&mut self, head: &Head) -> bool {
+        if let Some(repo) = self.repo.as_mut()
+            && repo.head != *head
+        {
+            repo.head = head.clone();
+            return true;
+        }
+        false
+    }
+    /// The status page the Changes tab shows.
+    pub(super) fn status_page(&self) -> Option<&StatusPage> {
+        self.page.as_ref().and_then(Listing::status)
+    }
+    /// The snapshot of the page shown, or nothing before one loads.
+    pub(super) fn snapshot(&self) -> &str {
+        self.page
+            .as_ref()
+            .map(Listing::snapshot)
+            .unwrap_or_default()
+    }
+    /// The selected changed file.
+    pub(super) fn entry(&self) -> Option<&StatusEntry> {
+        match &self.selected {
+            Some(Entry::Change(entry)) => Some(entry),
+            _ => None,
+        }
+    }
+    /// The selected remote's name.
+    pub(super) fn remote_name(&self) -> Option<&str> {
+        match &self.selected {
+            Some(Entry::Remote(remote)) => Some(&remote.name),
+            _ => None,
+        }
+    }
+}
+/// Closes a repository handle on the server, off the UI thread.
+pub(super) fn release_repository(server: String, repo_id: String) {
+    std::thread::spawn(move || backend::Backend::discover().release_repository(&server, &repo_id));
 }
 struct SavedView {
     workspace: Workspace,
@@ -98,7 +159,7 @@ struct SavedView {
 }
 impl Workspace {
     fn read_request(&self, cursor: Option<String>) -> Option<GitRequest> {
-        let repo_id = self.repo["repoId"].as_str()?.to_owned();
+        let repo_id = self.repo_id()?.to_owned();
         Some(match self.tab {
             0 => GitRequest::Status {
                 repo_id,
@@ -141,11 +202,10 @@ impl Workspace {
         })
     }
 
-    fn begin_checkout_switch(&mut self, path: Value) -> bool {
+    fn begin_checkout_switch(&mut self, path: GitPath) -> bool {
         if self.switching_path.is_some()
-            || !self.repo["repoId"].is_string()
-            || !path["bytesB64"].is_string()
-            || path["bytesB64"] == self.opening_path["bytesB64"]
+            || self.repo.is_none()
+            || Some(&path.bytes_b64) == self.opening_path.as_ref().map(|path| &path.bytes_b64)
         {
             return false;
         }
@@ -154,88 +214,86 @@ impl Workspace {
     }
 
     /// Preserve presentation, never checkout-specific selections or snapshots.
-    fn replace_checkout(&mut self, path: Value) {
+    fn replace_checkout(&mut self, path: GitPath) {
         *self = Self {
             tab: self.tab,
             detail_open: self.detail_open,
             diff_context: self.diff_context,
-            opening_path: path,
+            opening_path: Some(path),
             ..Default::default()
         };
     }
 
-    fn install_checkout(&mut self, path: Value, repo: Value, page: Value) {
-        let tab = if repo["bare"] == true && self.tab == 0 {
+    fn install_checkout(&mut self, path: GitPath, repo: Repository, page: Listing) {
+        let tab = if repo.bare && self.tab == 0 {
             1
         } else {
             self.tab
         };
         self.replace_checkout(path);
         self.tab = tab;
-        self.repo = repo;
+        self.repo = Some(repo);
         self.accept_listing(page);
     }
 
     pub(super) fn invalidate_saved_views(&mut self) {
         self.saved_views.clear();
     }
-    pub(super) fn observe_status_snapshot(&mut self, status: &Value) -> bool {
+    pub(super) fn observe_status_snapshot(&mut self, status: &StatusPage) -> bool {
         let previous = if self.tab == 0 {
-            Some(&self.page)
+            self.page.as_ref()
         } else {
-            self.saved_views.get(&0).map(|view| &view.workspace.page)
+            self.saved_views
+                .get(&0)
+                .and_then(|view| view.workspace.page.as_ref())
         };
-        let changed = status["snapshot"].as_str().is_some_and(|snapshot| {
-            previous
-                .and_then(|page| page["snapshot"].as_str())
-                .is_some_and(|previous| previous != snapshot)
-        });
+        let changed = previous.is_some_and(|previous| previous.snapshot() != status.snapshot);
         if changed {
             self.invalidate_saved_views();
         }
         changed
     }
-    fn accept_listing(&mut self, page: Value) -> bool {
+    fn accept_listing(&mut self, page: Listing) -> bool {
         self.accept_listing_with_scope(page, false)
     }
-    pub(super) fn accept_listing_with_scope(&mut self, page: Value, index_only: bool) -> bool {
-        let changed_comparison = self.tab == 0 && self.page["snapshot"] != page["snapshot"];
+    pub(super) fn accept_listing_with_scope(&mut self, page: Listing, index_only: bool) -> bool {
+        let changed_comparison =
+            self.tab == 0 && self.page.as_ref().map(Listing::snapshot) != Some(page.snapshot());
         if changed_comparison {
-            let selected = newport_client::git_read_recovery::matching_entry(
-                &page,
-                &self.selected["path"],
-                self.diff_staged,
-            );
+            let path = self.entry().map(|entry| entry.path.clone());
+            let find = |staged: bool| {
+                page.status().zip(path.as_ref()).and_then(|(page, path)| {
+                    newport_client::git_read_recovery::matching_entry(page, path, staged)
+                })
+            };
+            let selected = find(self.diff_staged);
             // A fully staged/unstaged file moves groups. Follow that same byte
             // path, while partial staging stays on the current comparison side.
             let other = (index_only && selected.is_none())
-                .then(|| {
-                    newport_client::git_read_recovery::matching_entry(
-                        &page,
-                        &self.selected["path"],
-                        !self.diff_staged,
-                    )
-                })
+                .then(|| find(!self.diff_staged))
                 .flatten();
             let moved = other.is_some();
-            self.selected = selected.or(other).unwrap_or(Value::Null);
+            self.selected = selected.or(other).map(Entry::Change);
             if moved {
                 self.diff_staged = !self.diff_staged;
             }
             // Keep the previous comparison visible during a background read.
             // Its snapshot no longer matches, so all mutation controls reject it.
-            if !index_only || moved || self.selected.is_null() {
-                self.diff = Value::Null;
+            if !index_only || moved || self.selected.is_none() {
+                self.diff = None;
             }
             self.diff_cursor = None;
         }
-        if self.tab == 0 && page["metadata"]["head"].is_object() {
-            self.repo["head"] = page["metadata"]["head"].clone();
+        if self.tab == 0
+            && let Some(status) = page.status()
+        {
+            let head = status.metadata.head.clone();
+            self.observe_head(&head);
         }
         // A background first-page read must not collapse the pages the user
         // already loaded, reset their cursor, or disturb an unchanged diff.
-        if self.tab != 0 || changed_comparison || !self.page["entries"].is_array() {
-            self.page = page;
+        if self.tab != 0 || changed_comparison || self.page.is_none() {
+            self.page = Some(page);
         }
         self.error = None;
         changed_comparison
@@ -246,8 +304,8 @@ impl Workspace {
         if self.switching_path.is_some()
             || tab == self.tab
             || tab_info(tab).is_none()
-            || (tab == 0 && self.repo["bare"] == true)
-            || !self.repo["repoId"].is_string()
+            || (tab == 0 && self.bare() == Some(true))
+            || self.repo.is_none()
         {
             return None;
         }
@@ -327,57 +385,55 @@ fn tab_info(tab: usize) -> Option<(&'static str, &'static str)> {
         _ => return None,
     })
 }
-pub(super) fn worktree_path(entry: &Value) -> Option<Value> {
-    if entry["state"] != "available" || entry["current"] != false || entry["kind"] == "bare" {
+/// The checkout path of another available, non-bare worktree, when its
+/// bytes form an absolute path.
+pub(super) fn worktree_destination(entry: &newport_protocol::git::Worktree) -> Option<GitPath> {
+    if entry.state != "available" || entry.current || entry.kind == "bare" {
         return None;
     }
-    let path = &entry["path"];
     let bytes = base64::engine::general_purpose::STANDARD
-        .decode(path["bytesB64"].as_str()?)
+        .decode(&entry.path.bytes_b64)
         .ok()?;
-    (bytes.starts_with(b"/") && !bytes.contains(&0) && path["display"].is_string())
-        .then(|| path.clone())
+    (bytes.starts_with(b"/") && !bytes.contains(&0)).then(|| entry.path.clone())
 }
-pub(super) fn head_label(head: &Value) -> String {
-    if head["detached"] == true {
+pub(super) fn head_label(head: &Head) -> String {
+    if head.detached {
         format!(
             "Detached HEAD · {}",
-            text(&head["oid"], "hex")
-                .chars()
-                .take(8)
-                .collect::<String>()
+            head.oid
+                .as_ref()
+                .map(|oid| oid.hex.chars().take(8).collect::<String>())
+                .unwrap_or_default()
         )
     } else {
-        text(&head["name"], "display")
-            .strip_prefix("refs/heads/")
-            .unwrap_or(&text(&head["name"], "display"))
-            .to_owned()
+        let name = head
+            .name
+            .as_ref()
+            .map(|name| name.display.as_str())
+            .unwrap_or_default();
+        name.strip_prefix("refs/heads/").unwrap_or(name).to_owned()
     }
 }
-fn listing_feedback(page: &Value, pending: bool, failed: bool) -> String {
+fn listing_feedback(page: Option<&Listing>, pending: bool, failed: bool) -> String {
     if pending {
         return "Loading repository…".into();
     }
     if failed {
         return "Couldn’t refresh this view".into();
     }
-    let Some(entries) = page["entries"].as_array() else {
+    let Some(page) = page else {
         return String::new();
     };
-    if page["metadata"]["truncated"] == true {
-        return format!("{} entries shown · Listing incomplete", entries.len());
+    if page.truncated() {
+        return format!("{} entries shown · Listing incomplete", page.len());
     }
-    if page["nextCursor"].is_string() {
-        return format!("{} entries shown · More available", entries.len());
+    if page.next_cursor().is_some() {
+        return format!("{} entries shown · More available", page.len());
     }
     format!(
         "{} {}",
-        entries.len(),
-        if entries.len() == 1 {
-            "entry"
-        } else {
-            "entries"
-        }
+        page.len(),
+        if page.len() == 1 { "entry" } else { "entries" }
     )
 }
 /// Age of Newport's successful read, not a claim that origin was contacted.
@@ -400,15 +456,15 @@ fn read_feedback(age: Option<Duration>) -> String {
         if amount == 1 { "" } else { "s" }
     )
 }
-fn change_mark(entry: &Value) -> &'static str {
-    if entry["conflicted"] == true {
+fn change_mark(entry: &StatusEntry) -> &'static str {
+    if entry.conflicted {
         return "!";
     }
-    if entry["untracked"] == true {
+    if entry.untracked {
         return "?";
     }
-    let flags = entry["flags"].as_u64().unwrap_or(0);
-    if entry["staged"] == true {
+    let flags = entry.flags;
+    if entry.staged {
         if flags & 1 != 0 {
             "A"
         } else if flags & (1 << 2) != 0 {
@@ -426,23 +482,102 @@ fn change_mark(entry: &Value) -> &'static str {
         "M"
     }
 }
-fn checkout_target(branch: &Value) -> Option<(String, String)> {
-    if branch["current"] != false {
-        return None;
-    }
-    local_branch_target(branch)
+fn checkout_target(branch: Option<&Branch>) -> Option<(String, String)> {
+    local_branch_target(branch.filter(|branch| !branch.current)?)
 }
-pub(super) fn local_branch_target(branch: &Value) -> Option<(String, String)> {
-    let name = branch["name"]["display"].as_str()?;
-    let oid = branch["oid"]["hex"].as_str()?;
-    (branch["remote"] == false
+/// The name and tip of a local branch whose name is lossless.
+pub(super) fn local_branch_target(branch: &Branch) -> Option<(String, String)> {
+    let name = branch.name.display.as_str();
+    let oid = branch.oid.hex.as_str();
+    (!branch.remote
         && !name.is_empty()
         && !oid.is_empty()
-        && branch["name"]["bytesB64"] == base64::engine::general_purpose::STANDARD.encode(name))
+        && branch.name.bytes_b64 == base64::engine::general_purpose::STANDARD.encode(name))
     .then(|| (name.to_owned(), oid.to_owned()))
 }
+/// A listing row's title and the detail line beneath it.
+fn row_text(entry: &Entry) -> (String, String) {
+    match entry {
+        Entry::Change(e) => (
+            e.path.display.clone(),
+            if e.conflicted {
+                "Conflicted"
+            } else if e.staged && e.unstaged {
+                "Staged and unstaged"
+            } else if e.staged {
+                "Staged"
+            } else if e.untracked {
+                "Untracked"
+            } else {
+                "Modified"
+            }
+            .into(),
+        ),
+        Entry::Commit(e) => (
+            git_commit_header::history_subject(e),
+            git_commit_header::history_subtitle(e),
+        ),
+        Entry::Branch(e) => (
+            e.name.display.clone(),
+            [
+                if e.current {
+                    "Current branch".into()
+                } else {
+                    String::new()
+                },
+                e.upstream
+                    .as_ref()
+                    .map(|upstream| {
+                        let name = upstream.display.as_str();
+                        format!(
+                            "Tracks {}",
+                            name.strip_prefix("refs/remotes/")
+                                .or_else(|| name.strip_prefix("refs/heads/"))
+                                .unwrap_or(name)
+                        )
+                    })
+                    .unwrap_or_default(),
+            ]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · "),
+        ),
+        Entry::Stash(e) => (
+            format!(
+                "{}{}",
+                if e.message.is_empty() {
+                    "Unnamed stash"
+                } else {
+                    &e.message
+                },
+                if e.message_truncated { "…" } else { "" }
+            ),
+            format!(
+                "stash@{{{}}} · {}",
+                e.index,
+                git_commit_header::relative_time(e.time, chrono::Utc::now().timestamp())
+            ),
+        ),
+        Entry::Tag(e) => (
+            e.name
+                .as_ref()
+                .map_or_else(|| "—".into(), |name| name.display.clone()),
+            format!(
+                "{} · {}",
+                if e.annotated {
+                    "Annotated tag"
+                } else {
+                    "Lightweight tag"
+                },
+                e.oid.hex.chars().take(7).collect::<String>()
+            ),
+        ),
+        Entry::Remote(e) => (e.name.clone(), String::new()),
+    }
+}
 impl Newport {
-    pub(super) fn git_open_worktree_path(&mut self, path: Value, cx: &mut Context<Self>) {
+    pub(super) fn git_open_worktree_path(&mut self, path: GitPath, cx: &mut Context<Self>) {
         if self.git_write_pending() || !self.git.begin_checkout_switch(path.clone()) {
             return;
         }
@@ -450,15 +585,7 @@ impl Newport {
         self.git_branch_picker_close();
         self.project_checks = None;
         self.resources.invalidate("repository");
-        self.request_git(
-            "repository",
-            GitRequest::Open {
-                path: newport_protocol::git::Path {
-                    bytes_b64: text(&path, "bytesB64"),
-                    display: text(&path, "display"),
-                },
-            },
-        );
+        self.request_git_typed("repository", GitRequest::Open { path });
         if let Some(error) = self
             .resources
             .get("repository")
@@ -472,35 +599,41 @@ impl Newport {
         self.git.branches.open
             && self.git.integration_review.is_none()
             && !self.git_mutation_blocks_write()
-            && self.git.repo["capabilities"]["readOnly"] == false
-            && self.git.repo["capabilities"]["workingTree"] == true
+            && self.git.writable()
+            && self.git.has_working_tree()
             && self.git.branches.error.is_none()
             && ["git-branches", "git-branch-status"].iter().all(|key| {
                 self.resources
                     .get(key)
                     .is_some_and(|r| !r.pending && r.error.is_none())
             })
-            && self.value("git-branch-status")["snapshot"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty())
-            && self.value("git-branch-status")["metadata"]["integration"].is_null()
+            && self.git_status("git-branch-status").is_some_and(|status| {
+                !status.snapshot.is_empty() && status.metadata.integration.is_none()
+            })
+    }
+    /// The snapshot of the branch picker's status read.
+    pub(super) fn branch_status_snapshot(&self) -> String {
+        self.git_status("git-branch-status")
+            .map_or_else(|| "—".into(), |status| status.snapshot.clone())
     }
     pub(super) fn git_can_checkout(&self) -> bool {
         self.git_can_write_branch()
             && !self.git_branch_review_open()
-            && checkout_target(&self.git.branches.selected).is_some()
+            && checkout_target(self.git.branches.selected.as_ref()).is_some()
             && self.git_branch_worktree_unoccupied()
     }
     pub(super) fn git_new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.git_can_write_branch() || self.git_branch_review_open() {
             return;
         }
-        let status = self.value("git-branch-status");
-        let head = &status["metadata"]["head"];
-        let oid = text(&head["oid"], "hex");
-        if oid.is_empty() {
+        let Some(oid) = self
+            .git_status("git-branch-status")
+            .and_then(|status| status.metadata.head.oid.as_ref())
+            .map(|oid| oid.hex.clone())
+            .filter(|oid| !oid.is_empty())
+        else {
             return;
-        }
+        };
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Branch name"));
         crate::controls::focus_editor(&name, window, cx);
         let subscription = Self::project_form_input(
@@ -512,9 +645,12 @@ impl Newport {
         self.git.branch_form = Some(BranchForm {
             id: uuid::Uuid::new_v4(),
             name,
-            snapshot: text(&status, "snapshot"),
+            snapshot: self.branch_status_snapshot(),
             oid,
-            source: text(&head["name"], "display"),
+            source: self
+                .git_status("git-branch-status")
+                .and_then(|status| status.metadata.head.name.as_ref())
+                .map_or_else(|| "—".into(), |name| name.display.clone()),
             rename: false,
             _subscription: subscription,
         });
@@ -524,7 +660,13 @@ impl Newport {
         if !self.git_can_write_branch() || self.git_branch_review_open() {
             return;
         }
-        let Some((source, oid)) = local_branch_target(&self.git.branches.selected) else {
+        let Some((source, oid)) = self
+            .git
+            .branches
+            .selected
+            .as_ref()
+            .and_then(local_branch_target)
+        else {
             return;
         };
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("New branch name"));
@@ -539,7 +681,7 @@ impl Newport {
         self.git.branch_form = Some(BranchForm {
             id: uuid::Uuid::new_v4(),
             name,
-            snapshot: text(&self.value("git-branch-status"), "snapshot"),
+            snapshot: self.branch_status_snapshot(),
             oid,
             source,
             rename: true,
@@ -668,10 +810,10 @@ impl Newport {
         if !self.git_can_checkout() {
             return;
         }
-        let Some((branch, oid)) = checkout_target(&self.git.branches.selected) else {
+        let Some((branch, oid)) = checkout_target(self.git.branches.selected.as_ref()) else {
             return;
         };
-        let snapshot = text(&self.value("git-branch-status"), "snapshot");
+        let snapshot = self.branch_status_snapshot();
         self.start_git_mutation(
             self.git_repository_id(),
             format!("Switch to {branch}"),
@@ -682,37 +824,40 @@ impl Newport {
         );
     }
     pub(super) fn git_can_change_index(&self, stage: bool) -> bool {
-        self.git_can_change_entry(stage, &self.git.selected)
+        self.git
+            .entry()
+            .is_some_and(|entry| self.git_can_change_entry(stage, entry))
     }
-    pub(super) fn git_can_change_entry(&self, stage: bool, entry: &Value) -> bool {
+    pub(super) fn git_can_change_entry(&self, stage: bool, entry: &StatusEntry) -> bool {
+        let Some(page) = self.git.status_page() else {
+            return false;
+        };
         self.git.tab == 0
             && !self.git_mutation_blocks_write()
-            && self.git.repo["capabilities"]["readOnly"] == false
-            && self.git.repo["capabilities"]["workingTree"] == true
-            && self.git.repo["bare"] == false
-            && self.git.page["snapshot"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty())
-            && entry["entryId"].as_str().is_some_and(|s| !s.is_empty())
+            && self.git.writable()
+            && self.git.has_working_tree()
+            && self.git.bare() == Some(false)
+            && !page.snapshot.is_empty()
+            && !entry.entry_id.is_empty()
             && self.git.error.is_none()
             && !self
                 .resources
                 .get("git-list")
                 .is_some_and(|r| r.pending || r.error.is_some())
             && if stage {
-                entry["unstaged"] == true
-                    || entry["untracked"] == true
-                    || entry["conflicted"] == true
+                entry.unstaged || entry.untracked || entry.conflicted
             } else {
-                entry["staged"] == true && self.git.page["metadata"]["integration"].is_null()
+                entry.staged && page.metadata.integration.is_none()
             }
     }
     pub(super) fn git_change_index(&mut self, stage: bool, cx: &mut Context<Self>) {
         if !self.git_can_change_index(stage) {
             return;
         }
-        let snapshot = text(&self.git.page, "snapshot");
-        let entry = text(&self.git.selected, "entryId");
+        let snapshot = self.git.snapshot().to_owned();
+        let Some(entry) = self.git.entry().map(|entry| entry.entry_id.clone()) else {
+            return;
+        };
         let title = format!(
             "{} {}",
             if stage { "Stage" } else { "Unstage" },
@@ -728,28 +873,32 @@ impl Newport {
         );
     }
     pub(super) fn git_repository_id(&self) -> String {
-        self.git.repo["repoId"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned()
+        self.git.repo_id().unwrap_or_default().to_owned()
     }
-    pub(super) fn diff_page(&self) -> &Value {
+    pub(super) fn diff_page(&self) -> Option<&newport_client::git_diff_page::DiffPage> {
         if self.git_is_inspection() {
-            return &self.git.history.diff;
+            return self.git.history.diff.as_ref();
         }
-        &self.git.diff
+        self.git.diff.as_ref()
     }
     pub(super) fn diff_title(&self) -> String {
         if self.git_is_inspection() {
-            return text(&self.git.history.path, "display");
+            return self
+                .git
+                .history
+                .path
+                .as_ref()
+                .map_or_else(|| "—".into(), |path| path.display.clone());
         }
-        text(&self.git.selected["path"], "display")
+        self.git
+            .entry()
+            .map_or_else(|| "—".into(), |entry| entry.path.display.clone())
     }
     pub(super) fn git_release(&mut self) {
         self.git.release();
     }
     pub(super) fn git_refresh(&mut self) {
-        if self.git.switching_path.is_some() || !self.git.repo["repoId"].is_string() {
+        if self.git.switching_path.is_some() || self.git.repo.is_none() {
             return;
         }
         self.git_cancel_index_refresh();
@@ -758,15 +907,7 @@ impl Newport {
         let Ok(server) = uuid::Uuid::parse_str(&self.server) else {
             return;
         };
-        self.request_refresh(
-            "git-refresh",
-            desktop::Operation::Git(Box::new(desktop::git::Operation::RefreshRepository(
-                Box::new(desktop::git::RefreshRepositoryArgs {
-                    server,
-                    repo_id: self.git_repository_id(),
-                }),
-            ))),
-        );
+        self.request_repository_refresh("git-refresh", server);
         if let Some(error) = self
             .resources
             .get("git-refresh")
@@ -785,7 +926,7 @@ impl Newport {
             return;
         }
         if self.git.switching_path.is_some()
-            || self.value("git-refresh")["repoId"] != self.git.repo["repoId"]
+            || self.git.refreshed.get("git-refresh").map(String::as_str) != self.git.repo_id()
         {
             return;
         }
@@ -838,22 +979,22 @@ impl Newport {
         ] {
             self.resources.invalidate(key);
         }
-        self.git.page = Value::Null;
+        self.git.page = None;
         self.git.continuation = None;
         self.git.error = None;
-        let remote = self.git.selected["name"].as_str().map(str::to_owned);
-        self.git.selected = Value::Null;
+        let remote = self.git.remote_name().map(str::to_owned);
+        self.git.selected = None;
         if self.git.tab == 6
             && let Some(name) = remote
         {
-            self.git.selected = json!({"name":name});
+            self.git.selected = Some(Entry::Remote(newport_protocol::git::RemoteName { name }));
         }
         self.git.pull_form = None;
         self.git.stash_apply = None;
         self.git.tag_delete = None;
         self.git.tag_push = None;
         self.git.worktree_remove = None;
-        self.git.diff = Value::Null;
+        self.git.diff = None;
         self.git.diff_cursor = None;
         self.git_load();
     }
@@ -864,9 +1005,9 @@ impl Newport {
             self.resources.invalidate(key);
         }
         self.reset_conflict_preview();
-        self.git.page = Value::Null;
-        self.git.selected = Value::Null;
-        self.git.diff = Value::Null;
+        self.git.page = None;
+        self.git.selected = None;
+        self.git.diff = None;
         self.git.continuation = None;
         self.git.diff_cursor = None;
         self.git.error = None;
@@ -874,19 +1015,17 @@ impl Newport {
         self.git.listing.demand = git_page_demand::Demand::default();
     }
     fn git_cancel_checkout_switch(&mut self, error: String) {
-        let path = self.git.switching_path.take().unwrap_or_default();
-        let repo = std::mem::take(&mut self.git.switching_repo);
-        if repo["repoId"].is_string() && repo["repoId"] != self.git.repo["repoId"] {
-            let server = self.server.clone();
-            std::thread::spawn(move || {
-                backend::Backend::discover().release_repository(&server, &repo)
-            });
+        let path = self.git.switching_path.take();
+        if let Some(repo) = self.git.switching_repo.take()
+            && Some(repo.repo_id.as_str()) != self.git.repo_id()
+        {
+            release_repository(self.server.clone(), repo.repo_id);
         }
         self.resources.invalidate("repository");
         self.resources.invalidate("git-checkout-initial");
         self.notification = Some(Notification::error(format!(
             "Couldn’t open {}: {error}",
-            text(&path, "display")
+            path.map(|path| path.display).unwrap_or_default()
         )));
     }
     pub(super) fn git_completed(&mut self, key: &str) {
@@ -905,28 +1044,27 @@ impl Newport {
                 return;
             }
             if key == "repository" {
-                let repo = self.value(key);
-                if !repo["repoId"].is_string() {
+                let Some(repo) = self.git_opened_repository() else {
                     self.git_cancel_checkout_switch("Invalid repository response.".into());
                     return;
-                }
+                };
                 // Prepare the new checkout behind the current view. Its first
                 // page uses the same defaults as the fresh workspace below.
                 let next = Workspace {
-                    tab: if repo["bare"] == true && self.git.tab == 0 {
+                    tab: if repo.bare && self.git.tab == 0 {
                         1
                     } else {
                         self.git.tab
                     },
-                    repo: repo.clone(),
+                    repo: Some(repo.clone()),
                     ..Default::default()
                 };
                 let Some(request) = next.read_request(None) else {
                     return;
                 };
-                self.git.switching_repo = repo;
+                self.git.switching_repo = Some(repo);
                 self.resources.invalidate("git-checkout-initial");
-                self.request_git("git-checkout-initial", request);
+                self.request_git_typed("git-checkout-initial", request);
                 // Queue saturation completes synchronously, without a reply.
                 if let Some(error) = self
                     .resources
@@ -937,21 +1075,21 @@ impl Newport {
                 }
                 return;
             }
-            let first_page = self.value(key);
-            if !first_page["entries"].is_array() {
+            let Some(first_page) = self.git_listing(key) else {
                 self.git_cancel_checkout_switch("Invalid repository listing.".into());
                 return;
-            }
-            let repo = std::mem::take(&mut self.git.switching_repo);
-            if self.git.tab == 6
-                && let Err(error) = newport_client::git_remotes::Names::validate_first(&first_page)
+            };
+            if let Listing::Remotes(page) = &first_page
+                && let Err(error) = newport_client::git_remotes::Names::validate_first(page)
             {
-                self.git.switching_repo = repo;
                 self.git_cancel_checkout_switch(error);
                 return;
             }
+            let Some(repo) = self.git.switching_repo.take() else {
+                return;
+            };
             let path = self.git.switching_path.take().unwrap();
-            if repo["repoId"] != self.git.repo["repoId"] {
+            if Some(repo.repo_id.as_str()) != self.git.repo_id() {
                 self.git_release();
             }
             // Commit descriptor and listing in the same UI update; stale reads
@@ -962,8 +1100,8 @@ impl Newport {
                 .install_checkout(path, repo.clone(), first_page.clone());
             let generation = self.resources.begin("git-list").unwrap();
             self.resources
-                .complete("git-list", generation, Ok(first_page));
-            self.git_repository_opened(self.git.repo.clone());
+                .complete_git("git-list", generation, Ok(first_page.into_reply()));
+            self.git_repository_opened(repo);
             return;
         }
         if self.git_recover_missing_checkout(key) {
@@ -1016,18 +1154,21 @@ impl Newport {
                 self.git_watch_completed();
             }
             "git-branch-status" | "git-remote-status" | "git-tag-status" | "git-stash-status" => {
-                let status = self.value(key);
-                if status["metadata"]["head"].is_object() {
-                    self.git.repo["head"] = status["metadata"]["head"].clone();
+                if let Some(head) = self
+                    .git_status(key)
+                    .map(|status| status.metadata.head.clone())
+                {
+                    self.git.observe_head(&head);
                 }
             }
             "repository" => {
-                self.git_repository_opened(self.value(key));
+                if let Some(repo) = self.git_opened_repository() {
+                    self.git_repository_opened(repo);
+                }
             }
             "git-list" => {
-                if self.git.tab == 6
-                    && let Err(error) =
-                        newport_client::git_remotes::Names::validate_first(&self.value(key))
+                if let Some(Listing::Remotes(page)) = self.git_listing(key)
+                    && let Err(error) = newport_client::git_remotes::Names::validate_first(&page)
                 {
                     self.git.error = Some(error);
                     return;
@@ -1036,42 +1177,48 @@ impl Newport {
             }
             "git-more" => {
                 if let Some(cursor) = self.git.continuation.take() {
-                    let merged = if self.git.tab == 6 {
-                        newport_client::git_remotes::Names::merge_values(
-                            &self.git.page,
-                            self.value(key),
-                            &cursor,
-                        )
-                    } else {
-                        merge_page(&self.git.page, self.value(key), &cursor)
+                    let merged = match (&self.git.page, self.git_listing(key)) {
+                        (Some(page), Some(incoming)) => page.merge(incoming, &cursor),
+                        _ => Err("Invalid repository page. Refresh to retry.".into()),
                     };
                     match merged {
-                        Ok(p) => self.git.page = p,
+                        Ok(p) => self.git.page = Some(p),
                         Err(e) => self.git.error = Some(e),
                     }
                 }
             }
             "git-diff" | "git-diff-more" => {
-                let result = self.value(key);
-                if result["metadata"]["sourceSnapshot"] != self.git.page["snapshot"]
-                    || result["metadata"]["entryId"] != self.git.selected["entryId"]
-                    || !self.git.diff_context.matches(&result, self.git.diff_staged)
-                {
-                    self.git.error =
-                        Some("The file changed. Refresh before reviewing its diff.".into());
-                    return;
-                }
+                let result = match self.git_reply(key) {
+                    Some(newport_protocol::git::Reply::DiffPage(page))
+                        if page.metadata.source_snapshot.as_deref()
+                            == self.git.page.as_ref().map(Listing::snapshot)
+                            && page.metadata.entry_id.as_deref()
+                                == self.git.entry().map(|entry| entry.entry_id.as_str())
+                            && self
+                                .git
+                                .diff_context
+                                .matches(&page.metadata, self.git.diff_staged) =>
+                    {
+                        (**page).clone()
+                    }
+                    _ => {
+                        self.git.error =
+                            Some("The file changed. Refresh before reviewing its diff.".into());
+                        return;
+                    }
+                };
                 if key == "git-diff" {
-                    self.git.diff = result;
+                    self.git.diff = Some(result);
                     self.git.diff_recovery.reset();
                 } else if let Some(cursor) = self.git.diff_cursor.take() {
-                    match newport_client::git_diff_page::merge(
-                        &self.git.diff,
-                        result,
-                        &cursor,
-                        true,
-                    ) {
-                        Ok(page) => self.git.diff = page,
+                    let merged = match &self.git.diff {
+                        Some(diff) => {
+                            newport_client::git_diff_page::merge(diff, result, &cursor, true)
+                        }
+                        None => Err("Invalid repository page. Refresh to retry.".into()),
+                    };
+                    match merged {
+                        Ok(page) => self.git.diff = Some(page),
                         Err(error) => self.git.error = Some(error),
                     }
                 }
@@ -1079,8 +1226,21 @@ impl Newport {
             _ => {}
         }
     }
+    /// The listing `key`'s read last returned.
+    pub(super) fn git_listing(&self, key: &str) -> Option<Listing> {
+        self.git_reply(key).and_then(Listing::from_reply)
+    }
+    /// The status page `key`'s read last returned.
+    pub(super) fn git_status(&self, key: &str) -> Option<&StatusPage> {
+        match self.git_reply(key) {
+            Some(newport_protocol::git::Reply::Status(page)) => Some(page),
+            _ => None,
+        }
+    }
     pub(super) fn git_listing_completed(&mut self, index_only: bool) {
-        let page = self.value("git-list");
+        let Some(page) = self.git_listing("git-list") else {
+            return;
+        };
         let comparison_changed = if index_only {
             self.git.accept_listing_with_scope(page, true)
         } else {
@@ -1094,11 +1254,12 @@ impl Newport {
             self.resources.invalidate("git-clean-commit");
         }
         self.load_clean_commit();
-        if let Some((entry, staged)) = self.git.diff_recovery.resolve(&self.git.page) {
-            self.git.selected = entry;
+        let page = self.git.page.as_ref().and_then(Listing::status);
+        if let Some((entry, staged)) = self.git.diff_recovery.resolve(page) {
+            self.git.selected = Some(Entry::Change(entry));
             self.git.diff_staged = staged;
             self.git_diff_request(false);
-        } else if comparison_changed && self.git.selected["entryId"].is_string() {
+        } else if comparison_changed && self.git.entry().is_some() {
             self.git_diff_request(false);
         }
     }
@@ -1123,10 +1284,11 @@ impl Newport {
             .resources
             .get(key)
             .and_then(|r| r.error_code.as_deref());
+        let entry = self.git.entry().cloned();
         match self
             .git
             .diff_recovery
-            .begin(code, &self.git.selected, self.git.diff_staged)
+            .begin(code, entry.as_ref(), self.git.diff_staged)
         {
             Decision::Ignore => return,
             Decision::Exhausted => {
@@ -1150,9 +1312,9 @@ impl Newport {
         ] {
             self.resources.invalidate(key);
         }
-        self.git.page = Value::Null;
-        self.git.selected = Value::Null;
-        self.git.diff = Value::Null;
+        self.git.page = None;
+        self.git.selected = None;
+        self.git.diff = None;
         self.git.continuation = None;
         self.git.diff_cursor = None;
         self.git.diff_demand = git_diff::ScrollDemand::default();
@@ -1161,10 +1323,10 @@ impl Newport {
         self.git_load();
     }
     fn git_diff_request(&mut self, more: bool) {
-        if self.git.index_refresh.is_some()
-            || !self.git.selected["entryId"].is_string()
-            || self.git.error.is_some()
-        {
+        let Some(entry_id) = self.git.entry().map(|entry| entry.entry_id.clone()) else {
+            return;
+        };
+        if self.git.index_refresh.is_some() || self.git.error.is_some() {
             return;
         }
         let side = if self.git.diff_staged {
@@ -1182,18 +1344,23 @@ impl Newport {
             {
                 return;
             }
-            let Some(cursor) = self.git.diff["nextCursor"].as_str().map(str::to_owned) else {
+            let Some(cursor) = self
+                .git
+                .diff
+                .as_ref()
+                .and_then(|diff| diff.next_cursor.clone())
+            else {
                 return;
             };
             request_cursor = Some(cursor.clone());
             self.git.diff_cursor = Some(cursor);
         }
-        self.request_git(
+        self.request_git_typed(
             if more { "git-diff-more" } else { "git-diff" },
             GitRequest::DiffPage {
                 repo_id: self.git_repository_id(),
-                snapshot: text(&self.git.page, "snapshot"),
-                entry_id: text(&self.git.selected, "entryId"),
+                snapshot: self.git.snapshot().to_owned(),
+                entry_id,
                 side,
                 page_size: 200,
                 max_bytes: Some(65536),
@@ -1217,19 +1384,26 @@ impl Newport {
         for key in ["git-diff", "git-diff-more"] {
             self.resources.invalidate(key);
         }
-        self.git.diff = Value::Null;
+        self.git.diff = None;
         self.git.diff_cursor = None;
         self.git.diff_scroll = UniformListScrollHandle::default();
         self.git.error = None;
-        if self.git.selected["conflicted"] == true {
+        if self.git.entry().is_some_and(|entry| entry.conflicted) {
             self.select_conflict_side(0);
         } else {
             self.git_diff_request(false);
         }
     }
-    fn git_repository_opened(&mut self, repo: Value) {
+    /// The repository the last open read returned.
+    fn git_opened_repository(&self) -> Option<Repository> {
+        match self.git_reply("repository") {
+            Some(newport_protocol::git::Reply::Open(repo)) => Some((**repo).clone()),
+            _ => None,
+        }
+    }
+    fn git_repository_opened(&mut self, repo: Repository) {
         self.git.server = self.server.clone();
-        self.git.repo = repo;
+        self.git.repo = Some(repo);
         self.git.restore_document = true;
         self.load_checkout_summary();
         if let Some(path) = self.git.returned_from_missing_checkout.take() {
@@ -1237,11 +1411,11 @@ impl Newport {
                 "The worktree {path} is no longer available. Opened the saved project."
             )));
         }
-        if self.git.repo["bare"] == true && self.git.tab == 0 {
+        if self.git.bare() == Some(true) && self.git.tab == 0 {
             self.git.tab = 1;
         }
         self.save_workspace_selection();
-        if self.git.page["entries"].is_array() {
+        if self.git.page.is_some() {
             self.git_load_related();
             self.load_clean_commit();
         } else {
@@ -1256,7 +1430,7 @@ impl Newport {
         let Some(_) = tab_info(self.git.tab) else {
             return;
         };
-        if !self.git.repo["repoId"].is_string() {
+        if self.git.repo.is_none() {
             return;
         }
         if self.git.tab == 0 {
@@ -1266,7 +1440,7 @@ impl Newport {
         let Some(request) = self.git_listing_request(None) else {
             return;
         };
-        self.request_git("git-list", request);
+        self.request_git_typed("git-list", request);
         self.git_load_related();
     }
     fn git_load_related(&mut self) {
@@ -1276,7 +1450,7 @@ impl Newport {
             if self.git.settings_open || self.git.settings.is_some() {
                 self.git_load_repository_settings();
             }
-            self.request_git(
+            self.request_git_typed(
                 "git-remote-status",
                 GitRequest::Status {
                     repo_id: self.git_repository_id(),
@@ -1287,7 +1461,7 @@ impl Newport {
             );
         }
         if matches!(self.git.tab, 1 | 4) {
-            self.request_git(
+            self.request_git_typed(
                 "git-tag-status",
                 GitRequest::Status {
                     repo_id: self.git_repository_id(),
@@ -1298,7 +1472,7 @@ impl Newport {
             );
         }
         if self.git.tab == 3 {
-            self.request_git(
+            self.request_git_typed(
                 "git-stash-status",
                 GitRequest::Status {
                     repo_id: self.git_repository_id(),
@@ -1316,7 +1490,12 @@ impl Newport {
             && (!git_layout::compact(self.content_width, self.git.tab) || !self.git.detail_open)
             && self.git.error.is_none()
             && self.git.continuation.is_none()
-            && self.git.page["nextCursor"].is_string()
+            && self
+                .git
+                .page
+                .as_ref()
+                .and_then(Listing::next_cursor)
+                .is_some()
             && ["git-list", "git-more"].iter().all(|key| {
                 self.resources
                     .get(key)
@@ -1336,7 +1515,8 @@ impl Newport {
             git_listing::row_height(self.git.tab),
             ready,
         );
-        if self.git.listing.demand.take(&self.git.page, ready, at_end) || (ready && scrolled) {
+        let identity = self.git.page.as_ref().map(Listing::identity);
+        if self.git.listing.demand.take(&identity, ready, at_end) || (ready && scrolled) {
             self.git_more();
         }
     }
@@ -1360,14 +1540,20 @@ impl Newport {
         {
             return;
         }
-        let Some(cursor) = self.git.page["nextCursor"].as_str().map(str::to_owned) else {
+        let Some(cursor) = self
+            .git
+            .page
+            .as_ref()
+            .and_then(Listing::next_cursor)
+            .map(str::to_owned)
+        else {
             return;
         };
         let Some(request) = self.git_listing_request(Some(cursor.clone())) else {
             return;
         };
         self.git.continuation = Some(cursor);
-        self.request_git("git-more", request);
+        self.request_git_typed("git-more", request);
     }
     pub(super) fn git_navigate(&mut self, tab: usize, cx: &mut Context<Self>) {
         self.project_show_review(cx);
@@ -1393,15 +1579,16 @@ impl Newport {
     }
     pub(super) fn git_read_feedback(&self) -> String {
         if let Some(path) = &self.git.switching_path {
-            return format!("Opening {}…", text(path, "display"));
+            return format!("Opening {}…", path.display);
         }
         let resource = self.resources.get("git-list");
         let pending = resource.is_some_and(|read| read.pending);
         let failed = resource.is_some_and(|read| read.error.is_some()) || self.git.error.is_some();
         // Keep incomplete/error/filter feedback visible instead of presenting
         // a successful read as if it covered the entire listing.
-        if pending || failed || self.git.page["metadata"]["truncated"] == true {
-            return listing_feedback(&self.git.page, pending, failed);
+        let page = self.git.page.as_ref();
+        if pending || failed || page.is_some_and(Listing::truncated) {
+            return listing_feedback(page, pending, failed);
         }
         if let Some(filtered) = self.git_filtered_feedback() {
             return filtered;
@@ -1411,8 +1598,8 @@ impl Newport {
                 .and_then(|read| read.updated_at)
                 .map(|at| at.elapsed()),
         );
-        if self.git.page["nextCursor"].is_string() {
-            format!("{age} · {}", listing_feedback(&self.git.page, false, false))
+        if page.and_then(Listing::next_cursor).is_some() {
+            format!("{age} · {}", listing_feedback(page, false, false))
         } else {
             age
         }
@@ -1427,7 +1614,7 @@ impl Newport {
             .dropdown_menu({
                 let weak = cx.entity().downgrade();
                 let server = self.server.clone();
-                let repo = self.git.repo["repoId"].clone();
+                let repo = self.git.repo_id().map(str::to_owned);
                 move |mut menu, _, _| {
                     for (tab, title, icon) in [
                         (3, "Stashes", IconName::Archive),
@@ -1442,7 +1629,7 @@ impl Newport {
                                 let _ = weak.update(cx, |this, cx| {
                                     if this.page == Page::Projects
                                         && this.server == server
-                                        && this.git.repo["repoId"] == repo
+                                        && this.git.repo_id() == repo.as_deref()
                                         && !this.project_dialog_open
                                     {
                                         this.git_navigate(tab, cx);
@@ -1460,7 +1647,7 @@ impl Newport {
                             .on_click(move |_, window, cx| {
                                 let _ = weak.update(cx, |this, cx| {
                                     if this.server == server
-                                        && this.git.repo["repoId"] == repo
+                                        && this.git.repo_id() == repo.as_deref()
                                         && !this.project_dialog_open
                                     {
                                         this.git_open_files(window, cx);
@@ -1479,10 +1666,8 @@ impl Newport {
         };
         let compact = self.project_review_compact(cx);
         let entries = self.git_visible_entries();
-        let scroll_key = git_page_demand::identity(&self.git.page);
-        let empty = self.git.page["entries"]
-            .as_array()
-            .is_some_and(|entries| entries.is_empty())
+        let scroll_key = self.git.page.as_ref().map(Listing::identity);
+        let empty = self.git.page.as_ref().is_some_and(Listing::is_empty)
             && !self
                 .resources
                 .get("git-list")
@@ -1557,91 +1742,7 @@ impl Newport {
                             range
                                 .map(|i| {
                                     let e = &entries[i];
-                                    let (title, subtitle) = match tab {
-                                        0 => (
-                                            text(&e["path"], "display"),
-                                            if e["conflicted"] == true {
-                                                "Conflicted".into()
-                                            } else if e["staged"] == true && e["unstaged"] == true {
-                                                "Staged and unstaged".into()
-                                            } else if e["staged"] == true {
-                                                "Staged".into()
-                                            } else if e["untracked"] == true {
-                                                "Untracked".into()
-                                            } else {
-                                                "Modified".into()
-                                            },
-                                        ),
-                                        1 => (
-                                            git_commit_header::history_subject(e),
-                                            git_commit_header::history_subtitle(e),
-                                        ),
-                                        2 => (
-                                            text(&e["name"], "display"),
-                                            [
-                                                if e["current"] == true {
-                                                    "Current branch".into()
-                                                } else {
-                                                    String::new()
-                                                },
-                                                e["upstream"]["display"]
-                                                    .as_str()
-                                                    .map(|name| {
-                                                        format!(
-                                                            "Tracks {}",
-                                                            name.strip_prefix("refs/remotes/")
-                                                                .or_else(|| name
-                                                                    .strip_prefix("refs/heads/"))
-                                                                .unwrap_or(name)
-                                                        )
-                                                    })
-                                                    .unwrap_or_default(),
-                                            ]
-                                            .into_iter()
-                                            .filter(|s| !s.is_empty())
-                                            .collect::<Vec<_>>()
-                                            .join(" · "),
-                                        ),
-                                        3 => (
-                                            format!(
-                                                "{}{}",
-                                                if text(e, "message").is_empty() {
-                                                    "Unnamed stash".to_owned()
-                                                } else {
-                                                    text(e, "message")
-                                                },
-                                                if e["messageTruncated"] == true {
-                                                    "…"
-                                                } else {
-                                                    ""
-                                                }
-                                            ),
-                                            format!(
-                                                "stash@{{{}}} · {}",
-                                                text(e, "index"),
-                                                git_commit_header::relative_time(
-                                                    &e["time"],
-                                                    chrono::Utc::now().timestamp()
-                                                )
-                                            ),
-                                        ),
-                                        4 => (
-                                            text(&e["name"], "display"),
-                                            format!(
-                                                "{} · {}",
-                                                if e["annotated"] == true {
-                                                    "Annotated tag"
-                                                } else {
-                                                    "Lightweight tag"
-                                                },
-                                                text(&e["oid"], "hex")
-                                                    .chars()
-                                                    .take(7)
-                                                    .collect::<String>()
-                                            ),
-                                        ),
-                                        _ => (text(e, "name"), String::new()),
-                                    };
+                                    let (title, subtitle) = row_text(e);
                                     let entry = e.clone();
                                     div()
                                         .h(px(git_listing::row_height(tab)))
@@ -1661,14 +1762,14 @@ impl Newport {
                                                 format!("{title} · {subtitle}")
                                             })
                                             .custom(git_file_row::selection_style(
-                                                this.git.selected == *e,
+                                                this.git.selected.as_ref() == Some(e),
                                                 cx,
                                             ))
-                                            .selected(this.git.selected == *e)
+                                            .selected(this.git.selected.as_ref() == Some(e))
                                             .w_full()
                                             .h_full()
                                             .min_w_0()
-                                            .toggled(this.git.selected == *e)
+                                            .toggled(this.git.selected.as_ref() == Some(e))
                                             .when(matches!(tab, 3 | 4), |button| {
                                                 button.child(
                                                     Icon::new(if tab == 3 {
@@ -1696,18 +1797,26 @@ impl Newport {
                                                     } else {
                                                         6.
                                                     }))
-                                                    .when(tab == 0, |row| {
-                                                        row.child(
-                                                            div()
-                                                                .text_size(px(crate::ui::FONT_SIZE))
-                                                                .text_color(
-                                                                    cx.theme().muted_foreground,
-                                                                )
-                                                                .w(px(16.))
-                                                                .flex_shrink_0()
-                                                                .child(change_mark(e)),
-                                                        )
-                                                    })
+                                                    .when_some(
+                                                        match e {
+                                                            Entry::Change(entry) => Some(entry),
+                                                            _ => None,
+                                                        },
+                                                        |row, entry| {
+                                                            row.child(
+                                                                div()
+                                                                    .text_size(px(
+                                                                        crate::ui::FONT_SIZE,
+                                                                    ))
+                                                                    .text_color(
+                                                                        cx.theme().muted_foreground,
+                                                                    )
+                                                                    .w(px(16.))
+                                                                    .flex_shrink_0()
+                                                                    .child(change_mark(entry)),
+                                                            )
+                                                        },
+                                                    )
                                                     .child(
                                                         div()
                                                             .w_full()
@@ -1727,13 +1836,19 @@ impl Newport {
                                                             .font_weight(FontWeight::MEDIUM)
                                                             .child(title),
                                                     )
-                                                    .when(tab == 1, |row| {
-                                                        row.child(
-                                                            git_commit_header::history_row_identity(
-                                                                e, cx,
-                                                            ),
-                                                        )
-                                                    })
+                                                    .when_some(
+                                                        match e {
+                                                            Entry::Commit(commit) => Some(commit),
+                                                            _ => None,
+                                                        },
+                                                        |row, commit| {
+                                                            row.child(
+                                                                git_commit_header::history_row_identity(
+                                                                    commit, cx,
+                                                                ),
+                                                            )
+                                                        },
+                                                    )
                                                     .when(
                                                         tab != 0 && tab != 1 && tab != 6,
                                                         |row| {
@@ -1758,7 +1873,7 @@ impl Newport {
                                                         return;
                                                     }
                                                     this.project_show_review(cx);
-                                                    this.git.selected = entry.clone();
+                                                    this.git.selected = Some(entry.clone());
                                                     this.git.detail_open = true;
                                                     this.git.stash_apply = None;
                                                     if tab == 3 {
@@ -1778,10 +1893,8 @@ impl Newport {
                                                     if tab == 2 {
                                                         this.git_branch_worktree_owner();
                                                     }
-                                                    if tab == 0 {
-                                                        this.git_select_side(
-                                                            entry["staged"] == true,
-                                                        );
+                                                    if let Entry::Change(change) = &entry {
+                                                        this.git_select_side(change.staged);
                                                     }
                                                     if tab == 1 || tab == 3 || tab == 4 {
                                                         this.git_history_select();
@@ -1814,10 +1927,10 @@ impl Newport {
         if self.git.remote_refs.is_some() {
             return self.remote_refs_view(cx);
         }
-        if !self.git.repo["repoId"].is_string() {
+        if self.git.repo.is_none() {
             return self.git_open_screen(cx);
         }
-        if self.git.repo["bare"] != true && self.code_workspace().is_some() {
+        if self.git.bare() != Some(true) && self.code_workspace().is_some() {
             return self.project_workspace_view(window, cx);
         }
         let tab = self.git.tab;
@@ -1871,7 +1984,7 @@ impl Newport {
                         .child(
                             crate::controls::compact_button("git-back-to-changes")
                                 .icon(IconName::ArrowLeft)
-                                .label(if self.git.repo["bare"] == true {
+                                .label(if self.git.bare() == Some(true) {
                                     "History"
                                 } else {
                                     "Changes"
@@ -1879,7 +1992,7 @@ impl Newport {
                                 .ghost()
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.git_navigate(
-                                        usize::from(this.git.repo["bare"] == true),
+                                        usize::from(this.git.bare() == Some(true)),
                                         cx,
                                     )
                                 })),
@@ -1992,7 +2105,11 @@ impl Newport {
                             .truncate(),
                     )
                     .when(
-                        self.git.page["nextCursor"].is_string()
+                        self.git
+                            .page
+                            .as_ref()
+                            .and_then(Listing::next_cursor)
+                            .is_some()
                             && self
                                 .resources
                                 .get("git-more")
@@ -2041,53 +2158,88 @@ impl Newport {
 #[cfg(test)]
 mod tests {
     use super::{
-        Workspace, checkout_target, listing_feedback, local_branch_target, merge_page,
-        worktree_path,
+        Entry, GitPath, Listing, Workspace, checkout_target, listing_feedback, local_branch_target,
+        worktree_destination,
+    };
+    use crate::git_fixture::{
+        commit, diff_page, history_page, read_only_repository, status_entry, status_page, tag,
+        working_metadata,
     };
     use newport_client::resources::Resources;
-    use serde_json::json;
+    use newport_protocol::git::{Path, StatusEntry};
+
+    fn status(snapshot: &str, entries: Vec<StatusEntry>, next: Option<&str>) -> Listing {
+        Listing::Status(Box::new(status_page(snapshot, entries, next)))
+    }
+    /// A change to the file named `a`, in the given groups.
+    fn change(id: &str, staged: bool, unstaged: bool, untracked: bool) -> StatusEntry {
+        let mut entry = status_entry(id, "a");
+        entry.staged = staged;
+        entry.unstaged = unstaged;
+        entry.untracked = untracked;
+        entry
+    }
+    fn selected(entry: &StatusEntry) -> Option<Entry> {
+        Some(Entry::Change(entry.clone()))
+    }
+    fn old_diff() -> Option<newport_client::git_diff_page::DiffPage> {
+        Some(diff_page(
+            "old diff",
+            working_metadata("before", "entry"),
+            vec![],
+            None,
+        ))
+    }
+
     #[test]
     fn worktree_open_retains_the_visible_checkout_until_success() {
-        let old_path = json!({"bytesB64":"b2xk", "display":"/old"});
-        let next = json!({"bytesB64":"bmV3", "display":"/new"});
+        let old_path = GitPath::new(b"/old");
+        let next = GitPath::new(b"/new");
+        let old = commit("old", "Old");
         let mut view = Workspace {
-            repo: json!({"repoId":"old"}),
-            opening_path: old_path.clone(),
+            repo: Some(read_only_repository("old")),
+            opening_path: Some(old_path.clone()),
             tab: 1,
-            page: json!({"snapshot":"old","entries":[{"oid":"old"}]}),
-            selected: json!({"oid":"old"}),
-            diff: json!({"entries":["visible diff"]}),
+            page: Some(history_page("old", vec![old.clone()], None)),
+            selected: Some(Entry::Commit(old.clone())),
+            diff: Some(diff_page(
+                "visible diff",
+                working_metadata("before", "entry"),
+                vec![],
+                None,
+            )),
             detail_open: true,
             ..Default::default()
         };
         let page = view.page.clone();
         assert!(!view.begin_checkout_switch(old_path.clone()));
         assert!(view.begin_checkout_switch(next.clone()));
-        assert_eq!(view.repo["repoId"], "old");
-        assert_eq!(view.opening_path, old_path);
+        assert_eq!(view.repo_id(), Some("old"));
+        assert_eq!(view.opening_path, Some(old_path.clone()));
         assert_eq!(view.page, page);
-        assert_eq!(view.selected["oid"], "old");
-        assert_eq!(view.diff["entries"], json!(["visible diff"]));
-        assert!(!view.begin_checkout_switch(json!({"bytesB64":"third"})));
+        assert_eq!(view.selected, Some(Entry::Commit(old)));
+        assert_eq!(view.diff.as_ref().unwrap().snapshot, "visible diff");
+        assert!(!view.begin_checkout_switch(GitPath::new(b"/third")));
         assert_eq!(view.switch_view(0, &mut Resources::default()), None);
         assert_eq!(view.switching_path, Some(next));
         // Failed opens only retire the pending destination, not the old view.
         view.switching_path.take();
         assert_eq!(view.page, page);
-        assert_eq!(view.repo["repoId"], "old");
-        assert_eq!(view.opening_path, old_path);
+        assert_eq!(view.repo_id(), Some("old"));
+        assert_eq!(view.opening_path, Some(old_path.clone()));
     }
 
     #[test]
     fn successful_worktree_switch_preserves_layout_but_discards_checkout_state() {
         for tab in [0, 1, 2, 3, 4, 6] {
+            let old = status_entry("old-file", "old");
             let mut view = Workspace {
-                repo: json!({"repoId":"old"}),
+                repo: Some(read_only_repository("old")),
                 tab,
                 detail_open: true,
-                page: json!({"snapshot":"old","entries":[{}]}),
-                selected: json!({"entryId":"old-file"}),
-                diff: json!({"entries":["old diff"]}),
+                page: Some(status("old", vec![old.clone()], None)),
+                selected: selected(&old),
+                diff: old_diff(),
                 error: Some("old error".into()),
                 ..Default::default()
             };
@@ -2098,16 +2250,16 @@ mod tests {
                     resources: Resources::default().take_prefix_except("", &[]),
                 },
             );
-            let path = json!({"bytesB64":"bmV3", "display":"/new"});
+            let path = GitPath::new(b"/new");
             assert!(view.begin_checkout_switch(path.clone()));
             view.replace_checkout(path.clone());
             assert_eq!(view.tab, tab);
             assert!(view.detail_open);
-            assert_eq!(view.opening_path, path);
-            assert!(view.repo.is_null());
-            assert!(view.page.is_null());
-            assert!(view.selected.is_null());
-            assert!(view.diff.is_null());
+            assert_eq!(view.opening_path.as_ref(), Some(&path));
+            assert!(view.repo.is_none());
+            assert!(view.page.is_none());
+            assert!(view.selected.is_none());
+            assert!(view.diff.is_none());
             assert!(view.error.is_none());
             assert!(view.switching_path.is_none());
             assert!(view.saved_views.is_empty());
@@ -2117,48 +2269,49 @@ mod tests {
     #[test]
     fn prepared_checkout_installs_its_first_page_without_an_empty_intermediate_view() {
         for tab in [0, 1, 2, 3, 4, 6] {
+            let old = status_entry("old-file", "old");
             let mut view = Workspace {
-                repo: json!({"repoId":"old"}),
+                repo: Some(read_only_repository("old")),
                 tab,
                 detail_open: true,
-                page: json!({"snapshot":"old", "entries":[{"entryId":"old-file"}]}),
-                selected: json!({"entryId":"old-file"}),
-                diff: json!({"entries":["old diff"]}),
+                page: Some(status("old", vec![old.clone()], None)),
+                selected: selected(&old),
+                diff: old_diff(),
                 ..Default::default()
             };
-            let path = json!({"bytesB64":"bmV3", "display":"/new"});
+            let path = GitPath::new(b"/new");
             assert!(view.begin_checkout_switch(path.clone()));
             // repo.open alone must not clear or relabel the current contents.
-            let repo = json!({"repoId":"new", "head":{"name":"topic"}});
-            view.switching_repo = repo.clone();
-            assert_eq!(view.repo["repoId"], "old");
-            assert_eq!(view.page["entries"][0]["entryId"], "old-file");
-            let page =
-                json!({"snapshot":"new", "entries":[{"entryId":"new-file"}], "nextCursor":"next"});
+            let repo = read_only_repository("new");
+            view.switching_repo = Some(repo.clone());
+            assert_eq!(view.repo_id(), Some("old"));
+            assert_eq!(view.entry().unwrap().entry_id, "old-file");
+            let mut status =
+                status_page("new", vec![status_entry("new-file", "new")], Some("next"));
+            status.metadata.head = repo.head.clone();
+            let page = Listing::Status(Box::new(status));
             view.install_checkout(path.clone(), repo.clone(), page.clone());
-            assert_eq!(view.repo, repo);
-            assert_eq!(view.page, page);
-            assert_eq!(view.opening_path, path);
+            assert_eq!(view.repo, Some(repo));
+            assert_eq!(view.page, Some(page));
+            assert_eq!(view.opening_path.as_ref(), Some(&path));
             assert_eq!(view.tab, tab);
             assert!(view.detail_open);
-            assert!(view.selected.is_null());
-            assert!(view.diff.is_null());
+            assert!(view.selected.is_none());
+            assert!(view.diff.is_none());
             assert!(view.switching_path.is_none());
-            assert!(view.switching_repo.is_null());
+            assert!(view.switching_repo.is_none());
         }
     }
 
     #[test]
     fn prepared_checkout_keeps_empty_results_and_bare_repository_history() {
         let mut view = Workspace::default();
-        let page = json!({"snapshot":"empty", "entries":[]});
-        view.install_checkout(
-            json!({"bytesB64":"bmV3"}),
-            json!({"repoId":"bare","bare":true}),
-            page.clone(),
-        );
+        let page = history_page("empty", vec![], None);
+        let mut bare = read_only_repository("bare");
+        bare.bare = true;
+        view.install_checkout(GitPath::new(b"/new"), bare, page.clone());
         assert_eq!(view.tab, 1);
-        assert_eq!(view.page, page);
+        assert_eq!(view.page, Some(page));
         assert_eq!(
             serde_json::to_value(view.read_request(None).unwrap()).unwrap()["params"]["messageBytes"],
             512
@@ -2172,15 +2325,15 @@ mod tests {
     #[test]
     fn removed_worktree_page_cannot_replace_the_active_workspace() {
         let mut view = Workspace {
-            repo: json!({"repoId":"repo"}),
-            page: json!({"snapshot":"changes","entries":[]}),
+            repo: Some(read_only_repository("repo")),
+            page: Some(status("changes", vec![], None)),
             ..Default::default()
         };
         let mut resources = Resources::default();
         assert!(super::tab_info(5).is_none());
         assert_eq!(view.switch_view(5, &mut resources), None);
         assert_eq!(view.tab, 0);
-        assert_eq!(view.page["snapshot"], "changes");
+        assert_eq!(view.snapshot(), "changes");
         assert!(view.saved_views.is_empty());
         assert_eq!(view.switch_view(6, &mut resources), Some(true));
         assert_eq!(
@@ -2190,8 +2343,10 @@ mod tests {
     }
     #[test]
     fn bare_repository_cannot_navigate_to_changes() {
+        let mut bare = read_only_repository("bare");
+        bare.bare = true;
         let mut view = Workspace {
-            repo: json!({"repoId":"bare", "bare":true}),
+            repo: Some(bare),
             tab: 1,
             ..Default::default()
         };
@@ -2220,213 +2375,269 @@ mod tests {
     }
     #[test]
     fn changed_status_snapshot_cannot_reuse_a_displayed_comparison() {
+        let same = change("same-path", false, true, false);
+        let mut moved = same.clone();
+        moved.path = Path::new(b"elsewhere");
         let mut view = Workspace {
-            page: json!({"snapshot":"old"}),
-            selected: json!({"entryId":"same-path"}),
-            diff: json!({"entries":["old contents"]}),
+            page: Some(status("old", vec![], None)),
+            selected: selected(&moved),
+            diff: Some(diff_page(
+                "old contents",
+                working_metadata("before", "entry"),
+                vec![],
+                None,
+            )),
             ..Default::default()
         };
-        assert!(view.accept_listing(json!({"snapshot":"new","entries":[{"entryId":"same-path"}]})));
-        assert!(view.selected.is_null());
-        assert!(view.diff.is_null());
-        assert!(!view.accept_listing(json!({"snapshot":"new","entries":[]})));
+        assert!(view.accept_listing(status("new", vec![same], None)));
+        assert!(view.selected.is_none());
+        assert!(view.diff.is_none());
+        assert!(!view.accept_listing(status("new", vec![], None)));
     }
     #[test]
     fn background_status_keeps_loaded_pages_until_the_snapshot_changes() {
-        let entry = json!({"entryId":"old","path":{"bytesB64":"YQ=="},"unstaged":true});
-        let page = json!({"snapshot":"old","entries":[{"entryId":"first"},entry],"nextCursor":"after-second-page"});
+        let entry = change("old", false, true, false);
+        let mut first = status_entry("first", "first");
+        first.unstaged = false;
+        let page = status(
+            "old",
+            vec![first.clone(), entry.clone()],
+            Some("after-second-page"),
+        );
         let mut view = Workspace {
-            repo: json!({"repoId":"repo"}),
-            page: page.clone(),
-            selected: entry.clone(),
-            diff: json!({"entries":["reviewed lines"]}),
+            repo: Some(read_only_repository("repo")),
+            page: Some(page.clone()),
+            selected: selected(&entry),
+            diff: Some(diff_page(
+                "reviewed lines",
+                working_metadata("before", "entry"),
+                vec![],
+                None,
+            )),
             ..Default::default()
         };
-        assert!(!view.accept_listing(json!({"snapshot":"old","entries":[{"entryId":"first"}],"nextCursor":"after-first-page"})));
-        assert_eq!(view.page, page);
-        assert_eq!(view.selected, entry);
-        assert_eq!(view.diff["entries"], json!(["reviewed lines"]));
+        assert!(!view.accept_listing(status("old", vec![first], Some("after-first-page"))));
+        assert_eq!(view.page, Some(page));
+        assert_eq!(view.selected, selected(&entry));
+        assert_eq!(view.diff.as_ref().unwrap().snapshot, "reviewed lines");
 
         let mut current = entry.clone();
-        current["entryId"] = json!("current");
-        assert!(
-            view.accept_listing(json!({"snapshot":"new","entries":[current],"nextCursor":null}))
-        );
-        assert_eq!(view.selected, current);
-        assert!(view.diff.is_null());
-        assert!(view.page["nextCursor"].is_null());
-        assert!(view.accept_listing(json!({"snapshot":"clean","entries":[]})));
-        assert!(view.selected.is_null());
+        current.entry_id = "current".into();
+        assert!(view.accept_listing(status("new", vec![current.clone()], None)));
+        assert_eq!(view.selected, selected(&current));
+        assert!(view.diff.is_none());
+        assert!(view.page.as_ref().unwrap().next_cursor().is_none());
+        assert!(view.accept_listing(status("clean", vec![], None)));
+        assert!(view.selected.is_none());
     }
     #[test]
     fn observed_external_changes_retire_suspended_changes_but_keep_current_history() {
         let mut view = Workspace {
-            repo: json!({"repoId":"repo"}),
-            page: json!({"snapshot":"before","entries":[]}),
+            repo: Some(read_only_repository("repo")),
+            page: Some(status("before", vec![], None)),
             ..Default::default()
         };
         let mut resources = Resources::default();
         view.switch_view(1, &mut resources);
-        view.selected = json!({"oid":{"hex":"inspected"}});
-        assert!(!view.observe_status_snapshot(&json!({"snapshot":"before"})));
-        assert!(view.observe_status_snapshot(&json!({"snapshot":"after"})));
-        assert_eq!(view.selected["oid"]["hex"], "inspected");
+        let inspected = Entry::Commit(commit("inspected", "Inspected"));
+        view.selected = Some(inspected.clone());
+        assert!(!view.observe_status_snapshot(&status_page("before", vec![], None)));
+        assert!(view.observe_status_snapshot(&status_page("after", vec![], None)));
+        assert_eq!(view.selected, Some(inspected));
         assert_eq!(view.switch_view(0, &mut resources), Some(true));
-        assert!(view.page.is_null());
+        assert!(view.page.is_none());
     }
     #[test]
     fn index_refresh_follows_the_selected_file_between_groups() {
-        let entry = json!({"entryId":"old","path":{"bytesB64":"YQ=="},"untracked":true});
+        let entry = change("old", false, false, true);
         let mut view = Workspace {
-            page: json!({"snapshot":"before","entries":[entry]}),
-            selected: entry,
-            diff: json!({"snapshot":"old-diff"}),
+            page: Some(status("before", vec![entry.clone()], None)),
+            selected: selected(&entry),
+            diff: Some(diff_page(
+                "old-diff",
+                working_metadata("before", "entry"),
+                vec![],
+                None,
+            )),
             ..Default::default()
         };
-        let staged = json!({"entryId":"new","path":{"bytesB64":"YQ=="},"staged":true});
-        assert!(
-            view.accept_listing_with_scope(json!({"snapshot":"staged","entries":[staged]}), true)
-        );
-        assert_eq!(view.selected, staged);
+        let staged = change("new", true, false, false);
+        assert!(view.accept_listing_with_scope(status("staged", vec![staged.clone()], None), true));
+        assert_eq!(view.selected, selected(&staged));
         assert!(view.diff_staged);
-        assert!(view.diff.is_null());
-        let unstaged = json!({"entryId":"unstaged","path":{"bytesB64":"YQ=="},"unstaged":true});
+        assert!(view.diff.is_none());
+        let unstaged = change("unstaged", false, true, false);
         assert!(
-            view.accept_listing_with_scope(
-                json!({"snapshot":"unstaged","entries":[unstaged]}),
-                true
-            )
+            view.accept_listing_with_scope(status("unstaged", vec![unstaged.clone()], None), true)
         );
-        assert_eq!(view.selected, unstaged);
+        assert_eq!(view.selected, selected(&unstaged));
         assert!(!view.diff_staged);
     }
     #[test]
     fn index_refresh_keeps_partial_or_unrelated_selection_but_retires_old_authority() {
-        let entry = json!({"entryId":"old","path":{"bytesB64":"YQ=="},"unstaged":true});
-        let old_diff = json!({"snapshot":"old-diff","metadata":{"sourceSnapshot":"before"}});
+        let entry = change("old", false, true, false);
+        let old_diff = Some(diff_page(
+            "old-diff",
+            working_metadata("before", "old"),
+            vec![],
+            None,
+        ));
         let mut view = Workspace {
-            page: json!({"snapshot":"before","entries":[entry]}),
-            selected: entry,
+            page: Some(status("before", vec![entry.clone()], None)),
+            selected: selected(&entry),
             diff: old_diff.clone(),
             ..Default::default()
         };
-        let partial =
-            json!({"entryId":"new","path":{"bytesB64":"YQ=="},"staged":true,"unstaged":true});
-        assert!(
-            view.accept_listing_with_scope(json!({"snapshot":"after","entries":[partial]}), true)
-        );
-        assert_eq!(view.selected, partial);
+        let partial = change("new", true, true, false);
+        assert!(view.accept_listing_with_scope(status("after", vec![partial.clone()], None), true));
+        assert_eq!(view.selected, selected(&partial));
         assert!(!view.diff_staged);
         assert_eq!(view.diff, old_diff);
         assert_ne!(
-            view.diff["metadata"]["sourceSnapshot"],
-            view.page["snapshot"]
+            view.diff
+                .as_ref()
+                .unwrap()
+                .metadata
+                .source_snapshot
+                .as_deref(),
+            Some(view.snapshot())
         );
         // A filtered-out or removed file must not select a different sibling.
-        assert!(view.accept_listing_with_scope(json!({"snapshot":"filtered","entries":[{"entryId":"sibling","path":{"bytesB64":"Yg=="},"staged":true}]}), true));
-        assert!(view.selected.is_null());
-        assert!(view.diff.is_null());
+        let mut sibling = change("sibling", true, false, false);
+        sibling.path = Path::new(b"b");
+        assert!(view.accept_listing_with_scope(status("filtered", vec![sibling], None), true));
+        assert!(view.selected.is_none());
+        assert!(view.diff.is_none());
     }
     #[test]
     fn diff_recovery_rebinds_to_new_status_and_is_cancelled_when_leaving_changes() {
         use newport_client::git_read_recovery::Decision;
-        let entry = json!({"entryId":"old","path":{"bytesB64":"YQ=="},"unstaged":true});
+        let entry = change("old", false, true, false);
         let mut view = Workspace {
-            repo: json!({"repoId":"repo"}),
-            page: json!({"snapshot":"old"}),
-            selected: entry.clone(),
+            repo: Some(read_only_repository("repo")),
+            page: Some(status("old", vec![], None)),
+            selected: selected(&entry),
             ..Default::default()
         };
         assert_eq!(
             view.diff_recovery
-                .begin(Some("STALE_SNAPSHOT"), &entry, false),
+                .begin(Some("STALE_SNAPSHOT"), Some(&entry), false),
             Decision::Refresh
         );
         // Stale-error recovery retires the old comparison before rereading;
         // an ordinary background refresh instead retains the selected path.
-        view.selected = serde_json::Value::Null;
-        view.page = serde_json::Value::Null;
+        view.selected = None;
+        view.page = None;
         let mut next = entry.clone();
-        next["entryId"] = json!("current");
-        view.accept_listing(json!({"snapshot":"current","entries":[next]}));
-        assert!(view.selected.is_null());
-        assert_eq!(view.diff_recovery.resolve(&view.page), Some((next, false)));
+        next.entry_id = "current".into();
+        view.accept_listing(status("current", vec![next.clone()], None));
+        assert!(view.selected.is_none());
+        let page = view.status_page().cloned();
+        assert_eq!(
+            view.diff_recovery.resolve(page.as_ref()),
+            Some((next, false))
+        );
 
         assert_eq!(
-            view.diff_recovery.begin(Some("STALE_ENTRY"), &entry, false),
+            view.diff_recovery
+                .begin(Some("STALE_ENTRY"), Some(&entry), false),
             Decision::Refresh
         );
         let mut resources = Resources::default();
-        let status = resources.begin("git-list").unwrap();
+        let read = resources.begin("git-list").unwrap();
         view.switch_view(1, &mut resources);
-        assert!(!resources.complete_detailed("git-list", status, Ok(json!({"entries":[entry]}))));
+        assert!(!resources.complete_git(
+            "git-list",
+            read,
+            Ok(status("late", vec![entry], None).into_reply())
+        ));
         view.switch_view(0, &mut resources);
         assert!(!view.diff_recovery.pending());
     }
     #[test]
     fn navigation_preserves_completed_selection_and_does_not_reload_current_view() {
         let mut view = Workspace {
-            repo: json!({"repoId":"repo","head":{"name":"old"}}),
+            repo: Some(read_only_repository("repo")),
             server: "server".into(),
             ..Default::default()
         };
-        let selected = json!({"entryId":"file"});
-        let page = json!({"entries":[selected],"snapshot":"status"});
-        view.page = page.clone();
-        view.selected = selected.clone();
+        let file = status_entry("file", "file");
+        let page = status("status", vec![file.clone()], None);
+        view.page = Some(page.clone());
+        view.selected = selected(&file);
         let mut resources = Resources::default();
         let read = resources.begin("git-list").unwrap();
-        resources.complete("git-list", read, Ok(page.clone()));
+        resources.complete_git("git-list", read, Ok(page.clone().into_reply()));
         let log = resources.begin("git-log-events").unwrap();
         assert_eq!(view.switch_view(0, &mut resources), None);
-        assert_eq!(view.selected, selected);
+        assert_eq!(view.selected, selected(&file));
         assert_eq!(view.switch_view(1, &mut resources), Some(true));
         assert!(resources.get("git-list").is_none());
-        assert!(resources.complete("git-log-events", log, Ok(json!({"cursor":4}))));
+        assert!(resources.complete_query("git-log-events", log, &Default::default(), true, true));
         let history = resources.begin("git-list").unwrap();
-        resources.complete("git-list", history, Ok(json!({"entries":[]})));
-        view.repo["head"] = json!({"name":"fresh"});
+        resources.complete_git(
+            "git-list",
+            history,
+            Ok(history_page("history", vec![], None).into_reply()),
+        );
+        let fresh = crate::git_fixture::repository("repo").head;
+        view.repo.as_mut().unwrap().head = fresh.clone();
         assert_eq!(view.switch_view(0, &mut resources), Some(false));
-        assert_eq!(view.page, page);
-        assert_eq!(view.selected, selected);
-        assert_eq!(resources.get("git-list").unwrap().value, page);
-        assert_eq!(view.repo["head"]["name"], "fresh");
+        assert_eq!(view.page, Some(page.clone()));
+        assert_eq!(view.selected, selected(&file));
+        assert_eq!(
+            resources.get("git-list").unwrap().git(),
+            Some(&page.into_reply())
+        );
+        assert_eq!(view.repo.as_ref().unwrap().head, fresh);
         assert_eq!(view.saved_views.len(), 1);
     }
     #[test]
     fn checkout_path_survives_new_cached_and_invalidated_tabs() {
         // The bookmark may be a subdirectory or symlink: repo.root cannot
         // replace the original requested path used by persistence/recovery.
-        let path = json!({"display":"/linked/src", "bytesB64":"L2xpbmtlZC9zcmM="});
+        let path = GitPath::new(b"/linked/src");
+        let mut repo = read_only_repository("repo");
+        repo.root = GitPath::new(b"/linked");
         let mut view = Workspace {
-            repo: json!({"repoId":"repo", "root":{"display":"/linked"}}),
-            opening_path: path.clone(),
+            repo: Some(repo),
+            opening_path: Some(path.clone()),
             ..Default::default()
         };
         let mut resources = Resources::default();
         for tab in [1, 4, 0, 3, 1] {
             assert!(view.switch_view(tab, &mut resources).is_some());
-            assert_eq!(view.opening_path, path);
+            assert_eq!(view.opening_path.as_ref(), Some(&path));
         }
         view.invalidate_saved_views();
         view.switch_view(0, &mut resources);
-        assert_eq!(view.opening_path, path);
+        assert_eq!(view.opening_path.as_ref(), Some(&path));
     }
     #[test]
     fn checkout_summary_and_pending_read_survive_tabs_without_restoring_stale_metadata() {
         let mut view = Workspace {
-            repo: json!({"repoId":"repo"}),
+            repo: Some(read_only_repository("repo")),
             ..Default::default()
         };
-        view.checkout_summary
-            .accept(&json!({"metadata":{"totalEntries":2}}));
+        let listing = |total| {
+            let mut page = crate::git_fixture::worktree_page("s", vec![], None);
+            page.metadata.total_entries = total;
+            page
+        };
+        view.checkout_summary.accept(&listing(2));
         let mut resources = Resources::default();
         let read = resources
             .begin(crate::git_checkout_picker::SUMMARY)
             .unwrap();
         view.switch_view(1, &mut resources);
-        let fresh = json!({"metadata":{"totalEntries":3}});
-        assert!(resources.complete(crate::git_checkout_picker::SUMMARY, read, Ok(fresh.clone())));
+        let fresh = listing(3);
+        assert!(resources.complete_git(
+            crate::git_checkout_picker::SUMMARY,
+            read,
+            Ok(newport_protocol::git::Reply::Worktrees(Box::new(
+                fresh.clone()
+            )))
+        ));
         view.checkout_summary.accept(&fresh);
         let expected = view.checkout_summary.clone();
         for tab in [0, 4, 1] {
@@ -2442,130 +2653,159 @@ mod tests {
     #[test]
     fn returning_to_an_inflight_view_requires_reload_and_rejects_late_replies() {
         let mut view = Workspace {
-            repo: json!({"repoId":"repo"}),
+            repo: Some(read_only_repository("repo")),
             ..Default::default()
+        };
+        let wrong = || {
+            Ok(Listing::Tags(newport_protocol::git::Page {
+                snapshot: "s".into(),
+                entries: vec![tag("wrong", "a")],
+                next_cursor: None,
+                metadata: newport_protocol::git::TotalEntries { total_entries: 1 },
+            })
+            .into_reply())
         };
         let mut resources = Resources::default();
         let abandoned = resources.begin("git-list").unwrap();
         assert_eq!(view.switch_view(4, &mut resources), Some(true));
         let tags = resources.begin("git-list").unwrap();
-        assert!(!resources.complete("git-list", abandoned, Ok(json!({"entries":["wrong"]}))));
-        resources.complete("git-list", tags, Ok(json!({"entries":[]})));
+        assert!(!resources.complete_git("git-list", abandoned, wrong()));
+        resources.complete_git("git-list", tags, Ok(status("s", vec![], None).into_reply()));
         assert_eq!(view.switch_view(0, &mut resources), Some(true));
         assert!(resources.get("git-list").is_none());
-        assert!(!resources.complete("git-list", abandoned, Ok(json!({"entries":["wrong"]}))));
+        assert!(!resources.complete_git("git-list", abandoned, wrong()));
     }
     #[test]
     fn cached_view_cannot_replay_an_old_scroll_gesture() {
+        let page = Listing::Tags(newport_protocol::git::Page {
+            snapshot: "s".into(),
+            entries: vec![tag("tag", "a")],
+            next_cursor: Some("next".into()),
+            metadata: newport_protocol::git::TotalEntries { total_entries: 2 },
+        });
         let mut view = Workspace {
-            repo: json!({"repoId":"repo"}),
-            page: json!({"entries":["tag"],"snapshot":"s","nextCursor":"next"}),
+            repo: Some(read_only_repository("repo")),
+            page: Some(page.clone()),
             tab: 4,
             ..Default::default()
         };
-        view.listing
-            .demand
-            .arm(crate::git_page_demand::identity(&view.page));
+        let identity = Some(page.identity());
+        view.listing.demand.arm(identity.clone());
         let mut resources = Resources::default();
         view.switch_view(3, &mut resources);
         view.switch_view(4, &mut resources);
-        assert!(!view.listing.demand.take(&view.page, true, true));
-        view.listing
-            .demand
-            .arm(crate::git_page_demand::identity(&view.page));
-        assert!(view.listing.demand.take(&view.page, true, true));
-        assert!(!view.listing.demand.take(&view.page, true, true));
+        assert!(!view.listing.demand.take(&identity, true, true));
+        view.listing.demand.arm(identity.clone());
+        assert!(view.listing.demand.take(&identity, true, true));
+        assert!(!view.listing.demand.take(&identity, true, true));
     }
     #[test]
     fn write_outcomes_invalidate_suspended_reviews_and_snapshots() {
+        let previous = status_entry("previous", "previous");
         let mut view = Workspace {
-            repo: json!({"repoId":"repo"}),
-            selected: json!({"entryId":"previous"}),
+            repo: Some(read_only_repository("repo")),
+            selected: selected(&previous),
             ..Default::default()
         };
         let mut resources = Resources::default();
         let read = resources.begin("git-list").unwrap();
-        resources.complete("git-list", read, Ok(json!({"snapshot":"before"})));
+        resources.complete_git(
+            "git-list",
+            read,
+            Ok(status("before", vec![], None).into_reply()),
+        );
         view.switch_view(1, &mut resources);
         view.invalidate_saved_views();
         assert_eq!(view.switch_view(0, &mut resources), Some(true));
-        assert!(view.selected.is_null());
+        assert!(view.selected.is_none());
         assert!(resources.get("git-list").is_none());
     }
     #[test]
     fn changes_refresh_updates_head_without_inventing_completion() {
         let mut view = Workspace {
-            repo: json!({"repoId":"repo","head":{"detached":false,"name":{"display":"refs/heads/old"}}}),
+            repo: Some(crate::git_fixture::repository("repo")),
             ..Default::default()
         };
-        let head = json!({"detached":true,"oid":{"hex":"1234567890abcdef"}});
-        view.accept_listing(json!({"entries":[],"metadata":{"head":head}}));
-        assert_eq!(view.repo["head"], head);
-        assert_eq!(
-            super::head_label(&view.repo["head"]),
-            "Detached HEAD · 12345678"
-        );
-        assert_eq!(listing_feedback(&serde_json::Value::Null, false, false), "");
-        assert!(listing_feedback(&view.page, true, false).starts_with("Loading"));
-        assert!(listing_feedback(&view.page, false, true).starts_with("Couldn’t"));
+        let mut page = status_page("s", vec![], None);
+        page.metadata.head = newport_protocol::git::Head {
+            oid: Some(crate::git_fixture::object("1234567890abcdef")),
+            name: None,
+            detached: true,
+            unborn: false,
+        };
+        view.accept_listing(Listing::Status(Box::new(page.clone())));
+        let head = &view.repo.as_ref().unwrap().head;
+        assert!(head.detached);
+        assert_eq!(super::head_label(head), "Detached HEAD · 12345678");
+        assert_eq!(listing_feedback(None, false, false), "");
+        assert!(listing_feedback(view.page.as_ref(), true, false).starts_with("Loading"));
+        assert!(listing_feedback(view.page.as_ref(), false, true).starts_with("Couldn’t"));
+        page.metadata.truncated = true;
         assert!(
-            listing_feedback(
-                &json!({"entries":[],"metadata":{"truncated":true}}),
-                false,
-                false
-            )
-            .contains("incomplete")
+            listing_feedback(Some(&Listing::Status(Box::new(page))), false, false)
+                .contains("incomplete")
         );
     }
     #[test]
     fn worktree_navigation_preserves_bytes_and_rejects_unavailable_rows() {
-        let entry = json!({"state":"available","current":false,"kind":"linked","path":{"display":"/�","bytesB64":"L/8="}});
-        assert_eq!(worktree_path(&entry), Some(entry["path"].clone()));
-        for (field, value) in [
-            ("state", json!("missing")),
-            ("current", json!(true)),
-            ("kind", json!("bare")),
-        ] {
-            let mut invalid = entry.clone();
-            invalid[field] = value;
-            assert!(worktree_path(&invalid).is_none());
+        let mut entry = crate::git_fixture::worktree(None, "/");
+        entry.path = GitPath::new(b"/\xff");
+        assert_eq!(
+            worktree_destination(&entry),
+            Some(GitPath {
+                bytes_b64: "L/8=".into(),
+                display: entry.path.display.clone(),
+            })
+        );
+        let mut missing = entry.clone();
+        missing.state = "missing".into();
+        let mut current = entry.clone();
+        current.current = true;
+        let mut bare = entry.clone();
+        bare.kind = "bare".into();
+        let mut undecodable = entry.clone();
+        undecodable.path.bytes_b64 = "not-base64".into();
+        let mut relative = entry.clone();
+        relative.path = GitPath::new(b"relative/checkout");
+        let mut nul = entry;
+        nul.path = GitPath::new(b"/checkout\0name");
+        for invalid in [missing, current, bare, undecodable, relative, nul] {
+            assert!(worktree_destination(&invalid).is_none());
         }
-        let mut invalid = entry;
-        invalid["path"]["bytesB64"] = json!("not-base64");
-        assert!(worktree_path(&invalid).is_none());
     }
     #[test]
     fn checkout_rejects_remote_current_and_lossy_names() {
-        let branch = json!({"name":{"display":"topic","bytesB64":"dG9waWM="},"oid":{"hex":"abcd"},"remote":false,"current":false});
+        let branch = crate::git_fixture::branch("topic", "abcd");
         assert_eq!(
-            checkout_target(&branch),
+            checkout_target(Some(&branch)),
             Some(("topic".into(), "abcd".into()))
         );
-        for field in ["remote", "current"] {
-            let mut invalid = branch.clone();
-            invalid[field] = json!(true);
-            assert!(checkout_target(&invalid).is_none());
-            if field == "current" {
-                assert!(local_branch_target(&invalid).is_some());
-            } else {
-                assert!(local_branch_target(&invalid).is_none());
-            }
-        }
+        let mut remote = branch.clone();
+        remote.remote = true;
+        assert!(checkout_target(Some(&remote)).is_none());
+        assert!(local_branch_target(&remote).is_none());
+        let mut current = branch.clone();
+        current.current = true;
+        assert!(checkout_target(Some(&current)).is_none());
+        assert!(local_branch_target(&current).is_some());
         let mut invalid = branch;
-        invalid["name"]["bytesB64"] = json!("/w==");
-        assert!(checkout_target(&invalid).is_none());
+        invalid.name.bytes_b64 = "/w==".into();
+        assert!(checkout_target(Some(&invalid)).is_none());
+        assert!(checkout_target(None).is_none());
     }
     #[test]
     fn pagination_requires_same_snapshot_and_metadata() {
-        let previous = json!({"snapshot":"a","nextCursor":"next","entries":[1],"metadata":{}});
-        let page = json!({"snapshot":"a","nextCursor":null,"entries":[2],"metadata":{}});
+        let first = commit("first", "First");
+        let second = commit("second", "Second");
+        let previous = history_page("a", vec![first.clone()], Some("next"));
+        let page = history_page("a", vec![second.clone()], None);
         assert_eq!(
-            merge_page(&previous, page.clone(), "next").unwrap()["entries"],
-            json!([1, 2])
+            previous.merge(page.clone(), "next").unwrap(),
+            history_page("a", vec![first, second.clone()], None)
         );
-        let mut stale = page;
-        stale["snapshot"] = json!("b");
-        assert!(merge_page(&previous, stale, "next").is_err());
-        assert!(merge_page(&previous, previous.clone(), "next").is_err());
+        let stale = history_page("b", vec![second], None);
+        assert!(previous.merge(stale, "next").is_err());
+        assert!(previous.merge(previous.clone(), "next").is_err());
+        assert!(previous.merge(status("a", vec![], None), "next").is_err());
     }
 }

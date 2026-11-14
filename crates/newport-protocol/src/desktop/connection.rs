@@ -1,5 +1,26 @@
 //! Typed desktop connection contracts.
 pub mod discovery;
+
+/// Codes for why an SSH connection failed, which the window words.
+pub mod code {
+    pub const SSH_UNREACHABLE: &str = "SSH_UNREACHABLE";
+    pub const SSH_PROXY_FAILED: &str = "SSH_PROXY_FAILED";
+    pub const SSH_INVALID_PROXY: &str = "SSH_INVALID_PROXY";
+    pub const SSH_INVALID_JUMP: &str = "SSH_INVALID_JUMP";
+    pub const SSH_TIMED_OUT: &str = "SSH_TIMED_OUT";
+    pub const SSH_LOST: &str = "SSH_LOST";
+    pub const SSH_AGENT_UNAVAILABLE: &str = "SSH_AGENT_UNAVAILABLE";
+    pub const SSH_APPROVAL_REQUIRED: &str = "SSH_APPROVAL_REQUIRED";
+    pub const SSH_AUTH_REFUSED: &str = "SSH_AUTH_REFUSED";
+    pub const SSH_CREDENTIALS: &str = "SSH_CREDENTIALS";
+    pub const SSH_HOST_KEY_CHANGED: &str = "SSH_HOST_KEY_CHANGED";
+    pub const SSH_HOST_KEY_REJECTED: &str = "SSH_HOST_KEY_REJECTED";
+    pub const SSH_SESSIONS_DISABLED: &str = "SSH_SESSIONS_DISABLED";
+    pub const SSH_CHANNEL_REFUSED: &str = "SSH_CHANNEL_REFUSED";
+    pub const SSH_REQUEST_DENIED: &str = "SSH_REQUEST_DENIED";
+    pub const SSH_BUSY: &str = "SSH_BUSY";
+    pub const SSH_CLOSED: &str = "SSH_CLOSED";
+}
 #[derive(Clone, Debug)]
 pub struct SetupInspection {
     pub os: String,

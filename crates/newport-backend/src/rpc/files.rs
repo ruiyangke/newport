@@ -1,6 +1,5 @@
 //! File DTOs are independent of SFTP and persisted editor/cache models.
 use super::{
-    configuration,
     failure::{invalid_result, operation},
     features::Services,
     projection as p,
@@ -12,14 +11,6 @@ use newport_protocol::{
 };
 use std::ffi::OsString;
 
-fn scope(
-    value: &newport_protocol::desktop::configuration::ConnectionScope,
-) -> Result<Vec<serde_json::Value>, Failure> {
-    match configuration::scope(value) {
-        serde_json::Value::Array(values) => Ok(values),
-        _ => Err(invalid_result("connection scope")),
-    }
-}
 fn listing(value: crate::files::Listing) -> Result<dto::Listing, Failure> {
     Ok(dto::Listing {
         path: value.path,
@@ -123,7 +114,7 @@ pub async fn dispatch(
                 args.server,
                 args.operation,
                 args.path.clone(),
-                args.expected.as_ref().map(configuration::scope),
+                args.expected.clone(),
                 args.refresh,
                 args.project_root.clone(),
             )
@@ -137,7 +128,7 @@ pub async fn dispatch(
                 crate::files::vfs::Request {
                     id: args.server,
                     operation: args.operation,
-                    expected_connection: scope(&args.expected)?,
+                    expected_connection: args.expected.clone(),
                     root: args.root.clone(),
                     watch: args.watch,
                     directories: args.directories.iter().cloned().collect(),
@@ -164,7 +155,7 @@ pub async fn dispatch(
                 args.server,
                 args.operation,
                 args.path.clone(),
-                args.expected.as_ref().map(configuration::scope),
+                args.expected.clone(),
             )
             .await
             .map_err(operation)?,
@@ -178,7 +169,7 @@ pub async fn dispatch(
                     operation: args.operation,
                     root: args.root.clone(),
                     path: args.path.clone(),
-                    expected_connection: scope(&args.expected)?,
+                    expected_connection: args.expected.clone(),
                     content: None,
                     revision: args.revision.clone(),
                     offset: args.offset,
@@ -198,7 +189,7 @@ pub async fn dispatch(
                     operation: args.operation,
                     root: args.root.clone(),
                     path: args.path.clone(),
-                    expected_connection: scope(&args.expected)?,
+                    expected_connection: args.expected.clone(),
                     content: Some(args.content.clone()),
                     revision: Some(args.revision.clone()),
                     offset: None,
@@ -217,7 +208,7 @@ pub async fn dispatch(
                     id: args.server,
                     operation: args.operation,
                     root: args.root.clone(),
-                    expected_connection: scope(&args.expected)?,
+                    expected_connection: args.expected.clone(),
                 },
             )
             .await
@@ -250,7 +241,7 @@ pub async fn dispatch(
                     operation: args.operation,
                     path: args.path.clone(),
                     local_path: native(&args.local_path)?,
-                    expected_connection: scope(&args.expected)?,
+                    expected_connection: args.expected.clone(),
                 },
                 true,
             )
@@ -269,7 +260,7 @@ pub async fn dispatch(
                     operation: args.operation,
                     path: args.path.clone(),
                     local_path: native(&args.local_path)?,
-                    expected_connection: scope(&args.expected)?,
+                    expected_connection: args.expected.clone(),
                 },
                 false,
             )

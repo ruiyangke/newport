@@ -43,15 +43,17 @@ impl Newport {
         let installing = self.integration_installing(&server_id);
         let disabled =
             busy || installing || self.server_form.is_some() || !self.configuration_available();
-        let clipboard = server["clipboardEnabled"] == true;
-        let browser = server["browserEnabled"] == true;
+        let clipboard = server.clipboard_enabled;
+        let browser = server.browser_enabled;
         let enabled = clipboard || browser;
-        let state = &self.snapshot["runtime"]["clipboard"][&server_id];
-        let permissions = &self.snapshot["runtime"]["agentPermissions"][&server_id];
-        let transport = crate::connectivity::scoped(&server_id, &self.snapshot, cx);
+        let runtime = self.runtime();
+        let state = runtime.and_then(|runtime| runtime.clipboard(server.id));
+        let permissions = runtime.and_then(|runtime| runtime.agent_permissions(server.id));
+        let transport = crate::connectivity::scoped(&server_id, self.snapshot.as_ref(), cx);
         let transport_wait =
             transport.filter(|state| state.phase != crate::connectivity::Phase::Connected);
-        let status = state["status"].as_str().unwrap_or("disconnected");
+        let status = state.map(|state| state.status);
+        let connected = status == Some(configuration::ConnectionStatus::Connected);
         let muted = cx.theme().muted_foreground;
         // Sharing runs on Needle; a server that skipped its setup has none.
         let unset = self.needle_missing();
@@ -71,23 +73,28 @@ impl Newport {
                 muted
             }
         } else {
+            use configuration::ConnectionStatus;
             match status {
-                "connected" => theme::success(cx.theme().is_dark()),
-                "error" => theme::error(cx.theme().is_dark()),
-                "connecting" | "reconnecting" => theme::warning(cx.theme().is_dark()),
-                _ => muted,
+                Some(ConnectionStatus::Connected) => theme::success(cx.theme().is_dark()),
+                Some(ConnectionStatus::Error) => theme::error(cx.theme().is_dark()),
+                Some(ConnectionStatus::Connecting | ConnectionStatus::Reconnecting) => {
+                    theme::warning(cx.theme().is_dark())
+                }
+                Some(ConnectionStatus::Disconnected) | None => muted,
             }
         };
         let mut body = div().w_full().min_w_0().flex().flex_col().gap(px(16.));
-        for (feature, title, description, checked) in [
+        for (feature, kind, title, description, checked) in [
             (
                 "clipboard",
+                configuration::Feature::Clipboard,
                 "Clipboard access",
                 "Let apps on this server read your clipboard.",
                 clipboard,
             ),
             (
                 "browser",
+                configuration::Feature::Browser,
                 "Browser links",
                 "Open links from this server in your browser.",
                 browser,
@@ -95,7 +102,7 @@ impl Newport {
         ] {
             let id = server_id.clone();
             let label_id = server_id.clone();
-            let expected = crate::terminal_scope::connection(server, &self.snapshot);
+            let expected = self.connection(server);
             let label_expected = expected.clone();
             let feature_disabled = if checked {
                 self.server_form.is_some()
@@ -119,7 +126,7 @@ impl Newport {
             } else if let Some(transport) = transport_wait {
                 transport.phase.label()
             } else {
-                feature_status(feature, checked, permissions, status == "connected")
+                feature_status(kind, checked, permissions, connected)
             }
             .to_owned();
             body = body.child(
@@ -216,8 +223,8 @@ impl Newport {
         let show_connection = enabled
             && !unset
             && (transport_wait.is_some()
-                || status != "connected"
-                || permissions["error"].is_string());
+                || !connected
+                || permissions.is_some_and(|permissions| permissions.error.is_some()));
         let mut connection = div()
             .id("integration-connection")
             .role(Role::Region)
@@ -239,7 +246,7 @@ impl Newport {
         if enabled {
             if let Some(error) = transport_wait
                 .map(|state| state.error.as_deref())
-                .unwrap_or_else(|| state["errorMessage"].as_str())
+                .unwrap_or_else(|| state.and_then(|state| state.error_message.as_deref()))
                 .filter(|error| !error.is_empty())
             {
                 connection = connection.child(
@@ -254,9 +261,9 @@ impl Newport {
                         .child(error.to_owned()),
                 );
             }
-            if permissions["error"].is_string() {
+            if permissions.is_some_and(|permissions| permissions.error.is_some()) {
                 let id = server_id.clone();
-                let expected = crate::terminal_scope::connection(server, &self.snapshot);
+                let expected = self.connection(server);
                 connection = connection.child(
                     div().flex().child(
                         crate::controls::button("integration-apply-permissions")

@@ -1,5 +1,6 @@
 //! Query-revision projections and viewport layout for the read-only core grid.
 use super::*;
+use newport_protocol::monitor::metrics;
 use std::{cell::RefCell, rc::Rc};
 
 const GAP: f32 = 6.;
@@ -21,7 +22,12 @@ struct Projection {
     cores: Rc<Vec<Core>>,
 }
 impl Cache {
-    pub(super) fn get(&self, server: &str, revision: u64, source: &Value) -> Rc<Vec<Core>> {
+    pub(super) fn get(
+        &self,
+        server: &str,
+        revision: u64,
+        source: &[metrics::Core],
+    ) -> Rc<Vec<Core>> {
         let mut projection = self.projection.borrow_mut();
         if let Some(previous) = projection.as_ref()
             && previous.server == server
@@ -29,8 +35,8 @@ impl Cache {
         {
             return previous.cores.clone();
         }
-        let mut source: Vec<_> = source.as_array().into_iter().flatten().collect();
-        source.sort_by_key(|cpu| cpu["id"].as_u64().unwrap_or(0));
+        let mut source: Vec<_> = source.iter().collect();
+        source.sort_by_key(|cpu| cpu.id);
         let cores = Rc::new(source.into_iter().map(prepare).collect());
         *projection = Some(Projection {
             server: server.into(),
@@ -41,22 +47,25 @@ impl Cache {
     }
 }
 
-fn prepare(cpu: &Value) -> Core {
-    let readings = cpu["history"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-    let usage = number(&cpu["usage"]);
-    let peak = readings.iter().map(number).fold(usage, f64::max);
+fn prepare(cpu: &metrics::Core) -> Core {
+    let readings = &cpu.history;
+    let usage = number(Some(cpu.usage));
+    let peak = readings
+        .iter()
+        .map(|value| number(Some(*value)))
+        .fold(usage, f64::max);
     let points = if readings.len() > 1 {
         readings
             .iter()
             .enumerate()
             .map(|(i, value)| Point {
                 at: 60. - (readings.len() - 1 - i) as f64 * 60. / 59.,
-                value: Some(number(value)),
+                value: Some(number(Some(*value))),
                 gap: false,
             })
             .collect()
     } else {
-        let value = readings.first().map(number).unwrap_or(usage);
+        let value = readings.first().map_or(usage, |value| number(Some(*value)));
         [0., 60.]
             .into_iter()
             .map(|at| Point {
@@ -67,7 +76,7 @@ fn prepare(cpu: &Value) -> Core {
             .collect()
     };
     Core {
-        id: text(cpu, "id"),
+        id: cpu.id.to_string(),
         usage,
         peak,
         points: Rc::new(points),
@@ -196,17 +205,25 @@ mod tests {
         self as gpui, Context, IntoElement, Render, ScrollHandle, TestAppContext, Window, div,
         point, prelude::*, px, size,
     };
-    use serde_json::{Value, json};
+    use newport_protocol::monitor::metrics::Core;
+
+    fn core(id: u32, usage: f64, history: &[f64]) -> Core {
+        Core {
+            id,
+            usage,
+            history: history.to_vec(),
+        }
+    }
     use std::rc::Rc;
 
     #[test]
     fn projection_tracks_query_revision_and_server_without_rebuilding_on_redraw() {
         let cache = Cache::default();
-        let source = json!([
-            {"id":2,"usage":17,"history":[22,36]},
-            {"id":0,"usage":45},
-            {"id":1,"usage":30,"history":[9]}
-        ]);
+        let source = [
+            core(2, 17., &[22., 36.]),
+            core(0, 45., &[]),
+            core(1, 30., &[9.]),
+        ];
         let first = cache.get("server-a", 1, &source);
         assert_eq!(
             first.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
@@ -218,17 +235,17 @@ mod tests {
         assert!(Rc::ptr_eq(&first, &cache.get("server-a", 1, &source)));
         let second = cache.get("server-b", 1, &source);
         assert!(!Rc::ptr_eq(&first, &second));
-        let updated = cache.get("server-b", 2, &json!([{"id":2,"usage":99}]));
+        let updated = cache.get("server-b", 2, &[core(2, 99., &[])]);
         assert_eq!(updated.len(), 1);
         assert_eq!(updated[0].usage, 99.);
         assert_eq!(updated[0].points[1].at, 60.);
-        assert!(cache.get("server-b", 0, &Value::Null).is_empty());
+        assert!(cache.get("server-b", 0, &[]).is_empty());
     }
 
     struct GridFixture {
         cache: Cache,
         graphs: graph_render::Cache,
-        data: Value,
+        data: Vec<Core>,
         revision: u64,
         columns: usize,
         height: f32,
@@ -269,14 +286,12 @@ mod tests {
         let (view, visual) = cx.add_window_view(|_, _| GridFixture {
             cache: Cache::default(),
             graphs: graph_render::Cache::default(),
-            data: json!(
-                (0..256)
-                    .map(|id| json!({
-                        "id":id,"usage":id % 100,
-                        "history":(0..60).map(|i| (id+i)%100).collect::<Vec<_>>()
-                    }))
-                    .collect::<Vec<_>>()
-            ),
+            data: (0..256)
+                .map(|id| {
+                    let history: Vec<_> = (0..60).map(|i| f64::from((id + i) % 100)).collect();
+                    core(id, f64::from(id % 100), &history)
+                })
+                .collect(),
             revision: 1,
             columns: 8,
             height: 80.,
@@ -329,11 +344,9 @@ mod tests {
         let (view, visual) = cx.add_window_view(|_, _| GridFixture {
             cache: Cache::default(),
             graphs: graph_render::Cache::default(),
-            data: json!(
-                (0..5)
-                    .map(|id| json!({"id":id,"usage":id,"history":[0,50]}))
-                    .collect::<Vec<_>>()
-            ),
+            data: (0..5)
+                .map(|id| core(id, f64::from(id), &[0., 50.]))
+                .collect(),
             revision: 1,
             columns: 2,
             height: 40.,
@@ -369,7 +382,7 @@ mod tests {
             view.columns = 1;
             view.height = 60.;
             view.scroll.set_offset(point(px(0.), px(0.)));
-            view.data[0]["usage"] = json!(73);
+            view.data[0].usage = 73.;
             view.revision += 1;
             cx.notify();
         });
@@ -397,7 +410,7 @@ mod tests {
             px(100.)
         );
         view.update(visual, |view, cx| {
-            view.data = json!([]);
+            view.data.clear();
             view.revision += 1;
             cx.notify();
         });

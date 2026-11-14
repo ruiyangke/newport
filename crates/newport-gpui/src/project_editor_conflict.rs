@@ -12,8 +12,12 @@ impl Conflict {
     }
 }
 impl CodeWorkspace {
-    pub(super) fn retain_conflict(&mut self, index: usize, value: Value) -> Result<(), String> {
-        let remote = document::Loaded::parse(value)?;
+    pub(super) fn retain_conflict(
+        &mut self,
+        index: usize,
+        remote: files::Document,
+    ) -> Result<(), String> {
+        let remote = document::Loaded::parse(remote)?;
         if remote.page.is_some() {
             return Err("The remote file now requires section viewing. Your edits are kept; reload after copying the edits you need.".into());
         }
@@ -49,8 +53,18 @@ impl CodeWorkspace {
             buffer.editor.update(cx, |e, cx| e.focus(window, cx));
         } else {
             if conflict.preview.is_none() {
-                let value = json!({"content":encode(&conflict.remote.content, conflict.remote.crlf, conflict.remote.bom),"revision":conflict.remote.revision});
-                match Self::document_buffer(buffer.path.clone(), value, window, cx) {
+                let remote = files::Document {
+                    path: buffer.path.clone(),
+                    content: encode(
+                        &conflict.remote.content,
+                        conflict.remote.crlf,
+                        conflict.remote.bom,
+                    ),
+                    revision: conflict.remote.revision.clone(),
+                    page: None,
+                    cached: false,
+                };
+                match Self::document_buffer(buffer.path.clone(), remote, window, cx) {
                     Ok(preview) => {
                         preview.editor.update(cx, |e, cx| e.set_readonly(true, cx));
                         conflict.preview = Some(preview.editor);

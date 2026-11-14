@@ -1,7 +1,7 @@
 use super::{ActiveData, Selection, ServicesPanel, tests};
 use gpui_kit::base::test_support::{ElementSnapshot, snapshots};
 use gpui_kit::{self as gpui, Entity, KeyDownEvent, Keystroke, TestAppContext, VisualTestContext};
-use newport_domain::services::{Scope, TimerUnit};
+use newport_protocol::monitor::services::{Scope, Timer};
 
 fn element(cx: &mut VisualTestContext, label: &str) -> ElementSnapshot {
     cx.update(|window, _| {
@@ -83,7 +83,7 @@ fn detail_tabs_have_one_tab_stop_and_activate_with_navigation_keys(cx: &mut Test
 fn timer_without_target_has_one_operable_unit_file_tab(cx: &mut TestAppContext) {
     let (panel, cx, backend) = tests::fixture(cx);
     let mut snapshot = tests::snapshot();
-    snapshot.timers.push(TimerUnit {
+    snapshot.timers.push(Timer {
         name: "orphan.timer".into(),
         scope: Scope::User,
         ..Default::default()
@@ -115,7 +115,7 @@ fn timer_service_link_keeps_scope_and_natural_width(cx: &mut TestAppContext) {
     let mut same_name = snapshot.services[0].clone();
     same_name.scope = Scope::User;
     snapshot.services.push(same_name);
-    snapshot.timers.push(TimerUnit {
+    snapshot.timers.push(Timer {
         name: "app.timer".into(),
         scope: Scope::User,
         unit: Some("app.service".into()),
@@ -147,7 +147,7 @@ fn timer_service_link_keeps_scope_and_natural_width(cx: &mut TestAppContext) {
 fn unit_file_content_follows_tabs_without_an_empty_toolbar(cx: &mut TestAppContext) {
     let (panel, cx, backend) = tests::fixture(cx);
     let mut snapshot = tests::snapshot();
-    snapshot.timers.push(TimerUnit {
+    snapshot.timers.push(Timer {
         name: "app.timer".into(),
         scope: Scope::System,
         unit: Some("app.service".into()),

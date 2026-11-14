@@ -52,10 +52,8 @@ pub fn read_request(input: &mut impl Read) -> Result<Request, Error> {
 pub fn decode_request(body: Bytes) -> Result<Request, Error> {
     bounded(&body)?;
     let field = fields::single(&body)?;
-    if field.number != 1 {
-        return Err(Invalid("request operation").into());
-    }
-    scan(field.bytes()?, &[(1, false)])?;
+    let known = request_fields(field.number).ok_or(Invalid("request operation"))?;
+    scan(field.bytes()?, known)?;
     let frame: pb::ClientFrame = protobuf::decode(body, &LIMITS)?;
     let request = Request {
         url: frame.open.ok_or(Invalid("open request"))?.url,
@@ -100,15 +98,8 @@ pub fn decode_server(body: Bytes) -> Result<ServerMessage, Error> {
     use pb::server_frame::Message;
     bounded(&body)?;
     let field = fields::single(&body)?;
-    scan(
-        field.bytes()?,
-        match field.number {
-            1 => &[(1, true)],
-            2 => &[(1, false)],
-            3 => &[(1, false), (2, false), (3, true)],
-            _ => return Err(Invalid("response operation").into()),
-        },
-    )?;
+    let known = server_fields(field.number).ok_or(Invalid("response operation"))?;
+    scan(field.bytes()?, known)?;
     let frame: pb::ServerFrame = protobuf::decode(body, &LIMITS)?;
     let message = match frame.message.ok_or(Invalid("response operation"))? {
         Message::Hello(value) => ServerMessage::Hello {
@@ -142,6 +133,53 @@ fn bounded(body: &[u8]) -> Result<(), Error> {
     }
     Ok(())
 }
+
+/// The fields a request's case in field `number` knows: number, and whether
+/// it is an integer rather than text.
+fn request_fields(number: u32) -> Option<&'static [(u32, bool)]> {
+    Some(match number {
+        1 => &[(1, false)],
+        _ => return None,
+    })
+}
+/// The fields a server message's case in field `number` knows.
+fn server_fields(number: u32) -> Option<&'static [(u32, bool)]> {
+    Some(match number {
+        1 => &[(1, true)],
+        2 => &[(1, false)],
+        3 => &[(1, false), (2, false), (3, true)],
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn tables() -> Vec<(Table, &'static str)> {
+    fn table(known: &'static [(u32, bool)]) -> Table {
+        Table::new(format!("browser {known:?}"), move || {
+            known
+                .iter()
+                .map(|&(number, integer)| {
+                    Row::new(number, if integer { Wire::Varint32 } else { Wire::Len })
+                })
+                .collect()
+        })
+    }
+    vec![
+        (
+            Table::dispatch("browser request", |number| {
+                request_fields(number).map(table)
+            }),
+            "newport.browser.ClientFrame",
+        ),
+        (
+            Table::dispatch("browser server", |number| server_fields(number).map(table)),
+            "newport.browser.ServerFrame",
+        ),
+    ]
+}
+
+#[cfg(test)]
+use crate::desktop::wire::wire_tables::{Row, Table, Wire};
 
 fn scan(mut body: &[u8], allowed: &[(u32, bool)]) -> Result<(), Error> {
     let mut seen = 0u8;

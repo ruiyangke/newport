@@ -134,7 +134,7 @@ impl Forwarding {
         id: Uuid,
         remote_port: Option<u16>,
         expected: Option<&Tunnel>,
-        expected_connection: Option<&serde_json::Value>,
+        expected_connection: Option<&newport_protocol::desktop::configuration::ConnectionScope>,
     ) -> Result<std::net::SocketAddrV4, String> {
         let state = self
             .state
@@ -193,7 +193,7 @@ impl Forwarding {
         instance: Uuid,
         server: Uuid,
         tunnels: &[Tunnel],
-        expected: Option<&serde_json::Value>,
+        expected: Option<&newport_protocol::desktop::configuration::ConnectionScope>,
     ) -> Result<Vec<Tunnel>, String> {
         let mut state = self
             .state
@@ -278,7 +278,7 @@ impl State {
         &self,
         instance: Uuid,
         server: Uuid,
-        expected: Option<&serde_json::Value>,
+        expected: Option<&newport_protocol::desktop::configuration::ConnectionScope>,
     ) -> Result<(), String> {
         let Some(expected) = expected else {
             return Ok(());
@@ -292,11 +292,8 @@ impl State {
             .iter()
             .find(|s| s.id == server)
             .ok_or("Server no longer exists.")?;
-        let scope = newport_domain::connection_scope::connection(
-            &serde_json::to_value(profile).map_err(|e| e.to_string())?,
-            &serde_json::json!({"instanceId":instance, "runtime":{"connectionRevisions":{server.to_string():self.revisions.get(&server).copied().unwrap_or(0)}}}),
-        );
-        if scope != *expected {
+        let revision = self.revisions.get(&server).copied().unwrap_or(0);
+        if profile.connection_scope(revision, instance) != *expected {
             return Err(
                 "The server connection changed before the forwarding action could finish.".into(),
             );

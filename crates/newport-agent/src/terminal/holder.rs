@@ -93,9 +93,15 @@ fn winsize(columns: u16, rows: u16) -> libc::winsize {
 struct Shell {
     master: OwnedFd,
     pid: libc::pid_t,
+    /// The reaper's pipe, which brings the shell's wait status, until it has.
+    status: Option<OwnedFd>,
 }
 
 use super::display::Change;
+use super::reaper;
+
+/// How long the reaper may take to start the shell, its scope included.
+const REAPER_START: Duration = Duration::from_secs(5);
 
 /// This process's environment with `changes` made, for the shell. Built
 /// here rather than set on the holder, whose display threads read its own.
@@ -118,16 +124,71 @@ fn shell_environment(changes: &[Change]) -> Vec<CString> {
         .collect()
 }
 
-/// Opens the PTY and starts `sh -c command` as its session leader, with
-/// `changes` made to its environment.
-fn spawn(command: &str, (columns, rows): (u16, u16), changes: &[Change]) -> io::Result<Shell> {
-    let shell = CString::new("/bin/sh").unwrap();
-    let argv = [
-        CString::new("sh").unwrap(),
-        CString::new("-c").unwrap(),
+/// A pipe whose ends close on exec.
+fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [-1; 2];
+    // SAFETY: `fds` has room for both ends.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    for fd in fds {
+        cloexec(fd);
+    }
+    // SAFETY: both ends came from pipe and nothing else owns them.
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
+/// A copy of `fd` above the descriptors a child is given, so moving one into
+/// place can't overwrite another.
+fn above_handed_over(fd: &OwnedFd) -> io::Result<OwnedFd> {
+    // SAFETY: fcntl takes a live descriptor and scalar arguments.
+    let copy = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10) };
+    if copy < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the copy is new and nothing else owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(copy) })
+}
+
+/// Reads one value the reaper sent, waiting until `deadline`.
+fn receive(fd: &OwnedFd, deadline: Instant) -> Option<libc::c_int> {
+    let mut poll = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let left = deadline.checked_duration_since(Instant::now())?;
+    // SAFETY: the pointer and count describe `poll`.
+    if unsafe { libc::poll(&mut poll, 1, left.as_millis() as _) } <= 0 {
+        return None;
+    }
+    let mut bytes = [0u8; 4];
+    // SAFETY: the pointer and length describe `bytes`.
+    let read = unsafe { libc::read(fd.as_raw_fd(), bytes.as_mut_ptr().cast(), bytes.len()) };
+    // A pipe moves a write this short whole.
+    (read == bytes.len() as isize).then(|| libc::c_int::from_ne_bytes(bytes))
+}
+
+/// Opens the PTY and starts the terminal's reaper, which starts `sh -c
+/// command` as the PTY's session leader, with `changes` made to its
+/// environment. Returns once the reaper has said the shell's pid.
+fn spawn(
+    id: &str,
+    command: &str,
+    (columns, rows): (u16, u16),
+    changes: &[Change],
+) -> io::Result<Shell> {
+    let executable = fs::read_link("/proc/self/exe").or_else(|_| std::env::current_exe())?;
+    let executable = CString::new(executable.into_os_string().into_vec())
+        .map_err(|_| io::Error::other("Invalid executable path."))?;
+    let arguments = [
+        executable.clone(),
+        CString::new("terminal").unwrap(),
+        CString::new("reaper").unwrap(),
+        CString::new(id).map_err(|_| io::Error::other("Invalid terminal id."))?,
         CString::new(command).map_err(|_| io::Error::other("Invalid shell command."))?,
     ];
-    let mut argv: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
+    let mut argv: Vec<*const libc::c_char> = arguments.iter().map(|a| a.as_ptr()).collect();
     argv.push(std::ptr::null());
     // The PTY's own terminal type, as sshd's pty-req sets it.
     let mut changes = changes.to_vec();
@@ -152,55 +213,104 @@ fn spawn(command: &str, (columns, rows): (u16, u16), changes: &[Change]) -> io::
     {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: both came from openpty and nothing else owns them.
+    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+    cloexec(master.as_raw_fd());
+    let terminal = above_handed_over(&slave)?;
+    drop(slave);
+    let (status, sender) = pipe()?;
+    let sender = above_handed_over(&sender)?;
+    let null: OwnedFd = File::options()
+        .read(true)
+        .write(true)
+        .open("/dev/null")?
+        .into();
+    // No handler runs between the fork and the exec.
+    // SAFETY: both sets are valid for the calls.
+    let mut blocked: libc::sigset_t = unsafe { std::mem::zeroed() };
+    let mut before: libc::sigset_t = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::sigfillset(&mut blocked);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut before);
+    }
     // SAFETY: the child only calls async-signal-safe functions on memory
     // prepared before the fork, then execs or exits.
-    match unsafe { libc::fork() } {
-        -1 => {
-            let error = io::Error::last_os_error();
-            // SAFETY: both descriptors came from openpty and are used only here.
-            unsafe {
-                libc::close(slave);
-                libc::close(master);
-            }
-            Err(error)
-        }
-        // SAFETY: the child calls only async-signal-safe functions, on argv and envp
-        // built before the fork.
-        0 => unsafe {
-            libc::setsid();
-            libc::ioctl(slave, libc::TIOCSCTTY as _, 0);
+    let reaper_pid = unsafe { libc::fork() };
+    if reaper_pid == 0 {
+        // SAFETY: as above, on descriptors this process owns.
+        unsafe {
+            reaper::default_signals();
             for fd in 0..3 {
-                libc::dup2(slave, fd);
+                libc::dup2(null.as_raw_fd(), fd);
             }
-            libc::close(slave);
-            libc::close(master);
-            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-            libc::signal(libc::SIGHUP, libc::SIG_DFL);
-            libc::execve(shell.as_ptr(), argv.as_ptr(), envp.as_ptr());
+            libc::dup2(terminal.as_raw_fd(), reaper::TERMINAL_FD);
+            libc::dup2(sender.as_raw_fd(), reaper::STATUS_FD);
+            // Every other descriptor closes on exec already; this also
+            // closes one a library opened without saying so.
+            #[cfg(target_os = "linux")]
+            libc::syscall(libc::SYS_close_range, reaper::STATUS_FD + 1, u32::MAX, 0);
+            libc::execve(executable.as_ptr(), argv.as_ptr(), envp.as_ptr());
             libc::_exit(127)
-        },
-        pid => {
-            // SAFETY: the shell has its own copy of the slave.
-            unsafe { libc::close(slave) };
-            cloexec(master);
-            nonblocking(master);
-            Ok(Shell {
-                // SAFETY: master came from openpty and nothing else owns it.
-                master: unsafe { OwnedFd::from_raw_fd(master) },
-                pid,
-            })
         }
     }
+    let error = io::Error::last_os_error();
+    // SAFETY: `before` is the mask this thread had.
+    unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &before, std::ptr::null_mut()) };
+    if reaper_pid < 0 {
+        return Err(error);
+    }
+    // The reaper and the shell have their own copies.
+    drop((terminal, sender, null));
+    let Some(pid) = receive(&status, Instant::now() + REAPER_START).filter(|pid| *pid > 0) else {
+        // SAFETY: the reaper is this holder's child, and is collected here.
+        unsafe {
+            libc::kill(reaper_pid, libc::SIGKILL);
+            libc::waitpid(reaper_pid, std::ptr::null_mut(), 0);
+        }
+        return Err(io::Error::other("The shell did not start."));
+    };
+    nonblocking(master.as_raw_fd());
+    nonblocking(status.as_raw_fd());
+    Ok(Shell {
+        master,
+        pid,
+        status: Some(status),
+    })
 }
 
-/// Orphans the shell leaves behind become the holder's to reap, not a PID 1
-/// that may not reap them.
+/// Only if the reaper is killed: the shell and what the reaper adopted then
+/// come back to the holder, which keeps the shell's exit status, rather than
+/// going to a PID 1 that may not reap them.
 fn become_subreaper() {
     #[cfg(target_os = "linux")]
     // SAFETY: prctl with this option takes scalar arguments.
     unsafe {
         libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
     }
+}
+
+/// SIGTERM and SIGINT as a byte on the returned socket, which the loop
+/// polls to end the shell as Close does. The holder ignores the job control
+/// signals, SIGQUIT and the user signals, which would otherwise end it.
+fn handle_signals() -> io::Result<UnixStream> {
+    for signal in [
+        libc::SIGQUIT,
+        libc::SIGTSTP,
+        libc::SIGTTIN,
+        libc::SIGTTOU,
+        libc::SIGUSR1,
+        libc::SIGUSR2,
+    ] {
+        // SAFETY: signal takes scalar arguments.
+        unsafe { libc::signal(signal, libc::SIG_IGN) };
+    }
+    let (read, write) = UnixStream::pair()?;
+    read.set_nonblocking(true)?;
+    write.set_nonblocking(true)?;
+    for signal in [libc::SIGTERM, libc::SIGINT] {
+        signal_hook::low_level::pipe::register(signal, write.try_clone()?)?;
+    }
+    Ok(read)
 }
 
 /// Whether the connecting process belongs to this account.
@@ -261,6 +371,9 @@ struct Client {
     used: Option<Instant>,
     /// Whether it was last told it is the active one.
     told_active: Option<bool>,
+    /// The shell size it was last told; none until it is attached and has
+    /// its first screen.
+    told_size: Option<(u16, u16)>,
     /// The shell's exit has been queued for it.
     told_exit: bool,
     /// Control connections accept one mutation and close after its outcome.
@@ -289,6 +402,7 @@ impl Client {
             attached_at: Instant::now(),
             used: None,
             told_active: None,
+            told_size: None,
             told_exit: false,
             mutation: false,
             ending: false,
@@ -444,6 +558,8 @@ struct Holder {
     /// The name someone gave the shell, if any.
     name: Option<String>,
     listener: UnixListener,
+    /// A byte for each SIGTERM or SIGINT.
+    signals: UnixStream,
     shell: Shell,
     replica: Replica,
     size: (u16, u16),
@@ -456,6 +572,11 @@ struct Holder {
     stale: bool,
     /// The title the record carries, for tabs not attached yet.
     recorded_title: Option<String>,
+    /// What the shell's coding agent reported, as the record carries it.
+    recorded_agent: Option<String>,
+    /// The process group in the shell's foreground when its programs last
+    /// reported their status. Their status lasts only as long as it does.
+    reporter: Option<libc::pid_t>,
     _clipboard: Option<ClipboardDisplay>,
 }
 
@@ -530,6 +651,8 @@ fn serve(id: &str, size: (u16, u16)) -> io::Result<()> {
     cloexec(listener.as_raw_fd());
     nonblocking(listener.as_raw_fd());
 
+    // Before any thread starts, as signal handlers should be.
+    let signals = handle_signals()?;
     become_subreaper();
     // The account's stable display, running or expected, only when the
     // creating computer may show it: windows and clipboard on the computer
@@ -548,7 +671,7 @@ fn serve(id: &str, size: (u16, u16)) -> io::Result<()> {
             (Some(clipboard), environment)
         }
     };
-    let shell = spawn(&start.command, size, &environment)?;
+    let shell = spawn(id, &start.command, size, &environment)?;
     if let Some(clipboard) = &clipboard {
         clipboard.shown_on(&shell.master);
     }
@@ -560,6 +683,7 @@ fn serve(id: &str, size: (u16, u16)) -> io::Result<()> {
             .map_or(0, |d| d.as_secs()),
         name: None,
         listener,
+        signals,
         shell,
         replica: Replica::new(size.0, size.1).map_err(|_| io::Error::other("Invalid size"))?,
         size,
@@ -570,6 +694,8 @@ fn serve(id: &str, size: (u16, u16)) -> io::Result<()> {
         _clipboard: clipboard,
         stale: false,
         recorded_title: None,
+        recorded_agent: None,
+        reporter: None,
     };
     holder.write_record()?;
     let result = holder.run();
@@ -618,11 +744,13 @@ impl Holder {
             "started": self.started,
             "name": self.name,
             "title": self.replica.title(),
+            "agent": self.replica.agent_report(),
             "creator": self.creator,
             "attached": attached,
             "exited": exited,
         });
         self.recorded_title = self.replica.title().map(str::to_owned);
+        self.recorded_agent = self.replica.agent_report();
         crate::paths::private_write(&self.files.record(), record.to_string().as_bytes())
     }
 
@@ -631,11 +759,15 @@ impl Holder {
         let mut last_tick = Instant::now();
         loop {
             let master = self.shell.master.as_raw_fd();
-            let mut fds = vec![libc::pollfd {
-                fd: self.listener.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            }];
+            let mut fds: Vec<libc::pollfd> = [self.listener.as_raw_fd(), self.signals.as_raw_fd()]
+                .into_iter()
+                .chain(self.shell.status.as_ref().map(|status| status.as_raw_fd()))
+                .map(|fd| libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                })
+                .collect();
             if self.pty_open {
                 fds.push(libc::pollfd {
                     fd: master,
@@ -663,6 +795,16 @@ impl Holder {
             }
             if ready(self.listener.as_raw_fd()) {
                 self.accept();
+            }
+            if ready(self.signals.as_raw_fd()) {
+                // Each byte is one signal; any of them ends the shell.
+                while self.signals.read(&mut buffer).is_ok_and(|n| n > 0) {}
+                self.end();
+            }
+            if let Some(status) = &self.shell.status
+                && ready(status.as_raw_fd())
+            {
+                self.read_status();
             }
             let waiting: Vec<RawFd> = self
                 .clients
@@ -716,6 +858,12 @@ impl Holder {
         if let Ok(effects) = self.replica.advance(bytes) {
             for reply in effects.replies {
                 write_all_pty(master, &reply);
+            }
+            if effects.program_statuses {
+                // SAFETY: tcgetpgrp takes a live descriptor.
+                let foreground = unsafe { libc::tcgetpgrp(master) };
+                self.reporter =
+                    (self.replica.agent_report().is_some() && foreground > 0).then_some(foreground);
             }
         }
         self.broadcast(&ServerMessage::Output(Bytes::copy_from_slice(bytes)));
@@ -852,7 +1000,39 @@ impl Holder {
             let ws = winsize(size.0, size.1);
             // SAFETY: TIOCSWINSZ reads one winsize, which `ws` is.
             unsafe { libc::ioctl(self.shell.master.as_raw_fd(), libc::TIOCSWINSZ, &ws) };
+            // Before any output the shell draws at this size.
+            self.tell_size();
         }
+    }
+
+    /// Tells each attached tab the shell's size when it changed, as tmux
+    /// draws a window at its one size on every client: a tab that kept its
+    /// own size would read output drawn for another computer's width.
+    fn tell_size(&mut self) {
+        let size = self.size;
+        let before = self.clients.len();
+        self.clients.retain_mut(|client| {
+            if !client.attached() || client.told_size.is_none_or(|told| told == size) {
+                return true;
+            }
+            client.told_size = Some(size);
+            client.send(&ServerMessage::Size {
+                columns: size.0,
+                rows: size.1,
+            })
+        });
+        if self.clients.len() != before {
+            self.left();
+        }
+    }
+
+    /// `apply_active` for the client at `index`, which it finds again after:
+    /// telling the others the new size drops any that fell behind, and moves
+    /// those after them. None when it was dropped itself.
+    fn apply_active_for(&mut self, index: usize) -> Option<usize> {
+        let fd = self.clients[index].stream.as_raw_fd();
+        self.apply_active();
+        self.position(fd)
     }
 
     /// The active client sets the size and the query colours, as tmux's
@@ -889,7 +1069,9 @@ impl Holder {
             return true;
         }
         let size = self.size;
-        self.apply_active();
+        let Some(index) = self.apply_active_for(index) else {
+            return false;
+        };
         // Its tab showed the shell at another computer's size; the shell now
         // redraws at this one's, over the screen as it is at that size.
         self.size == size || self.send_screen(index)
@@ -930,8 +1112,17 @@ impl Holder {
                     self.clients[index].used = Some(Instant::now());
                 }
                 self.stale = true;
-                self.apply_active();
+                let Some(index) = self.apply_active_for(index) else {
+                    return false;
+                };
+                // The size comes before the screen, which is drawn at it.
+                let size = self.size;
+                self.clients[index].told_size = Some(size);
                 let mut ok = self.clients[index].send(&ServerMessage::Attached { prompted })
+                    && self.clients[index].send(&ServerMessage::Size {
+                        columns: size.0,
+                        rows: size.1,
+                    })
                     && self.send_screen(index);
                 if let Some((exit, _)) = self.exited {
                     let client = &mut self.clients[index];
@@ -1022,7 +1213,8 @@ impl Holder {
         }
     }
 
-    /// Collects every exited child: the shell, and orphans the holder adopted.
+    /// Collects every exited child: the reaper, and once a reaper is killed,
+    /// the shell and what the reaper had adopted.
     fn reap(&mut self) {
         loop {
             let mut status = 0;
@@ -1031,17 +1223,80 @@ impl Holder {
             if pid <= 0 {
                 return;
             }
-            if pid == self.shell.pid && self.exited.is_none() {
-                self.exited = Some((exit_of(status), Instant::now()));
-                self.stale = true;
+            if pid == self.shell.pid {
+                self.shell_exited(status);
             }
         }
     }
 
+    /// The shell's wait status from the reaper, or the pipe closing without
+    /// it when the reaper is gone.
+    fn read_status(&mut self) {
+        let Some(status) = &self.shell.status else {
+            return;
+        };
+        let mut bytes = [0u8; 4];
+        // SAFETY: the pointer and length describe `bytes`.
+        let read =
+            unsafe { libc::read(status.as_raw_fd(), bytes.as_mut_ptr().cast(), bytes.len()) };
+        if read < 0 && io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock {
+            return;
+        }
+        self.shell.status = None;
+        // A pipe moves a write this short whole.
+        if read == bytes.len() as isize {
+            self.shell_exited(libc::c_int::from_ne_bytes(bytes));
+        } else {
+            self.lost_reaper();
+        }
+    }
+
+    /// The reaper ended without sending the shell's status. A shell still
+    /// there, even as a zombie, is the holder's to reap now. One already gone
+    /// was collected by the reaper, which a kill of the whole scope then
+    /// stopped before it could send the status.
+    fn lost_reaper(&mut self) {
+        // SAFETY: signal 0 sends nothing; it only asks whether the pid exists.
+        let gone = unsafe { libc::kill(self.shell.pid, 0) } == -1
+            && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if gone {
+            self.shell_exited(libc::SIGKILL);
+        }
+    }
+
+    fn shell_exited(&mut self, status: libc::c_int) {
+        if self.exited.is_none() {
+            self.exited = Some((exit_of(status), Instant::now()));
+            self.stale = true;
+        }
+    }
+
+    /// Clears what the shell's programs reported once the process group that
+    /// reported it is gone, as when an agent is killed before it can clear
+    /// its own status. The clear goes to every client as output, so their
+    /// tabs agree with the record.
+    fn clear_orphaned_status(&mut self) {
+        const CLEAR: &[u8] = b"\x1b]7501;state=clear\x1b\\";
+        let Some(reporter) = self.reporter else {
+            return;
+        };
+        // SAFETY: signal 0 sends nothing; it only asks whether the group exists.
+        let gone = unsafe { libc::kill(-reporter, 0) } == -1
+            && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if !gone {
+            return;
+        }
+        self.reporter = None;
+        let _ = self.replica.advance(CLEAR);
+        self.broadcast(&ServerMessage::Output(Bytes::from_static(CLEAR)));
+    }
+
     fn tick(&mut self) {
+        self.clear_orphaned_status();
         // Once a tick at most: some programs change the title many times a
         // second.
-        self.stale |= self.replica.title() != self.recorded_title.as_deref();
+        self.stale |= self.replica.title() != self.recorded_title.as_deref()
+            || self.replica.agent_report() != self.recorded_agent;
         if let Some(started) = self.ending
             && self.exited.is_none()
             && started.elapsed() >= END_GRACE
@@ -1243,5 +1498,153 @@ mod queue_tests {
         assert!(before <= CLIENT_QUEUE);
         assert!(!client.send(&output));
         assert_eq!(client.queued_bytes, before);
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+
+    const ID: &str = "0123456789abcdef0123456789abcdef";
+
+    /// A holder with no shell behind it, for what it does with its clients.
+    fn holder(directory: &std::path::Path) -> Holder {
+        fs::create_dir_all(directory).unwrap();
+        let (signals, _) = UnixStream::pair().unwrap();
+        Holder {
+            files: Files {
+                directory: directory.into(),
+                id: ID.into(),
+            },
+            creator: computer("creator"),
+            started: 0,
+            name: None,
+            listener: UnixListener::bind(directory.join("holder.sock")).unwrap(),
+            signals,
+            shell: Shell {
+                master: File::open("/dev/null").unwrap().into(),
+                pid: libc::pid_t::MAX,
+                status: None,
+            },
+            replica: Replica::new(80, 24).unwrap(),
+            size: (80, 24),
+            clients: Vec::new(),
+            pty_open: true,
+            exited: None,
+            ending: None,
+            stale: false,
+            recorded_title: None,
+            recorded_agent: None,
+            reporter: None,
+            _clipboard: None,
+        }
+    }
+
+    fn computer(id: &str) -> Computer {
+        Computer {
+            id: id.into(),
+            name: id.into(),
+        }
+    }
+
+    fn attach(columns: u16, rows: u16, opened: bool, id: &str) -> ClientMessage {
+        ClientMessage::Attach(Attach {
+            version: protocol::VERSION,
+            columns,
+            rows,
+            control: false,
+            opened,
+            computer: Some(computer(id)),
+            colors: None,
+        })
+    }
+
+    /// A computer attached at its own size, which then stops reading.
+    fn stalled(holder: &mut Holder) -> UnixStream {
+        let (stream, peer) = UnixStream::pair().unwrap();
+        holder.clients.push(Client::new(stream, ID));
+        assert!(holder.handle(0, attach(80, 24, true, "stalled")));
+        while holder.clients[0].send(&ServerMessage::Active(false)) {}
+        peer
+    }
+
+    /// The holder's end of a status pipe the reaper closed without writing.
+    fn closed_status() -> OwnedFd {
+        let mut fds = [0; 2];
+        // SAFETY: pipe fills two descriptors, which `fds` holds.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: both are fresh descriptors this test owns.
+        unsafe {
+            libc::close(fds[1]);
+            OwnedFd::from_raw_fd(fds[0])
+        }
+    }
+
+    #[test]
+    fn a_shell_whose_reaper_died_after_collecting_it_has_ended() {
+        let directory = std::env::temp_dir().join(format!("np-reaped-{}", std::process::id()));
+        let mut holder = holder(&directory);
+        let mut collected = std::process::Command::new("true").spawn().unwrap();
+        collected.wait().unwrap();
+        holder.shell.pid = collected.id() as libc::pid_t;
+        holder.shell.status = Some(closed_status());
+        holder.read_status();
+        assert_eq!(
+            holder.exited.map(|(exit, _)| exit),
+            Some(Exit::Signal(libc::SIGKILL as u32))
+        );
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_shell_that_outlives_its_reaper_keeps_running() {
+        let directory = std::env::temp_dir().join(format!("np-outlived-{}", std::process::id()));
+        let mut holder = holder(&directory);
+        let mut running = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        holder.shell.pid = running.id() as libc::pid_t;
+        holder.shell.status = Some(closed_status());
+        holder.read_status();
+        assert!(holder.exited.is_none());
+        running.kill().unwrap();
+        running.wait().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_computer_that_attaches_while_another_falls_behind_gets_the_shell() {
+        let directory = std::env::temp_dir().join(format!("np-attach-{}", std::process::id()));
+        let mut holder = holder(&directory);
+        let _stalled = stalled(&mut holder);
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        holder.clients.push(Client::new(stream, ID));
+        // Its size goes to the stalled computer, which can't take it.
+        assert!(holder.handle(1, attach(100, 30, true, "fresh")));
+        assert_eq!(holder.clients.len(), 1);
+        assert_eq!(holder.clients[0].mac(), Some(computer("fresh")));
+        assert_eq!(holder.clients[0].told_size, Some((100, 30)));
+        assert_eq!(holder.size, (100, 30));
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_computer_used_while_another_falls_behind_gets_the_shell() {
+        let directory = std::env::temp_dir().join(format!("np-used-{}", std::process::id()));
+        let mut holder = holder(&directory);
+        let _stalled = stalled(&mut holder);
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        holder.clients.push(Client::new(stream, ID));
+        // Attached but not used yet: the shell keeps the stalled one's size.
+        assert!(holder.handle(1, attach(100, 30, false, "fresh")));
+        assert_eq!(holder.size, (80, 24));
+        // As the holder's loop does after each message.
+        assert!(holder.clients[1].flush());
+        assert!(holder.handle(1, ClientMessage::Activate));
+        assert_eq!(holder.clients.len(), 1);
+        assert_eq!(holder.clients[0].mac(), Some(computer("fresh")));
+        assert_eq!(holder.size, (100, 30));
+        let _ = fs::remove_dir_all(directory);
     }
 }

@@ -1,5 +1,4 @@
 //! Bounded pagination from committed list geometry or page-scoped scroll demand.
-use serde_json::{Value, json};
 
 /// Read committed list geometry rather than wheel events consumed by the list.
 /// A newly appended page must be laid out before its end can request another.
@@ -19,28 +18,31 @@ pub(super) fn near_uniform_end(
         && maximum + scroll.base_handle.offset().y <= px(row_height * 2.)
 }
 
-#[derive(Default)]
-pub(super) struct Demand {
-    gesture: Option<Value>,
+/// A scroll gesture's request for the page after the one identified by `K`.
+pub(super) struct Demand<K> {
+    gesture: Option<K>,
     last_requested_offset: Option<gpui_kit::Pixels>,
     scroll: Option<gpui_kit::UniformListScrollHandle>,
 }
-pub(super) fn identity(page: &Value) -> Value {
-    json!([
-        page["snapshot"],
-        page["metadata"],
-        page["nextCursor"],
-        page["entries"].as_array().map(Vec::len)
-    ])
+impl<K> Default for Demand<K> {
+    fn default() -> Self {
+        Self {
+            gesture: None,
+            last_requested_offset: None,
+            scroll: None,
+        }
+    }
 }
-impl Demand {
-    pub(super) fn arm(&mut self, key: Value) {
+impl<K: PartialEq> Demand<K> {
+    pub(super) fn arm(&mut self, key: K) {
         self.gesture = Some(key);
     }
-    pub(super) fn take(&mut self, page: &Value, ready: bool, at_end: bool) -> bool {
+    /// Whether an armed gesture asks for the page after `page`, which is
+    /// still the page it was armed on.
+    pub(super) fn take(&mut self, page: &K, ready: bool, at_end: bool) -> bool {
         self.gesture
             .take()
-            .is_some_and(|key| ready && at_end && key == identity(page))
+            .is_some_and(|key| ready && at_end && key == *page)
     }
     pub(super) fn take_scrolled(
         &mut self,
@@ -71,34 +73,40 @@ impl Demand {
 
 #[cfg(test)]
 mod tests {
-    use super::{Demand, identity};
-    use serde_json::json;
+    use super::Demand;
+    use crate::git_fixture::{history_page, remote_names};
+    use crate::git_listing::{Identity, Listing};
+
+    fn identity(page: &Listing) -> Option<Identity> {
+        Some(page.identity())
+    }
 
     #[test]
-    fn a_scroll_cannot_drain_pages_or_cross_a_remote_refresh() {
-        let first = json!({"snapshot":"s","metadata":{"remoteToken":"one"},"entries":[1],"nextCursor":"two"});
-        let next = json!({"snapshot":"s","metadata":{"remoteToken":"one"},"entries":[1,2],"nextCursor":"three"});
+    fn a_scroll_cannot_drain_pages_or_cross_a_changed_listing() {
+        let first = remote_names("s", &["one"], Some("two"), 3);
+        let next = remote_names("s", &["one", "two"], Some("three"), 3);
         let mut demand = Demand::default();
-        assert!(!demand.take(&first, true, true));
+        assert!(!demand.take(&identity(&first), true, true));
         demand.arm(identity(&first));
-        assert!(demand.take(&first, true, true));
-        assert!(!demand.take(&next, true, true));
+        assert!(demand.take(&identity(&first), true, true));
+        assert!(!demand.take(&identity(&next), true, true));
         demand.arm(identity(&first));
-        assert!(!demand.take(&next, true, true));
+        assert!(!demand.take(&identity(&next), true, true));
         demand.arm(identity(&first));
-        let mut replaced = first.clone();
-        replaced["metadata"]["remoteToken"] = json!("new config");
-        assert!(!demand.take(&replaced, true, true));
+        let replaced = remote_names("s", &["one"], Some("two"), 4);
+        assert!(!demand.take(&identity(&replaced), true, true));
+        demand.arm(identity(&first));
+        assert!(!demand.take(&None, true, true));
     }
 
     #[test]
     fn scrolling_during_a_read_or_away_from_the_end_does_not_queue_a_read() {
-        let page = json!({"snapshot":"s","entries":[1],"nextCursor":"two"});
+        let page = history_page("s", vec![crate::git_fixture::commit("a", "A")], Some("two"));
         let mut demand = Demand::default();
         for (ready, end) in [(false, true), (true, false)] {
             demand.arm(identity(&page));
-            assert!(!demand.take(&page, ready, end));
-            assert!(!demand.take(&page, true, true));
+            assert!(!demand.take(&identity(&page), ready, end));
+            assert!(!demand.take(&identity(&page), true, true));
         }
     }
 }
@@ -115,7 +123,7 @@ mod layout_tests {
         count: usize,
         height: f32,
         scroll: UniformListScrollHandle,
-        demand: Demand,
+        demand: Demand<()>,
     }
     impl Listing {
         fn take(&mut self, ready: bool) -> bool {

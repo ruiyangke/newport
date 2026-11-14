@@ -3,7 +3,6 @@ use crate::page_perf_tests::{PageHost, frame, owner};
 use crate::{Page, theme};
 use gpui::{AppContext, TestAppContext, VisualTestContext};
 use gpui_kit as gpui;
-use serde_json::json;
 
 const RETIRED: &str = "Server session changed. Reconnect before retrying.";
 
@@ -30,8 +29,10 @@ fn a_dropped_connection_shows_the_last_reading_without_an_error(cx: &mut TestApp
             let mut v = owner(window, cx);
             v.page = Page::Overview;
             v.server = id.to_string();
-            v.snapshot["instanceId"] = json!(instance);
-            v.snapshot["config"]["servers"][0]["id"] = json!(id);
+            let snapshot = v.snapshot_mut();
+            snapshot.instance_id = instance;
+            snapshot.config.servers[0].id = id;
+            snapshot.runtime.connection_revisions.clear();
             v
         });
         view = Some(entity.clone());
@@ -39,12 +40,13 @@ fn a_dropped_connection_shows_the_last_reading_without_an_error(cx: &mut TestApp
     });
     let view = view.unwrap();
     view.update(visual, |v, _| {
-        let generation = v.resources.begin_refresh("page", false).unwrap();
+        v.put_reading(newport_protocol::monitor::metrics::Snapshot {
+            cpu: 1.,
+            ..Default::default()
+        });
+        let generation = v.resources.begin_refresh("overview", false).unwrap();
         v.resources
-            .complete("page", generation, Ok(json!({"cpu": {"usage": 1.0}})));
-        let generation = v.resources.begin_refresh("page", false).unwrap();
-        v.resources
-            .complete("page", generation, Err(RETIRED.into()));
+            .complete("overview", generation, Err(RETIRED.into()));
     });
     // The application re-renders on connectivity through its subscription.
     let publish = |visual: &mut VisualTestContext, revision, phase| {

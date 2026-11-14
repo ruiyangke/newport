@@ -14,9 +14,8 @@ impl Newport {
     /// unfinished or skipped, or Needle was found missing. From the last
     /// snapshot only.
     pub(super) fn needle_missing(&self) -> bool {
-        self.selected_server().is_some_and(|server| {
-            self.needs_setup(server) || server["agentInstallApproved"] != true
-        })
+        self.selected_server()
+            .is_some_and(|server| self.needs_setup(server) || !server.agent_install_approved)
     }
 
     /// In place of a page that runs on Needle.

@@ -36,6 +36,7 @@ pub async fn dispatch(
                             terminal: shell.terminal,
                             name: shell.name,
                             title: shell.title,
+                            agent: shell.agent,
                             creator: service::Computer {
                                 id: shell.creator.id,
                                 name: shell.creator.name,

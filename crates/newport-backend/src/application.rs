@@ -30,6 +30,7 @@ pub trait DesktopCommands: Send + Sync + 'static {
 /// and call `stop` to wait for cleanup before exiting or restarting the process.
 pub struct Application {
     connections: tokio::sync::watch::Receiver<newport_domain::connectivity::Snapshot>,
+    latencies: tokio::sync::watch::Receiver<crate::connection_state::Latencies>,
     endpoint: PathBuf,
     shutdown: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<std::io::Result<()>>,
@@ -106,7 +107,7 @@ impl Application {
             let key = manager.store.earlier_key()?;
             Some((key, manager.config.servers.clone()))
         };
-        let metrics = MetricsDb::open(&directory.join("metrics.sqlite3"), earlier).await?;
+        let metrics = MetricsDb::open(&directory.join(crate::metrics_db::FILE), earlier).await?;
         let integration_access = manager.integration_access();
         let state = Arc::new(State {
             manager: crate::manager::share(manager),
@@ -129,6 +130,7 @@ impl Application {
         };
         let events = listener.events();
         let connections = state.manager.sessions.connections.subscribe();
+        let latencies = state.manager.sessions.connections.latencies();
         let workers = Workers::start(
             state.manager.clone(),
             state.metrics.clone(),
@@ -161,6 +163,7 @@ impl Application {
         });
         Ok(Self {
             connections,
+            latencies,
             endpoint,
             shutdown: Some(shutdown),
             task,
@@ -178,6 +181,14 @@ impl Application {
         &self,
     ) -> tokio::sync::watch::Receiver<newport_domain::connectivity::Snapshot> {
         self.connections.clone()
+    }
+
+    /// Each connected server's latest SSH round trip.
+    pub fn latencies(
+        &self,
+    ) -> tokio::sync::watch::Receiver<std::collections::BTreeMap<uuid::Uuid, std::time::Duration>>
+    {
+        self.latencies.clone()
     }
 
     /// Resolves after cleanup; also exposes unexpected listener failure to the host.
@@ -372,12 +383,7 @@ impl<H: DesktopCommands> rpc::Host for Host<H> {
         let (profile, owner) = manager
             .current(request.server)
             .map_err(rpc::failure::operation)?;
-        if !rpc::configuration::matches_scope(
-            &profile,
-            &request.expected,
-            owner.revision(),
-            manager.instance_id,
-        ) {
+        if profile.connection_scope(owner.revision(), manager.instance_id) != request.expected {
             return Err(rpc::failure::operation(
                 "The server connection changed. Reopen the project.",
             ));

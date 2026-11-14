@@ -92,7 +92,9 @@ impl std::fmt::Display for Error {
                 f.write_str("Needle uses an older runtime protocol. Update Needle.")
             }
             Error::Interrupted(message) | Error::Unavailable(message) => f.write_str(message),
-            Error::Remote(error) if error.code == "busy" => f.write_str(BUSY),
+            Error::Remote(error) if error.code == newport_protocol::common::BUSY => {
+                f.write_str(BUSY)
+            }
             Error::Remote(error) => f.write_str(&error.message),
             Error::Admission(error) => error.fmt(f),
         }
@@ -633,7 +635,7 @@ impl Slot {
                 .require_contract(service, version, protocol::service_contract_id(service))
                 .map_err(Error::Remote)?;
             // Needle itself checks for Git installed since it started.
-            if service == "git" {
+            if service == protocol::service::GIT {
                 hello.require_compatible(service, version).map(|_| ())
             } else {
                 hello.require(service, version)
@@ -1481,10 +1483,19 @@ pub(crate) struct Unmet {
 /// service must speak them. Terminals run the entry point's `terminal`
 /// commands, so a build without them doesn't serve this desktop.
 pub(crate) const NEEDS: [(&str, u32); 4] = [
-    ("monitor", 1),
-    ("git", newport_protocol::git::VERSION),
-    ("integration", newport_protocol::integration::VERSION),
-    ("terminal", newport_protocol::terminal::VERSION),
+    (
+        protocol::service::MONITOR,
+        newport_protocol::monitor::VERSION,
+    ),
+    (protocol::service::GIT, newport_protocol::git::VERSION),
+    (
+        protocol::service::INTEGRATION,
+        newport_protocol::integration::VERSION,
+    ),
+    (
+        protocol::service::TERMINAL,
+        newport_protocol::terminal::VERSION,
+    ),
 ];
 
 impl Inspected {

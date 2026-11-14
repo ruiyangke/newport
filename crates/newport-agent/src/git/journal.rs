@@ -2,6 +2,7 @@
 //! A running record without its repository lock is uncertain, never retryable.
 use super::protocol::Error;
 use fs2::FileExt;
+use newport_protocol::git::code;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -177,7 +178,7 @@ impl Journal {
     pub fn get(&self, id: &str) -> Result<Record, Error> {
         let mut record = self.load(&self.record_path(id)?)?.ok_or_else(|| {
             Error::new(
-                "OPERATION_NOT_FOUND",
+                code::OPERATION_NOT_FOUND,
                 "No operation record exists. Do not automatically replay a write.",
             )
         })?;
@@ -192,7 +193,7 @@ impl Journal {
                         record.state = "outcome_unknown".into();
                         record.seq += 1;
                         record.error = Some(Error::new(
-                            "OUTCOME_UNKNOWN",
+                            code::OUTCOME_UNKNOWN,
                             "The operation was interrupted. Inspect repository state before continuing.",
                         ));
                         self.save(&record)?;
@@ -209,7 +210,7 @@ impl Journal {
         let path = self.record_path(id)?;
         let missing = || {
             Error::new(
-                "OPERATION_NOT_FOUND",
+                code::OPERATION_NOT_FOUND,
                 "No operation record exists for this client.",
             )
         };
@@ -224,7 +225,7 @@ impl Journal {
             "outcome_unknown" => {}
             _ => {
                 return Err(Error::new(
-                    "OPERATION_NOT_REVIEWABLE",
+                    code::OPERATION_NOT_REVIEWABLE,
                     "Only an unknown outcome can be reviewed.",
                 ));
             }

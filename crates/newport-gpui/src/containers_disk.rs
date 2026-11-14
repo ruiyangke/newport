@@ -1,7 +1,9 @@
 //! Docker inventory presentation. Reads, cache lifetime, and cleanup ownership
 //! remain in newport-client; this view owns only ordering, scrolling and review.
 use super::*;
-use newport_domain::containers::{DiskTotals, DockerDisk, DockerImage, DockerVolume, PruneTarget};
+use newport_protocol::monitor::containers::{
+    DiskTotals, DockerDisk, DockerImage, DockerVolume, PruneTarget,
+};
 
 #[cfg(test)]
 #[path = "containers_disk_layout_tests.rs"]
@@ -274,11 +276,11 @@ impl ContainersPanel {
             .map(|data| {
                 format!(
                     "{engine} uses {} on this server{}{}",
-                    bytes(&json!(data.totals.size())),
+                    byte_size(data.totals.size() as f64),
                     if data.totals.reclaimable() > 0 {
                         format!(
                             " · {} can be freed",
-                            bytes(&json!(data.totals.reclaimable()))
+                            byte_size(data.totals.reclaimable() as f64)
                         )
                     } else {
                         String::new()
@@ -455,7 +457,7 @@ impl ContainersPanel {
         cx: &App,
     ) -> AnyElement {
         let size = match sizes {
-            VolumeSizes::Known => bytes(&json!(totals.size)),
+            VolumeSizes::Known => byte_size(totals.size as f64),
             VolumeSizes::Measuring => "Measuring…".to_owned(),
             VolumeSizes::Failed => "Unknown".to_owned(),
         };
@@ -470,7 +472,7 @@ impl ContainersPanel {
                 totals.count,
                 unit[usize::from(totals.count != 1)],
                 if totals.reclaimable > 0 {
-                    format!(", {} can be freed", bytes(&json!(totals.reclaimable)))
+                    format!(", {} can be freed", byte_size(totals.reclaimable as f64))
                 } else {
                     String::new()
                 }
@@ -509,7 +511,7 @@ impl ContainersPanel {
                         } else if sizes == VolumeSizes::Failed {
                             " · sizes unavailable".to_owned()
                         } else if totals.reclaimable > 0 {
-                            format!(" · {} can be freed", bytes(&json!(totals.reclaimable)))
+                            format!(" · {} can be freed", byte_size(totals.reclaimable as f64))
                         } else {
                             String::new()
                         }
@@ -797,7 +799,7 @@ fn image_row(
     } else {
         image.tags.join(", ")
     };
-    let size = bytes(&json!(image.size));
+    let size = byte_size(image.size as f64);
     let age = format!(
         "{} ago",
         newport_domain::services::duration(
@@ -879,7 +881,7 @@ fn volume_row(
         volume.name.clone()
     };
     let size = match volume.size {
-        Some(n) => bytes(&json!(n)),
+        Some(n) => byte_size(n as f64),
         None if measuring => "Measuring…".into(),
         None => "—".into(),
     };

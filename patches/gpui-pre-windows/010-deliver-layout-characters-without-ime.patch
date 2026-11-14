@@ -1,0 +1,893 @@
+gpui_windows: Deliver layout characters without IME
+
+An input handler can opt into the characters the keyboard layout
+produces (dead keys, AltGr, surrogate pairs) without enabling the IME:
+`InputHandler::native_character_context` names the target, and the key
+down is translated with ToUnicodeEx and delivered to
+`handle_native_characters` while the target is still focused and current.
+Before the handler is captured, the window paints the frame and input
+modality a key down would, so the captured handler is the one key
+dispatch uses.
+
+The translated key never reaches TranslateMessage, so the translation
+keeps the layout's dead-key state as TranslateMessage would: a dead key
+delivers nothing, and the next key delivers the composed character, or
+both characters when they don't compose, as in any Windows application.
+The state is the thread's, shared with TranslateMessage, so a dead key
+composes with the next key whichever path takes it.
+
+Ordinary text input also changes: after an unhandled dead key, the next
+text key prefers character input, so TranslateMessage completes the
+character instead of a key binding taking it.
+
+Newport needs it for Remote apps on Windows: keys go to Linux apps as key
+events, and characters the layout produces go as text.
+
+This is a second text path beside the IME path. on_prepare_key_input,
+native_character_context and handle_native_characters have defaults; a
+handler that keeps them uses the IME path.
+
+Remove when upstream GPUI delivers layout characters to a non-IME target.
+
+diff --git a/src/events.rs b/src/events.rs
+index db795e7..1688e53 100644
+--- a/src/events.rs
++++ b/src/events.rs
+@@ -31,6 +31,39 @@ pub(crate) const WM_GPUI_DISPLAYS_CHANGED: u32 = WM_USER + 10;
+ 
+ const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
+ 
++thread_local! {
++    // The keyboard layout's dead-key state is the thread's. TranslateMessage
++    // and the native character translator both keep it, and the next text key
++    // must reach whichever holds it even when it produces ASCII.
++    static NATIVE_CHARACTERS: Cell<NativeCharacterState> = const {
++        Cell::new(NativeCharacterState {
++            dead_key_pending: false,
++        })
++    };
++}
++
++#[derive(Clone, Copy, Default)]
++struct NativeCharacterState {
++    dead_key_pending: bool,
++}
++
++impl NativeCharacterState {
++    fn prefers_text(self, has_text: bool, prefer_character_input: bool) -> bool {
++        prefer_character_input || (self.dead_key_pending && has_text)
++    }
++
++    fn key_dispatched(&mut self, has_text: bool, dead_key: bool, handled: bool) {
++        if !handled && has_text {
++            self.dead_key_pending = dead_key;
++        }
++    }
++
++    fn native_translated(&mut self, translation: &crate::native_characters::Translation) {
++        self.dead_key_pending =
++            matches!(translation, crate::native_characters::Translation::DeadKey);
++    }
++}
++
+ #[derive(Clone, Copy, Default)]
+ pub(crate) struct NativeModalLoops {
+     size_move: bool,
+@@ -152,6 +185,10 @@ impl WindowsWindowInner {
+         wparam: WPARAM,
+         lparam: LPARAM,
+     ) -> LRESULT {
++        // Native focus may leave and return before GPUI's deferred observers run.
++        self.state
++            .native_character_authority
++            .observe(msg, wparam, lparam);
+         let handled = match msg {
+             // `DefWindowProc` answers `MA_NOACTIVATE` for a left click on `HTCAPTION`.
+             // The activation is only triggered when `DefWindowProc` handles the following `WM_NCLBUTTONDOWN`.
+@@ -608,13 +645,14 @@ impl WindowsWindowInner {
+     }
+ 
+     fn handle_syskeyup_msg(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+-        let input = handle_key_event(wparam, lparam, &self.state, |keystroke, _, metadata| {
+-            PlatformInput::KeyUp(KeyUpEvent {
+-                physical_key: physical_key_from_lparam(lparam),
+-                key_metadata: Some(metadata),
+-                keystroke,
+-            })
+-        })?;
++        let (input, _) =
++            handle_key_event(wparam, lparam, &self.state, |keystroke, _, metadata| {
++                PlatformInput::KeyUp(KeyUpEvent {
++                    physical_key: physical_key_from_lparam(lparam),
++                    key_metadata: Some(metadata),
++                    keystroke,
++                })
++            })?;
+         let mut func = self.state.callbacks.input.take()?;
+ 
+         func(input);
+@@ -627,7 +665,10 @@ impl WindowsWindowInner {
+     // It's a known bug that you can't trigger `ctrl-shift-0`. See:
+     // https://superuser.com/questions/1455762/ctrl-shift-number-key-combination-has-stopped-working-for-a-few-numbers
+     pub(crate) fn handle_keydown_msg(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+-        let Some(input) = handle_key_event(
++        if self.state.closing.get() {
++            return Some(0);
++        }
++        let Some((input, dead_key)) = handle_key_event(
+             wparam,
+             lparam,
+             &self.state,
+@@ -641,22 +682,155 @@ impl WindowsWindowInner {
+                 })
+             },
+         ) else {
++            // Some layouts have a native character but no shortcut key name.
++            // Keep that case on the same opt-in path; the probe is nonmutating.
++            let key = VIRTUAL_KEY(wparam.loword());
++            if !matches!(key, VK_PACKET | VK_PROCESSKEY) {
++                let (text, prefer_characters, dead_key) = process_key(key, lparam.hiword());
++                let modifiers = current_modifiers();
++                let native_text =
++                    prefer_characters || (text.is_some() && !modifiers.control && !modifiers.alt);
++                if native_text && !modifiers.platform {
++                    if let Some(origin) = self.prepare_native_character_target(true) {
++                        return self.handle_native_character_msg(origin, wparam, lparam);
++                    }
++                    if self.state.closing.get() {
++                        return Some(0);
++                    }
++                }
++                NATIVE_CHARACTERS.with(|state| {
++                    let mut next = state.get();
++                    next.key_dispatched(text.is_some(), dead_key, false);
++                    state.set(next);
++                });
++            }
+             return Some(1);
+         };
+ 
+-        let Some(mut func) = self.state.callbacks.input.take() else {
+-            return Some(1);
++        let native_target =
++            self.prepare_native_character_target(matches!(&input, PlatformInput::KeyDown(_)));
++        if self.state.closing.get() {
++            return Some(0);
++        }
++        let has_text =
++            matches!(&input, PlatformInput::KeyDown(event) if event.keystroke.key_char.is_some());
++        let native_preference = if let PlatformInput::KeyDown(event) = &input {
++            event.prefer_character_input && !event.keystroke.modifiers.platform
++        } else {
++            false
++        };
++        let handled = if let Some(mut func) = self.state.callbacks.input.take() {
++            let handled = !func(input).propagate;
++            self.state.callbacks.input.set(Some(func));
++            handled
++        } else {
++            false
+         };
++        if !handled
++            && native_preference
++            && let Some(origin) = native_target
++        {
++            return self.handle_native_character_msg(origin, wparam, lparam);
++        }
++        NATIVE_CHARACTERS.with(|state| {
++            let mut next = state.get();
++            next.key_dispatched(has_text, dead_key, handled);
++            state.set(next);
++        });
+ 
+-        let handled = !func(input).propagate;
++        if handled { Some(0) } else { Some(1) }
++    }
+ 
+-        self.state.callbacks.input.set(Some(func));
++    fn prepare_native_character_target(
++        &self,
++        key_down: bool,
++    ) -> Option<crate::native_characters::Origin> {
++        if self.state.closing.get() {
++            return None;
++        }
++        // Paint before borrowing an input handler: painting may replace it.
++        let mut callback = self.state.callbacks.prepare_key_input.take()?;
++        let prepared = callback(key_down);
++        if self.state.closing.get() {
++            return None;
++        }
++        let replacement = self.state.callbacks.prepare_key_input.take();
++        self.state
++            .callbacks
++            .prepare_key_input
++            .set(replacement.or(Some(callback)));
++        if !prepared {
++            return None;
++        }
++        self.with_input_handler(|handler| handler.native_character_target())
++            .flatten()
++            .filter(|_| unsafe { GetFocus() } == self.native_handle())
++            .and_then(|target| {
++                crate::native_characters::Origin::capture(
++                    self.native_handle(),
++                    target,
++                    &self.state.native_character_authority,
++                )
++            })
++    }
+ 
+-        if handled { Some(0) } else { Some(1) }
++    fn handle_native_character_msg(
++        &self,
++        origin: crate::native_characters::Origin,
++        wparam: WPARAM,
++        lparam: LPARAM,
++    ) -> Option<isize> {
++        let current = self
++            .with_input_handler(|handler| handler.native_character_target())
++            .flatten();
++        if current != Some(origin.target)
++            || !origin.is_current(&self.state.native_character_authority)
++        {
++            return Some(0);
++        }
++        let translated = crate::native_characters::translate(
++            origin,
++            &self.state.native_character_authority,
++            VIRTUAL_KEY(wparam.loword()),
++            u32::from(lparam.hiword() & 0xff),
++        );
++        if let Ok(translation) = &translated {
++            NATIVE_CHARACTERS.with(|state| {
++                let mut next = state.get();
++                next.native_translated(translation);
++                state.set(next);
++            });
++        }
++        if !origin.is_current(&self.state.native_character_authority) {
++            return Some(0);
++        }
++        match translated {
++            // The layout keeps the dead key for the next key, as it does for
++            // TranslateMessage; nothing is typed yet.
++            Ok(crate::native_characters::Translation::DeadKey) => (),
++            Ok(crate::native_characters::Translation::Text(text)) => {
++                self.with_input_handler(|handler| {
++                    handler.handle_native_characters_if(origin.target, Ok(&text), || {
++                        origin.is_current(&self.state.native_character_authority)
++                    })
++                });
++            }
++            Err(error) => {
++                self.with_input_handler(|handler| {
++                    handler.handle_native_characters_if(origin.target, Err(error), || {
++                        origin.is_current(&self.state.native_character_authority)
++                    })
++                });
++            }
++        }
++        // Both pumps call WM_GPUI_KEYDOWN before TranslateMessage. The selected
++        // target consumes this key even on failure; a second translation could
++        // change the dead-key state again or insert text twice.
++        Some(0)
+     }
+ 
+     fn handle_keyup_msg(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+-        let Some(input) =
++        let Some((input, _)) =
+             handle_key_event(wparam, lparam, &self.state, |keystroke, _, metadata| {
+                 PlatformInput::KeyUp(KeyUpEvent {
+                     physical_key: physical_key_from_lparam(lparam),
+@@ -1611,6 +1785,11 @@ impl WindowsWindowInner {
+     }
+ 
+     fn handle_input_language_changed(&self) -> Option<isize> {
++        NATIVE_CHARACTERS.with(|state| {
++            let mut next = state.get();
++            next.dead_key_pending = false;
++            state.set(next);
++        });
+         self.state.pending_surrogate.set(None);
+         unsafe {
+             PostMessageW(
+@@ -1848,7 +2027,7 @@ fn handle_key_event<F>(
+     lparam: LPARAM,
+     state: &WindowsWindowState,
+     f: F,
+-) -> Option<PlatformInput>
++) -> Option<(PlatformInput, bool)>
+ where
+     F: FnOnce(Keystroke, bool, KeyEventMetadata) -> PlatformInput,
+ {
+@@ -1865,10 +2044,13 @@ where
+                 return None;
+             }
+             state.last_reported_modifiers.set(Some(modifiers));
+-            Some(PlatformInput::ModifiersChanged(ModifiersChangedEvent {
+-                modifiers,
+-                capslock: current_capslock(),
+-            }))
++            Some((
++                PlatformInput::ModifiersChanged(ModifiersChangedEvent {
++                    modifiers,
++                    capslock: current_capslock(),
++                }),
++                false,
++            ))
+         }
+         VK_PACKET | VK_PROCESSKEY => None,
+         VK_CAPITAL => {
+@@ -1881,10 +2063,13 @@ where
+                 return None;
+             }
+             state.last_reported_capslock.set(Some(capslock));
+-            Some(PlatformInput::ModifiersChanged(ModifiersChangedEvent {
+-                modifiers,
+-                capslock,
+-            }))
++            Some((
++                PlatformInput::ModifiersChanged(ModifiersChangedEvent {
++                    modifiers,
++                    capslock,
++                }),
++                false,
++            ))
+         }
+         vkey => {
+             // Keep native layout facts separate from shortcut normalization.
+@@ -1903,8 +2088,12 @@ where
+                 caps_lock: current_capslock().on,
+                 num_lock: unsafe { GetKeyState(VK_NUMLOCK.0 as i32) & 1 } != 0,
+             };
+-            let keystroke = parse_normal_key(vkey, lparam, modifiers)?;
+-            Some(f(keystroke.0, keystroke.1, metadata))
++            let (keystroke, prefer_character_input, dead_key) =
++                parse_normal_key(vkey, lparam, modifiers)?;
++            let prefer_character_input = NATIVE_CHARACTERS
++                .get()
++                .prefers_text(keystroke.key_char.is_some(), prefer_character_input);
++            Some((f(keystroke, prefer_character_input, metadata), dead_key))
+         }
+     }
+ }
+@@ -1964,8 +2153,8 @@ fn parse_normal_key(
+     vkey: VIRTUAL_KEY,
+     lparam: LPARAM,
+     mut modifiers: Modifiers,
+-) -> Option<(Keystroke, bool)> {
+-    let (key_char, prefer_character_input) = process_key(vkey, lparam.hiword());
++) -> Option<(Keystroke, bool, bool)> {
++    let (key_char, prefer_character_input, dead_key) = process_key(vkey, lparam.hiword());
+ 
+     let key = parse_immutable(vkey).or_else(|| {
+         let scan_code = lparam.hiword() & 0xFF;
+@@ -1979,14 +2168,15 @@ fn parse_normal_key(
+             key_char,
+         },
+         prefer_character_input,
++        dead_key,
+     ))
+ }
+ 
+-fn process_key(vkey: VIRTUAL_KEY, scan_code: u16) -> (Option<String>, bool) {
++fn process_key(vkey: VIRTUAL_KEY, scan_code: u16) -> (Option<String>, bool, bool) {
+     let mut keyboard_state = [0u8; 256];
+     unsafe {
+         if GetKeyboardState(&mut keyboard_state).is_err() {
+-            return (None, false);
++            return (None, false, false);
+         }
+     }
+ 
+@@ -2002,7 +2192,7 @@ fn process_key(vkey: VIRTUAL_KEY, scan_code: u16) -> (Option<String>, bool) {
+     };
+ 
+     if result_c == 0 {
+-        return (None, false);
++        return (None, false, false);
+     }
+ 
+     let c = &buffer_c[..result_c.unsigned_abs() as usize];
+@@ -2011,11 +2201,11 @@ fn process_key(vkey: VIRTUAL_KEY, scan_code: u16) -> (Option<String>, bool) {
+         .filter(|s| !s.is_empty() && !s.chars().next().unwrap().is_control());
+ 
+     if result_c < 0 {
+-        return (key_char, true);
++        return (key_char, true, true);
+     }
+ 
+     if key_char.is_none() {
+-        return (None, false);
++        return (None, false, false);
+     }
+ 
+     // Workaround for some bug that makes the compiler think keyboard_state is still zeroed out
+@@ -2027,7 +2217,7 @@ fn process_key(vkey: VIRTUAL_KEY, scan_code: u16) -> (Option<String>, bool) {
+ 
+     let has_modifiers = ctrl_down || alt_down || win_down;
+     if !has_modifiers {
+-        return (key_char, false);
++        return (key_char, false, false);
+     }
+ 
+     let mut state_no_modifiers = keyboard_state;
+@@ -2055,6 +2245,7 @@ fn process_key(vkey: VIRTUAL_KEY, scan_code: u16) -> (Option<String>, bool) {
+     (
+         key_char,
+         result_c != result_c_no_modifiers || c != c_no_modifiers,
++        false,
+     )
+ }
+ 
+@@ -2201,7 +2392,10 @@ mod physical_key_tests {
+ 
+ #[cfg(test)]
+ mod native_window_input_tests {
+-    use super::{NativeModalLoops, cancel_marked_text, decode_character, mouse_activate_result};
++    use super::{
++        NativeCharacterState, NativeModalLoops, cancel_marked_text, decode_character,
++        mouse_activate_result,
++    };
+ 
+     #[test]
+     fn utf16_pairs_cannot_cross_focus_or_text_acceptance_boundaries() {
+@@ -2273,4 +2467,31 @@ mod native_window_input_tests {
+         cancel_marked_text(None, |_| panic!("cancelled committed text"));
+         cancel_marked_text(Some(0..0), |_| panic!("cancelled an empty composition"));
+     }
++
++    #[test]
++    fn a_dead_key_is_drained_by_ascii_text_but_not_by_remote_shortcuts() {
++        let mut state = NativeCharacterState::default();
++        assert!(!state.prefers_text(true, false));
++        state.key_dispatched(true, true, true);
++        assert!(!state.prefers_text(true, false));
++        state.key_dispatched(true, true, false);
++        assert!(state.prefers_text(true, false));
++        assert!(!state.prefers_text(false, false));
++        state.key_dispatched(false, false, true);
++        assert!(state.prefers_text(true, false));
++        state.key_dispatched(true, false, false);
++        assert!(!state.prefers_text(true, false));
++        assert!(state.prefers_text(true, true));
++    }
++
++    #[test]
++    fn a_native_dead_key_sends_the_next_text_key_to_the_translator_that_holds_it() {
++        use crate::native_characters::Translation;
++        let mut state = NativeCharacterState::default();
++        state.native_translated(&Translation::DeadKey);
++        assert!(state.prefers_text(true, false));
++        assert!(!state.prefers_text(false, false));
++        state.native_translated(&Translation::Text("é".into()));
++        assert!(!state.prefers_text(true, false));
++    }
+ }
+diff --git a/src/gpui_windows.rs b/src/gpui_windows.rs
+index 720b226..af4caf6 100644
+--- a/src/gpui_windows.rs
++++ b/src/gpui_windows.rs
+@@ -12,6 +12,7 @@ mod dispatcher;
+ mod display;
+ mod events;
+ mod keyboard;
++mod native_characters;
+ mod native_resize;
+ mod platform;
+ mod system_notifications;
+diff --git a/src/native_characters.rs b/src/native_characters.rs
+new file mode 100644
+index 0000000..6579747
+--- /dev/null
++++ b/src/native_characters.rs
+@@ -0,0 +1,361 @@
++//! Layout translation for explicitly opted-in, non-IME targets.
++use std::cell::Cell;
++use windows::Win32::{
++    Foundation::{HWND, LPARAM, WPARAM},
++    UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
++};
++
++const MAX_UNITS: usize = 32;
++/// ToUnicodeEx flags that keep the layout's dead-key state, as
++/// TranslateMessage does.
++const KEEP_DEAD_KEY_STATE: u32 = 0;
++
++/// What a key down typed.
++#[derive(Debug, PartialEq, Eq)]
++pub(crate) enum Translation {
++    /// The characters, including a dead key's when the next key doesn't
++    /// compose with it.
++    Text(String),
++    /// A dead key, kept for the next key.
++    DeadKey,
++}
++
++/// Native messages retire key authority before deferred GPUI focus observers.
++pub(crate) struct Authority {
++    state: Cell<AuthorityState>,
++    generation: Cell<Option<u64>>,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++struct AuthorityState {
++    focused: bool,
++    active: bool,
++    application_active: bool,
++    layout: isize,
++    retired: bool,
++}
++
++impl Authority {
++    pub(crate) fn new(window: HWND) -> Self {
++        let state = unsafe {
++            let thread = GetWindowThreadProcessId(window, None);
++            AuthorityState {
++                focused: GetFocus() == window,
++                active: GetActiveWindow() == window,
++                application_active: thread != 0
++                    && GetWindowThreadProcessId(GetForegroundWindow(), None) == thread,
++                layout: GetKeyboardLayout(0).0 as isize,
++                retired: false,
++            }
++        };
++        Self::from_state(state)
++    }
++
++    fn from_state(state: AuthorityState) -> Self {
++        Self {
++            state: Cell::new(state),
++            generation: Cell::new(Some(0)),
++        }
++    }
++
++    fn update(&self, change: impl FnOnce(&mut AuthorityState)) {
++        let old = self.state.get();
++        if old.retired {
++            return;
++        }
++        let mut next = old;
++        change(&mut next);
++        if next != old {
++            self.state.set(next);
++            // Exhaustion is terminal; a wrapped generation could revive a key.
++            self.generation
++                .set(self.generation.get().and_then(|value| value.checked_add(1)));
++        }
++    }
++
++    pub(crate) fn observe(&self, message: u32, wparam: WPARAM, lparam: LPARAM) {
++        self.update(|state| match message {
++            WM_SETFOCUS => state.focused = true,
++            WM_KILLFOCUS => state.focused = false,
++            WM_ACTIVATE => match wparam.0 as u32 & 0xffff {
++                WA_INACTIVE => state.active = false,
++                WA_ACTIVE | WA_CLICKACTIVE => state.active = true,
++                _ => (),
++            },
++            WM_ACTIVATEAPP => state.application_active = wparam.0 != 0,
++            WM_INPUTLANGCHANGE => state.layout = lparam.0,
++            WM_DESTROY | WM_NCDESTROY => state.retired = true,
++            _ => (),
++        });
++    }
++
++    pub(crate) fn retire(&self) {
++        self.update(|state| state.retired = true);
++    }
++
++    fn current(&self) -> Option<u64> {
++        let state = self.state.get();
++        (state.focused && state.active && state.application_active && !state.retired)
++            .then(|| self.generation.get())
++            .flatten()
++    }
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) struct Origin {
++    window: isize,
++    pub target: (u64, u64),
++    layout: isize,
++    generation: u64,
++}
++impl Origin {
++    pub(crate) fn capture(window: HWND, target: (u64, u64), authority: &Authority) -> Option<Self> {
++        let layout = unsafe { GetKeyboardLayout(0) }.0 as isize;
++        authority.update(|state| state.layout = layout);
++        let origin = Self {
++            window: window.0 as isize,
++            target,
++            layout,
++            generation: authority.current()?,
++        };
++        origin.is_current(authority).then_some(origin)
++    }
++
++    pub(crate) fn is_current(self, authority: &Authority) -> bool {
++        self.matches(
++            authority,
++            unsafe { GetFocus() }.0 as isize,
++            unsafe { GetKeyboardLayout(0) }.0 as isize,
++        )
++    }
++
++    fn matches(self, authority: &Authority, focus: isize, layout: isize) -> bool {
++        authority.current() == Some(self.generation)
++            && authority.state.get().layout == self.layout
++            && self.window == focus
++            && self.layout == layout
++    }
++}
++
++fn resolve(
++    translate: impl FnOnce(&mut [u16; MAX_UNITS], u32) -> Result<i32, &'static str>,
++) -> Result<Translation, &'static str> {
++    let mut units = [0; MAX_UNITS];
++    let count = translate(&mut units, KEEP_DEAD_KEY_STATE)?;
++    if count < 0 {
++        return Ok(Translation::DeadKey);
++    }
++    if count == 0 {
++        return Err("The native keyboard produced no text for this key");
++    }
++    let count = usize::try_from(count).map_err(|_| "Invalid native character length")?;
++    let units = units
++        .get(..count)
++        .ok_or("Native character output exceeds its limit")?;
++    let text =
++        String::from_utf16(units).map_err(|_| "The native keyboard produced invalid UTF-16")?;
++    if text.chars().any(char::is_control) {
++        return Err("The native keyboard produced non-text input");
++    }
++    Ok(Translation::Text(text))
++}
++
++/// Consumed by WM_GPUI_KEYDOWN before either pump calls TranslateMessage,
++/// so this translation takes its place: a dead key stays with the layout,
++/// and the next key composes with it, or types both characters when they
++/// don't compose, as in any Windows application.
++pub(crate) fn translate(
++    origin: Origin,
++    authority: &Authority,
++    key: VIRTUAL_KEY,
++    scan: u32,
++) -> Result<Translation, &'static str> {
++    resolve(|units, flags| {
++        if !origin.is_current(authority) {
++            return Err("The native character target changed");
++        }
++        let mut keyboard = [0; 256];
++        unsafe { GetKeyboardState(&mut keyboard) }
++            .map_err(|_| "The native keyboard state is unavailable")?;
++        Ok(unsafe {
++            ToUnicodeEx(
++                u32::from(key.0),
++                scan,
++                &keyboard,
++                units,
++                flags,
++                Some(HKL(origin.layout as *mut _)),
++            )
++        })
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{Authority, AuthorityState, KEEP_DEAD_KEY_STATE, Origin, Translation, resolve};
++    use std::cell::Cell;
++    use windows::Win32::{
++        Foundation::{LPARAM, WPARAM},
++        UI::WindowsAndMessaging::*,
++    };
++
++    fn active_authority() -> Authority {
++        Authority::from_state(AuthorityState {
++            focused: true,
++            active: true,
++            application_active: true,
++            layout: 10,
++            retired: false,
++        })
++    }
++
++    fn captured(authority: &Authority) -> Origin {
++        Origin {
++            window: 17,
++            target: (3, 9),
++            layout: 10,
++            generation: authority.current().unwrap(),
++        }
++    }
++
++    #[test]
++    fn native_focus_and_activation_roundtrips_cannot_revive_the_same_window_origin() {
++        for (lost, lost_value, gained, gained_value) in [
++            (WM_KILLFOCUS, 0, WM_SETFOCUS, 0),
++            (
++                WM_ACTIVATE,
++                WA_INACTIVE as usize,
++                WM_ACTIVATE,
++                WA_ACTIVE as usize,
++            ),
++            (WM_ACTIVATEAPP, 0, WM_ACTIVATEAPP, 1),
++        ] {
++            let authority = active_authority();
++            let origin = captured(&authority);
++            assert!(origin.matches(&authority, 17, 10));
++            authority.observe(lost, WPARAM(lost_value), LPARAM(0));
++            assert!(!origin.matches(&authority, 17, 10));
++            authority.observe(gained, WPARAM(gained_value), LPARAM(0));
++            // HWND, HKL and deferred GPUI generations are all unchanged.
++            assert!(!origin.matches(&authority, 17, 10));
++            let fresh = captured(&authority);
++            assert_eq!(fresh.target, origin.target);
++            assert!(fresh.matches(&authority, 17, 10));
++        }
++    }
++
++    #[test]
++    fn layout_roundtrip_rejects_stale_text_and_error_authority() {
++        let authority = active_authority();
++        let origin = captured(&authority);
++        authority.observe(WM_INPUTLANGCHANGE, WPARAM(0), LPARAM(20));
++        assert!(!origin.matches(&authority, 17, 20));
++        authority.observe(WM_INPUTLANGCHANGE, WPARAM(0), LPARAM(10));
++        assert!(!origin.matches(&authority, 17, 10));
++        assert!(captured(&authority).matches(&authority, 17, 10));
++    }
++
++    #[test]
++    fn duplicate_native_state_and_non_authoritative_messages_preserve_origin() {
++        let authority = active_authority();
++        let origin = captured(&authority);
++        for (message, wparam, lparam) in [
++            (WM_SETFOCUS, 0, 0),
++            (WM_ACTIVATE, WA_ACTIVE as usize, 0),
++            (WM_ACTIVATE, WA_CLICKACTIVE as usize, 0),
++            (WM_ACTIVATEAPP, 1, 0),
++            (WM_INPUTLANGCHANGE, 0, 10),
++            (WM_INPUTLANGCHANGEREQUEST, 0, 20),
++            (WM_NCACTIVATE, 0, 0),
++            (WM_PAINT, 0, 0),
++            (WM_CLOSE, 0, 0),
++        ] {
++            authority.observe(message, WPARAM(wparam), LPARAM(lparam));
++            assert!(origin.matches(&authority, 17, 10), "message {message}");
++        }
++    }
++
++    #[test]
++    fn retirement_and_generation_exhaustion_permanently_refuse_authority() {
++        for message in [WM_DESTROY, WM_NCDESTROY] {
++            let authority = active_authority();
++            let origin = captured(&authority);
++            authority.observe(message, WPARAM(0), LPARAM(0));
++            authority.observe(WM_SETFOCUS, WPARAM(0), LPARAM(0));
++            authority.observe(WM_ACTIVATE, WPARAM(WA_ACTIVE as usize), LPARAM(0));
++            assert!(!origin.matches(&authority, 17, 10));
++            assert!(authority.current().is_none());
++        }
++        let authority = active_authority();
++        let origin = captured(&authority);
++        authority.retire();
++        assert!(!origin.matches(&authority, 17, 10));
++        assert!(authority.current().is_none());
++
++        let authority = active_authority();
++        authority.generation.set(Some(u64::MAX));
++        let origin = captured(&authority);
++        authority.observe(WM_KILLFOCUS, WPARAM(0), LPARAM(0));
++        authority.observe(WM_SETFOCUS, WPARAM(0), LPARAM(0));
++        assert!(!origin.matches(&authority, 17, 10));
++        assert!(authority.current().is_none());
++        assert!(authority.generation.get().is_none());
++    }
++
++    #[test]
++    fn native_bmp_surrogate_and_multi_scalar_outputs_translate_once() {
++        for text in ["@", "é", "👋", "´x", "e\u{301}", " "] {
++            let calls = Cell::new(0);
++            let result = resolve(|units, flags| {
++                assert_eq!(flags, KEEP_DEAD_KEY_STATE);
++                calls.set(calls.get() + 1);
++                let encoded: Vec<_> = text.encode_utf16().collect();
++                units[..encoded.len()].copy_from_slice(&encoded);
++                Ok(encoded.len() as i32)
++            })
++            .unwrap();
++            assert_eq!(result, Translation::Text(text.into()));
++            assert_eq!(calls.get(), 1);
++        }
++    }
++
++    #[test]
++    fn malformed_empty_control_and_oversized_output_never_replays_the_key() {
++        for (count, first) in [(0, 0), (1, 0xd800), (1, 0xdc4b), (1, 13), (33, 0)] {
++            let calls = Cell::new(0);
++            assert!(
++                resolve(|units, flags| {
++                    assert_eq!(flags, KEEP_DEAD_KEY_STATE);
++                    calls.set(calls.get() + 1);
++                    units[0] = first;
++                    Ok(count)
++                })
++                .is_err()
++            );
++            assert_eq!(calls.get(), 1);
++        }
++    }
++
++    #[test]
++    fn a_dead_key_types_nothing_and_the_next_key_types_what_the_layout_composed() {
++        assert_eq!(
++            resolve(|units, flags| {
++                assert_eq!(flags, KEEP_DEAD_KEY_STATE);
++                units[0] = '´' as u16;
++                Ok(-1)
++            }),
++            Ok(Translation::DeadKey)
++        );
++        for composed in ["é", "´x"] {
++            assert_eq!(
++                resolve(|units, _| {
++                    let encoded: Vec<_> = composed.encode_utf16().collect();
++                    units[..encoded.len()].copy_from_slice(&encoded);
++                    Ok(encoded.len() as i32)
++                }),
++                Ok(Translation::Text(composed.into()))
++            );
++        }
++        assert!(resolve(|_, _| Err("Injected native keyboard failure")).is_err());
++    }
++}
+diff --git a/src/window.rs b/src/window.rs
+index db1d02e..72803e5 100644
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -129,6 +129,7 @@ pub struct WindowsWindowState {
+     pub input_handler: Cell<Option<PlatformInputHandler>>,
+     pub ime_enabled: Cell<bool>,
+     pub pending_surrogate: Cell<Option<(u16, (u64, u64))>>,
++    pub(crate) native_character_authority: crate::native_characters::Authority,
+     pub last_reported_modifiers: Cell<Option<Modifiers>>,
+     pub last_reported_capslock: Cell<Option<Capslock>>,
+     pub hovered: Cell<bool>,
+@@ -258,6 +259,7 @@ impl WindowsWindowState {
+             input_handler: Cell::new(input_handler),
+             ime_enabled: Cell::new(true),
+             pending_surrogate: Cell::new(pending_surrogate),
++            native_character_authority: crate::native_characters::Authority::new(hwnd),
+             last_reported_modifiers: Cell::new(last_reported_modifiers),
+             last_reported_capslock: Cell::new(last_reported_capslock),
+             hovered: Cell::new(hovered),
+@@ -592,6 +594,7 @@ impl WindowsWindowInner {
+ pub(crate) struct Callbacks {
+     pub(crate) request_frame: Cell<Option<Box<dyn FnMut(RequestFrameOptions)>>>,
+     pub(crate) input: Cell<Option<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>>,
++    pub(crate) prepare_key_input: Cell<Option<Box<dyn FnMut(bool) -> bool>>>,
+     pub(crate) active_status_change: Cell<Option<Box<dyn FnMut(bool)>>>,
+     pub(crate) native_activation: RefCell<Option<Rc<dyn Fn(NativeWindowActivation)>>>,
+     pub(crate) visibility_change: Cell<Option<Box<dyn FnMut(WindowVisibility)>>>,
+@@ -832,6 +835,7 @@ impl WindowsWindowInner {
+ 
+ impl Drop for WindowsWindow {
+     fn drop(&mut self) {
++        self.0.state.native_character_authority.retire();
+         self.0.state.closing.set(true);
+         self.0.retire_native_activation();
+         self.0.state.resize_constraint.borrow_mut().take();
+@@ -1547,6 +1551,10 @@ impl PlatformWindow for WindowsWindow {
+         self.state.callbacks.input.set(Some(callback));
+     }
+ 
++    fn on_prepare_key_input(&self, callback: Box<dyn FnMut(bool) -> bool>) {
++        self.state.callbacks.prepare_key_input.set(Some(callback));
++    }
++
+     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {
+         self.0
+             .state

@@ -11,8 +11,8 @@ impl Newport {
         let visible = self.page == Page::Projects
             && self.window_visible
             && self.configuration_available()
-            && self.git.repo["repoId"].is_string()
-            && self.git.repo["bare"] != true
+            && self.git.repo.is_some()
+            && self.git.bare() != Some(true)
             && !self.git_write_pending()
             && self.git.index_refresh.is_none()
             && self.git.switching_path.is_none()
@@ -35,7 +35,7 @@ impl Newport {
         };
         let previous = presentation(self);
         let generation = self.resources.begin_refresh("git-sync-status", false);
-        self.dispatch_git_request(
+        self.dispatch_git_typed(
             "git-sync-status",
             newport_protocol::git::Request::Status {
                 repo_id: self.git_repository_id(),
@@ -55,12 +55,10 @@ impl Newport {
         {
             return false;
         }
-        let status = self.value("git-sync-status");
-        let head_changed = status["metadata"]["head"].is_object()
-            && self.git.repo["head"] != status["metadata"]["head"];
-        if head_changed {
-            self.git.repo["head"] = status["metadata"]["head"].clone();
-        }
+        let Some(status) = self.git_status("git-sync-status").cloned() else {
+            return false;
+        };
+        let head_changed = self.git.observe_head(&status.metadata.head);
         let changed = self.git.observe_status_snapshot(&status);
         let failed_listing = self
             .resources
@@ -83,7 +81,7 @@ impl Newport {
         self.resources.invalidate("git-more");
         self.git.continuation = None;
         let generation = self.resources.begin_refresh("git-list", false);
-        self.dispatch_git_request("git-list", self.git_status_request(), generation);
+        self.dispatch_git_typed("git-list", self.git_status_request(), generation);
         true
     }
 }

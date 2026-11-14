@@ -11,6 +11,7 @@ message HeldShell {
   repeated newport.terminal.Attached attached = 5;
   optional uint64 started = 6;
   optional bool exited = 7;
+  optional string agent = 8;
 }
 
 message ShellList {

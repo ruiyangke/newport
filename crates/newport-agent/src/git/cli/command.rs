@@ -1,5 +1,6 @@
 //! Bounded, noninteractive Git processes. Arguments never pass through a shell.
 use super::{Error, failure};
+use newport_protocol::git::code;
 use std::{
     io::{Read, Write},
     os::unix::process::CommandExt,
@@ -122,7 +123,7 @@ pub(super) fn write_with_message(
     let result = write_inner(root, args, vec![], Some(file.path()));
     if result.is_ok() && file.path().exists() {
         return Err(Error::new(
-            "OUTCOME_UNKNOWN",
+            code::OUTCOME_UNKNOWN,
             "Git completed without accepting the edited message. Inspect the commit before continuing.",
         ));
     }
@@ -136,11 +137,14 @@ fn write_inner(
     message: Option<&Path>,
 ) -> Result<(), Error> {
     let output = execute_capture(root, args, input, None, message).map_err(|e| {
-        if matches!(e.code.as_str(), "GIT_UNAVAILABLE" | "CHECKOUT_UNAVAILABLE") {
+        if matches!(
+            e.code.as_str(),
+            "GIT_UNAVAILABLE" | code::CHECKOUT_UNAVAILABLE
+        ) {
             e
         } else {
             Error::new(
-                "OUTCOME_UNKNOWN",
+                code::OUTCOME_UNKNOWN,
                 "The Git process ended without a confirmed result. Inspect the saved outcome.",
             )
         }
@@ -150,7 +154,7 @@ fn write_inner(
     }
     if output.code.is_none() {
         return Err(Error::new(
-            "OUTCOME_UNKNOWN",
+            code::OUTCOME_UNKNOWN,
             "Git was terminated by a signal. Inspect the saved outcome before retrying.",
         ));
     }
@@ -221,7 +225,7 @@ fn write_inner(
         || error.contains("empty ident name")
     {
         (
-            "IDENTITY_REQUIRED",
+            code::IDENTITY_REQUIRED,
             "Git author identity is missing. Configure user.name and user.email in the repository on the server, then retry.",
         )
     } else if error.contains("nothing to commit") {
@@ -409,7 +413,7 @@ fn execute_capture(
 
 fn checkout_unavailable() -> Error {
     Error::new(
-        "CHECKOUT_UNAVAILABLE",
+        code::CHECKOUT_UNAVAILABLE,
         "The checkout directory is missing or inaccessible. Locate the checkout or open the saved project.",
     )
 }

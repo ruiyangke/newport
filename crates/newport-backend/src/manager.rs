@@ -1,7 +1,7 @@
 use crate::{model::*, profile::Store, ssh};
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -14,16 +14,16 @@ use uuid::Uuid;
 #[derive(Default, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Runtime {
-    pub agent_transport: HashMap<Uuid, crate::connection_state::Transport>,
-    pub agent_runtime: HashMap<Uuid, crate::agent_runtime::Snapshot>,
-    pub agent_permissions: HashMap<Uuid, crate::integration_permissions::Snapshot>,
-    pub agent_status: HashMap<Uuid, crate::agent_lifecycle::Status>,
-    pub agent_installation: HashMap<Uuid, crate::agent_install::Progress>,
-    pub tunnels: HashMap<Uuid, ConnectionState>,
-    pub tunnel_health: HashMap<Uuid, Vec<DestinationHealth>>,
-    pub clipboard: HashMap<Uuid, ConnectionState>,
-    pub clipboard_messages: HashMap<Uuid, String>,
-    pub connection_revisions: HashMap<Uuid, u64>,
+    pub agent_transport: BTreeMap<Uuid, crate::connection_state::Transport>,
+    pub agent_runtime: BTreeMap<Uuid, crate::agent_runtime::Snapshot>,
+    pub agent_permissions: BTreeMap<Uuid, crate::integration_permissions::Snapshot>,
+    pub agent_status: BTreeMap<Uuid, crate::agent_lifecycle::Status>,
+    pub agent_installation: BTreeMap<Uuid, crate::agent_install::Progress>,
+    pub tunnels: BTreeMap<Uuid, ConnectionState>,
+    pub tunnel_health: BTreeMap<Uuid, Vec<DestinationHealth>>,
+    pub clipboard: BTreeMap<Uuid, ConnectionState>,
+    pub clipboard_messages: BTreeMap<Uuid, String>,
+    pub connection_revisions: BTreeMap<Uuid, u64>,
     pub awaiting_agent: Vec<Uuid>,
 }
 #[derive(Serialize)]
@@ -273,15 +273,13 @@ impl Manager {
     }
     /// Identity observed by a native view, including credentials revision and
     /// backend lifetime. Constructing it must not collect a full runtime snapshot.
-    pub fn connection_scope(&self, id: Uuid) -> Result<serde_json::Value, String> {
-        let server = serde_json::to_value(self.server(id)?).map_err(|e| e.to_string())?;
-        Ok(newport_domain::connection_scope::connection(
-            &server,
-            &serde_json::json!({
-                "instanceId": self.instance_id,
-                "runtime": {"connectionRevisions": {id.to_string(): self.connection_revision(id)}}
-            }),
-        ))
+    pub fn connection_scope(
+        &self,
+        id: Uuid,
+    ) -> Result<newport_protocol::desktop::configuration::ConnectionScope, String> {
+        Ok(self
+            .server(id)?
+            .connection_scope(self.connection_revision(id), self.instance_id))
     }
 
     /// Replaces the server's session, and the sessions of the servers behind
@@ -401,7 +399,9 @@ impl Manager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .connection_revisions
-            .clone();
+            .clone()
+            .into_iter()
+            .collect();
         self.forwarding
             .publish(&self.config, revisions, self.load_error.clone());
     }
@@ -448,7 +448,7 @@ impl Manager {
         id: Uuid,
         remote_port: Option<u16>,
         expected: Option<&Tunnel>,
-        expected_connection: Option<&serde_json::Value>,
+        expected_connection: Option<&newport_protocol::desktop::configuration::ConnectionScope>,
     ) -> Result<std::net::SocketAddrV4, String> {
         self.publish_forwarding();
         self.forwarding.open_endpoint(

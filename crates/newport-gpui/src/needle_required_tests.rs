@@ -1,13 +1,13 @@
 use crate::page_perf_tests::frame;
 use crate::project_library_state::typed_fixture::*;
 use crate::project_library_state::typed_test_owner as owner;
+use crate::snapshot_fixture as fixture;
 use crate::{Newport, Page, theme};
 use gpui::{
     AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, TestAppContext,
     VisualTestContext, Window, div, px, size,
 };
 use gpui_kit as gpui;
-use serde_json::json;
 use std::sync::mpsc::Receiver;
 
 /// What the window shows, as the app renders it.
@@ -40,7 +40,11 @@ fn fixture(
         let entity = cx.new(|cx| {
             let mut v = owner(window, cx);
             v.page = Page::Overview;
-            v.snapshot["runtime"]["agentStatus"][TYPED_SERVER] = json!({"installed":false});
+            fixture::set(
+                &mut v.snapshot_mut().runtime.agent_status,
+                fixture::SERVER,
+                fixture::installed(false),
+            );
             v
         });
         view = Some(entity.clone());
@@ -56,10 +60,18 @@ fn fixture(
     let inspect = requests.try_recv().unwrap();
     assert_eq!(kind(&inspect), Some(Kind::ConnectionSetupInspect));
     view.update(visual, |v, cx| {
-        v.resources.complete(
+        crate::snapshot_fixture::settle_connection(
+            v,
             &inspect.key,
             inspect.generation,
-            Ok(json!({"installed":false,"os":"Ubuntu","arch":"x86_64","total":1})),
+            newport_protocol::desktop::connection::Reply::SetupInspect(Box::new(
+                newport_protocol::desktop::connection::SetupInspection {
+                    os: "Ubuntu".into(),
+                    architecture: "x86_64".into(),
+                    cores: None,
+                    ..crate::snapshot_fixture::inspection(1)
+                },
+            )),
         );
         v.poll_setup();
         cx.notify();
@@ -88,14 +100,15 @@ fn failed_inventory_keeps_details_and_saved_forwards_without_claiming_no_ports(
     let (view, visual, _requests) = fixture(cx);
     for saved in [false, true] {
         view.update(visual, |v, cx| {
-            v.snapshot["runtime"]["agentStatus"][TYPED_SERVER] = json!({"installed":true});
-            v.snapshot["config"]["tunnels"] = if saved {
-                json!([{
-                    "id":"forward", "serverId":TYPED_SERVER, "name":"Saved forward",
-                    "localPort":5432, "remoteHost":"127.0.0.1", "remotePort":5432
-                }])
+            fixture::set(
+                &mut v.snapshot_mut().runtime.agent_status,
+                fixture::SERVER,
+                fixture::installed(true),
+            );
+            v.snapshot_mut().config.tunnels = if saved {
+                vec![fixture::saved_forward(fixture::SERVER)]
             } else {
-                json!([])
+                Vec::new()
             };
             v.navigate(Page::Ports, cx);
             let mut value = observation([]);
@@ -114,8 +127,8 @@ fn failed_inventory_keeps_details_and_saved_forwards_without_claiming_no_ports(
             value.stale = true;
             value.updated_at = None;
             put(v, value);
-            assert!(!v.resources.get("page").unwrap().has_value());
-            assert!(v.resources.get("page").unwrap().error.is_some());
+            assert!(!v.resources.get("ports").unwrap().has_value());
+            assert!(v.resources.get("ports").unwrap().error.is_some());
             assert!(!v.listeners_known(cx));
             cx.notify();
         });
@@ -223,10 +236,7 @@ fn every_page_that_runs_on_needle_says_so_the_same_way_and_asks_nothing(cx: &mut
 fn saved_forwards_stay_listed_with_the_shared_notice(cx: &mut TestAppContext) {
     let (view, visual, _requests) = fixture(cx);
     view.update(visual, |v, cx| {
-        v.snapshot["config"]["tunnels"] = json!([{
-            "id":"forward", "serverId":TYPED_SERVER, "name":"Saved forward",
-            "localPort":5432, "remoteHost":"127.0.0.1", "remotePort":5432
-        }]);
+        v.snapshot_mut().config.tunnels = vec![fixture::saved_forward(fixture::SERVER)];
         v.navigate(Page::Ports, cx);
     });
     frame(visual);

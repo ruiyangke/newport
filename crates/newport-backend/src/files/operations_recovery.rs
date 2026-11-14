@@ -1,9 +1,9 @@
 //! Recovery I/O must not own the operation registry or block Tokio workers.
 //! Staging results retain cleanup ownership if their awaiting transfer is cancelled.
 use super::super::{
-    cleanup::UploadCleanup,
+    cleanup::{Scope, UploadCleanup},
     download_cleanup::DownloadCleanup,
-    recovery_storage::{Owners, scope_server},
+    recovery_storage::Owners,
 };
 use super::{super::Remote, Operations, Registry};
 use anyhow::{Context, Result};
@@ -126,17 +126,17 @@ impl Operations {
 
     pub(in crate::files) async fn track_upload(
         &self,
-        scope: serde_json::Value,
+        scope: Scope,
         path: String,
     ) -> Result<Upload> {
         let operations = self.clone();
         let mut record = self
             .start_blocking(move || {
-                let journal = operations.uploads.get(scope_server(&scope)?)?;
+                let journal = operations.uploads.get(scope.server())?;
                 let id = journal
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .register(scope, path)?;
+                    .register(&scope, path)?;
                 Ok::<_, anyhow::Error>(UploadRegistration {
                     operations,
                     record: Some(Upload { id, journal }),
@@ -203,13 +203,7 @@ impl Operations {
         self.cleanup(async move {
             let owners = operations.uploads.clone();
             let server = remote.server_id();
-            let scope = match remote.cleanup_scope() {
-                Ok(scope) => scope,
-                Err(error) => {
-                    log::warn!("Could not scope this server's upload recovery: {error:#}");
-                    return;
-                }
-            };
+            let scope = remote.cleanup_scope();
             let pending = operations
                 .start_blocking(move || {
                     let journal = match &release {
@@ -293,7 +287,8 @@ impl Operations {
 mod tests {
     use super::super::{Operation, Progress, files_cancel, files_progress};
     use super::*;
-    use serde_json::{Value, json};
+    use crate::files::cleanup::tests::scope;
+    use serde_json::Value;
     use std::time::Duration;
 
     // Recovery does real durable file I/O, which can be slow on busy CI hosts.
@@ -388,7 +383,7 @@ mod tests {
         let profile = tempfile::tempdir().unwrap();
         let operations = Operations::persistent(profile.path());
         let release = stall(&operations, operations.uploads.get(server()).unwrap()).await;
-        let scope = json!([server()]);
+        let scope = scope(server());
         let mut request = Box::pin(operations.track_upload(
             scope.clone(),
             format!("/work/.newport-upload-{}", Uuid::new_v4()),
@@ -439,7 +434,7 @@ mod tests {
     async fn acknowledged_upload_record_stays_active_until_explicit_retirement() {
         let profile = tempfile::tempdir().unwrap();
         let operations = Operations::persistent(profile.path());
-        let scope = json!([server()]);
+        let scope = scope(server());
         let id = operations
             .track_upload(
                 scope.clone(),
@@ -480,7 +475,7 @@ mod tests {
         let folder = tempfile::tempdir().unwrap();
         let operations = Operations::persistent(profile.path());
         let mut upload = Box::pin(operations.track_upload(
-            json!([server()]),
+            scope(server()),
             format!("/work/.newport-upload-{}", Uuid::new_v4()),
         ));
         let mut download = Box::pin(operations.stage_download(server(), folder.path()));
@@ -527,7 +522,7 @@ mod tests {
         tokio::time::timeout(RECOVERY_TIMEOUT, async {
             let record = operations
                 .track_upload(
-                    json!([other]),
+                    scope(other),
                     format!("/work/.newport-upload-{}", Uuid::new_v4()),
                 )
                 .await

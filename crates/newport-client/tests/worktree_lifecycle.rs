@@ -1,12 +1,8 @@
 //! Opt-in end-to-end test through the running desktop backend and its SSH agent.
 //! Requires the disposable newport-gpui-files Docker fixture and isolated profile.
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use newport_client::{
-    backend::Backend,
-    git_operation::{Operation, State},
-    git_worktree::CreateTarget,
-};
-use newport_protocol::{common::Present, desktop, git as protocol};
+use newport_client::{backend::Backend, git_worktree::CreateTarget};
+use newport_protocol::git::{self as protocol, Operation, OperationState as State};
 use serde_json::Value;
 use std::{
     path::PathBuf,
@@ -75,9 +71,14 @@ impl Drop for Fixture {
 fn require(ok: bool, message: &str) -> Result<(), String> {
     ok.then_some(()).ok_or_else(|| message.into())
 }
-fn request(backend: &Backend, server: &str, request: protocol::Request) -> Result<Value, String> {
+/// Sends a Git read and returns its checked reply.
+fn reply(
+    backend: &Backend,
+    server: &str,
+    request: protocol::Request,
+) -> Result<protocol::Reply, String> {
     backend
-        .request_git(
+        .git(
             server
                 .parse::<uuid::Uuid>()
                 .map_err(|error| error.to_string())?,
@@ -85,6 +86,10 @@ fn request(backend: &Backend, server: &str, request: protocol::Request) -> Resul
             false,
         )
         .map_err(|error| error.to_string())
+}
+/// [`reply`] as JSON, for assertions on its fields.
+fn request(backend: &Backend, server: &str, request: protocol::Request) -> Result<Value, String> {
+    serde_json::to_value(reply(backend, server, request)?).map_err(|error| error.to_string())
 }
 fn page(backend: &Backend, server: &str, repo: &str) -> Result<Value, String> {
     request(
@@ -146,20 +151,17 @@ fn remote_worktree_removal_and_recovery_preserve_files_branches_and_other_regist
     )?;
     let backend = Backend::discover();
     let snapshot = backend
-        .execute_rendered(desktop::Operation::Configuration(Box::new(
-            desktop::configuration::Operation::Snapshot(Box::new(Present {})),
-        )))
+        .configuration_snapshot()
         .map_err(|error| error.to_string())?;
-    let servers: Vec<_> = snapshot["config"]["servers"]
-        .as_array()
-        .ok_or("Missing servers")?
+    let servers: Vec<_> = snapshot
+        .config
+        .servers
         .iter()
-        .filter(|s| {
-            s["sshHost"] == "127.0.0.1" && s["sshPort"] == port && s["sshUser"] == "fixture"
-        })
+        .filter(|s| s.ssh_host == "127.0.0.1" && s.ssh_port == port && s.ssh_user == "fixture")
         .collect();
     require(servers.len() == 1, "Expected one loopback fixture server")?;
-    let server = servers[0]["id"].as_str().ok_or("Missing server ID")?;
+    let server = servers[0].id.to_string();
+    let server = server.as_str();
     let fixture = Fixture::new()?;
     let opened = request(
         &backend,
@@ -195,9 +197,8 @@ fn remote_worktree_removal_and_recovery_preserve_files_branches_and_other_regist
         None,
         newport_client::git_branch::WorktreeBranchUse::StartingPoint,
     )?;
-    let candidates: Vec<_> = choices["entries"]
-        .as_array()
-        .ok_or("Missing branch choices")?
+    let candidates: Vec<_> = choices
+        .entries
         .iter()
         .filter_map(|entry| {
             newport_client::git_branch::WorktreeBranchUse::StartingPoint.candidate(entry, false)

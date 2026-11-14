@@ -395,7 +395,7 @@ pub(super) async fn write_response<W: AsyncWrite + Unpin>(
 
 fn busy() -> Failure {
     failure::failure(
-        "busy",
+        newport_protocol::common::BUSY,
         "Newport is busy. Try again in a moment.",
         Retry::Yes,
     )

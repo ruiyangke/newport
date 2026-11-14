@@ -1,8 +1,7 @@
 //! Bounded raster decoding on the existing request worker, never in render().
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui_kit::RenderImage;
 use image::{AnimationDecoder, ImageDecoder, ImageFormat, ImageReader};
-use serde_json::Value;
+use newport_protocol::desktop::files;
 use std::{io::Cursor, sync::Arc};
 
 const MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -11,29 +10,57 @@ const MAX_FRAMES: usize = 200;
 #[path = "file_image_gif.rs"]
 mod gif_metadata;
 
-pub fn prepare(preview: &mut Value) -> Result<Option<Arc<RenderImage>>, String> {
-    if preview["kind"] != "image" {
-        return Ok(None);
+/// A file preview ready to draw. An image keeps its decoded raster instead of
+/// its encoded bytes, so renders never copy them.
+#[derive(Clone)]
+pub struct Prepared {
+    pub preview: files::Preview,
+    pub image: Option<Image>,
+}
+
+impl Prepared {
+    /// A text preview's content.
+    pub fn text(&self) -> Option<&str> {
+        match &self.preview.content {
+            files::Content::Text(text) => Some(text),
+            files::Content::Binary(_) => None,
+        }
     }
-    let format = match preview["mime"].as_str() {
-        Some("image/png") => ImageFormat::Png,
-        Some("image/jpeg") => ImageFormat::Jpeg,
-        Some("image/gif") => ImageFormat::Gif,
-        Some("image/webp") => ImageFormat::WebP,
+}
+
+/// A decoded image preview.
+#[derive(Clone)]
+pub struct Image {
+    pub raster: Arc<RenderImage>,
+    /// The displayed raster's size. Rotations can exchange width and height,
+    /// and this size drives Actual size and zoom.
+    pub width: u32,
+    pub height: u32,
+    /// How many times an animation plays; `None` loops forever.
+    pub plays: Option<u32>,
+}
+
+pub fn prepare(mut preview: files::Preview) -> Result<Prepared, String> {
+    if preview.kind != files::PreviewKind::Image {
+        return Ok(Prepared {
+            preview,
+            image: None,
+        });
+    }
+    let format = match preview.mime.as_str() {
+        "image/png" => ImageFormat::Png,
+        "image/jpeg" => ImageFormat::Jpeg,
+        "image/gif" => ImageFormat::Gif,
+        "image/webp" => ImageFormat::WebP,
         _ => return Err("This image format cannot be previewed.".into()),
     };
-    let content = preview["content"]
-        .as_str()
-        .ok_or("Image preview data is missing.")?;
-    if content.len() > MAX_BYTES.div_ceil(3) * 4 {
-        return Err("Image preview exceeds 16 MiB.".into());
-    }
-    let bytes = STANDARD
-        .decode(content)
-        .map_err(|_| "Image preview data is invalid.".to_owned())?;
+    let files::Content::Binary(bytes) = &preview.content else {
+        return Err("Image preview data is missing.".into());
+    };
     if bytes.len() > MAX_BYTES {
         return Err("Image preview exceeds 16 MiB.".into());
     }
+    let bytes = (**bytes).clone();
     let (width, height) = ImageReader::with_format(Cursor::new(&bytes), format)
         .into_dimensions()
         .map_err(|_| "The image header cannot be decoded.".to_owned())?;
@@ -113,14 +140,17 @@ pub fn prepare(preview: &mut Value) -> Result<Option<Arc<RenderImage>>, String> 
             pixel.swap(0, 2);
         }
     }
-    // No repeated base64 copies in UI snapshots/renders after the worker decoded it.
-    preview["content"] = Value::Null;
-    // Rotations/transpositions can exchange width and height. These dimensions
-    // also drive Actual size and zoom, so expose the displayed raster's size.
-    preview["width"] = frames[0].buffer().width().into();
-    preview["height"] = frames[0].buffer().height().into();
-    preview["animationPlays"] = plays.into();
-    Ok(Some(Arc::new(RenderImage::new(frames))))
+    let (width, height) = (frames[0].buffer().width(), frames[0].buffer().height());
+    preview.content = files::Content::Binary(Box::default());
+    Ok(Prepared {
+        preview,
+        image: Some(Image {
+            raster: Arc::new(RenderImage::new(frames)),
+            width,
+            height,
+            plays,
+        }),
+    })
 }
 
 fn finite_plays(count: image::metadata::LoopCount) -> Option<u32> {
@@ -162,9 +192,22 @@ mod fixture;
 
 #[cfg(test)]
 mod tests {
-    use super::{STANDARD, fixture, prepare};
-    use base64::Engine as _;
-    use serde_json::json;
+    use super::{files, fixture};
+    use gpui_kit::RenderImage;
+    use std::sync::Arc;
+    fn preview(mime: &str, bytes: Vec<u8>) -> files::Preview {
+        files::Preview {
+            kind: files::PreviewKind::Image,
+            mime: mime.into(),
+            content: files::Content::Binary(Box::new(bytes.into())),
+            truncated: false,
+        }
+    }
+    /// The raster and play count an image preview decodes to.
+    fn prepare(preview: files::Preview) -> Result<(Arc<RenderImage>, super::Image), String> {
+        let image = super::prepare(preview)?.image.unwrap();
+        Ok((image.raster.clone(), image))
+    }
     #[test]
     fn gif_absent_infinite_and_finite_repeat_counts_match_browser_semantics() {
         for (repeats, expected) in [
@@ -173,10 +216,9 @@ mod tests {
             (Some(1), Some(2)),
             (Some(u16::MAX), Some(65536)),
         ] {
-            let mut preview = json!({"kind":"image", "mime":"image/gif",
-                "content":STANDARD.encode(fixture::gif(repeats))});
-            assert_eq!(prepare(&mut preview).unwrap().unwrap().frame_count(), 2);
-            assert_eq!(preview["animationPlays"].as_u64(), expected);
+            let (raster, image) = prepare(preview("image/gif", fixture::gif(repeats))).unwrap();
+            assert_eq!(raster.frame_count(), 2);
+            assert_eq!(image.plays.map(u64::from), expected);
         }
     }
 
@@ -196,10 +238,8 @@ mod tests {
         bytes.splice(bytes.len() - 1..bytes.len() - 1, comment);
         assert_eq!(super::gif_metadata::plays(&bytes).unwrap(), Some(1));
         bytes.splice(bytes.len() - 1..bytes.len() - 1, extension);
-        let mut preview =
-            json!({"kind":"image", "mime":"image/gif", "content":STANDARD.encode(&bytes)});
-        prepare(&mut preview).unwrap();
-        assert_eq!(preview["animationPlays"], 4);
+        let (_, image) = prepare(preview("image/gif", bytes.clone())).unwrap();
+        assert_eq!(image.plays, Some(4));
         for end in 0..bytes.len() {
             assert!(
                 super::gif_metadata::plays(&bytes[..end]).is_err(),
@@ -214,13 +254,13 @@ mod tests {
             (image::ImageFormat::WebP, "image/webp"),
         ] {
             for plays in [0, 1, 2, u16::MAX] {
-                let mut preview = json!({"kind":"image", "mime":mime,
-                    "content": STANDARD.encode(fixture::animation_with_plays(format, 2, plays))});
-                assert_eq!(prepare(&mut preview).unwrap().unwrap().frame_count(), 2);
-                assert_eq!(
-                    preview["animationPlays"].as_u64(),
-                    (plays != 0).then_some(u64::from(plays))
-                );
+                let (raster, image) = prepare(preview(
+                    mime,
+                    fixture::animation_with_plays(format, 2, plays),
+                ))
+                .unwrap();
+                assert_eq!(raster.frame_count(), 2);
+                assert_eq!(image.plays, (plays != 0).then_some(u32::from(plays)));
             }
         }
     }
@@ -229,24 +269,36 @@ mod tests {
         let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([12, 34, 56, 78]));
         let mut bytes = std::io::Cursor::new(Vec::new());
         image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
-        let mut preview = json!({"kind":"image","mime":"image/png","content":STANDARD.encode(bytes.into_inner())});
-        let image = prepare(&mut preview).unwrap().unwrap();
-        assert_eq!(image.as_bytes(0).unwrap(), &[56, 34, 12, 78]);
-        assert_eq!(preview["width"], 1);
-        assert!(preview["content"].is_null());
+        let prepared = super::prepare(preview("image/png", bytes.into_inner())).unwrap();
+        let image = prepared.image.unwrap();
+        assert_eq!(image.raster.as_bytes(0).unwrap(), &[56, 34, 12, 78]);
+        assert_eq!(image.width, 1);
+        assert_eq!(
+            prepared.preview.content,
+            files::Content::Binary(Box::default())
+        );
     }
     #[test]
     fn malformed_images_fail_and_text_is_untouched() {
-        let mut text = json!({"kind":"text","content":"hello"});
-        assert!(prepare(&mut text).unwrap().is_none());
-        assert_eq!(text["content"], "hello");
+        let text = files::Preview {
+            kind: files::PreviewKind::Text,
+            mime: "text/plain".into(),
+            content: files::Content::Text(Box::new("hello".into())),
+            truncated: false,
+        };
+        let prepared = super::prepare(text.clone()).unwrap();
+        assert!(prepared.image.is_none());
+        assert_eq!(prepared.preview, text);
         for (mime, content) in [
-            ("image/png", "!!!"),
-            ("image/jpeg", "YWJj"),
-            ("image/svg+xml", "YWJj"),
+            ("image/png", &b"!!!"[..]),
+            ("image/jpeg", b"abc"),
+            ("image/svg+xml", b"abc"),
         ] {
-            assert!(prepare(&mut json!({"kind":"image","mime":mime,"content":content})).is_err());
+            assert!(super::prepare(preview(mime, content.to_vec())).is_err());
         }
+        let mut missing = preview("image/png", Vec::new());
+        missing.content = files::Content::Text(Box::default());
+        assert!(super::prepare(missing).is_err());
     }
 
     #[test]
@@ -261,12 +313,11 @@ mod tests {
             (7, [240, 220, 20]),
             (8, [20, 220, 20]),
         ] {
-            let mut preview = json!({"kind":"image", "mime":"image/jpeg",
-                "content":STANDARD.encode(fixture::oriented_jpeg(orientation))});
-            let image = prepare(&mut preview).unwrap().unwrap();
+            let (image, prepared) =
+                prepare(preview("image/jpeg", fixture::oriented_jpeg(orientation))).unwrap();
             let (width, height) = if orientation >= 5 { (40, 80) } else { (80, 40) };
-            assert_eq!(preview["width"], width, "orientation {orientation}");
-            assert_eq!(preview["height"], height, "orientation {orientation}");
+            assert_eq!(prepared.width, width, "orientation {orientation}");
+            assert_eq!(prepared.height, height, "orientation {orientation}");
             let pixels = image.as_bytes(0).unwrap();
             let at = (5 * width as usize + 5) * 4;
             for (actual, expected) in [pixels[at + 2], pixels[at + 1], pixels[at]]
@@ -286,15 +337,17 @@ mod tests {
             (image::ImageFormat::Png, "image/png"),
             (image::ImageFormat::WebP, "image/webp"),
         ] {
-            let mut preview = json!({"kind":"image", "mime":mime,
-                "content":STANDARD.encode(fixture::animation(format, 2))});
-            let image = prepare(&mut preview).unwrap().unwrap();
+            let prepared = super::prepare(preview(mime, fixture::animation(format, 2))).unwrap();
+            let image = prepared.image.unwrap().raster;
             assert_eq!(image.frame_count(), 2, "{mime}");
             assert_eq!(&image.as_bytes(0).unwrap()[..4], &[20, 20, 240, 255]);
             assert_eq!(&image.as_bytes(1).unwrap()[..4], &[20, 220, 20, 255]);
             assert_eq!(std::time::Duration::from(image.delay(0)).as_millis(), 400);
             assert_eq!(std::time::Duration::from(image.delay(1)).as_millis(), 600);
-            assert!(preview["content"].is_null());
+            assert_eq!(
+                prepared.preview.content,
+                files::Content::Binary(Box::default())
+            );
         }
     }
     #[test]
@@ -303,24 +356,17 @@ mod tests {
             (image::ImageFormat::Png, "image/png"),
             (image::ImageFormat::WebP, "image/webp"),
         ] {
-            let preview = |bytes| {
-                json!({"kind":"image", "mime":mime,
-                "content":STANDARD.encode(bytes)})
-            };
-            let image = prepare(&mut preview(fixture::animation(format, super::MAX_FRAMES)))
-                .unwrap()
-                .unwrap();
+            let preview = |bytes: Vec<u8>| preview(mime, bytes);
+            let (image, _) =
+                prepare(preview(fixture::animation(format, super::MAX_FRAMES))).unwrap();
             assert_eq!(image.frame_count(), super::MAX_FRAMES);
-            let error = prepare(&mut preview(fixture::animation(
-                format,
-                super::MAX_FRAMES + 1,
-            )))
-            .err()
-            .unwrap();
+            let error = prepare(preview(fixture::animation(format, super::MAX_FRAMES + 1)))
+                .err()
+                .unwrap();
             assert!(error.contains("frame limit"), "{mime}: {error}");
             let bytes = fixture::animation(format, 2);
             assert!(
-                prepare(&mut preview(bytes[..bytes.len() / 2].to_vec())).is_err(),
+                prepare(preview(bytes[..bytes.len() / 2].to_vec())).is_err(),
                 "{mime}"
             );
         }
@@ -358,15 +404,14 @@ mod tests {
             }
             bytes
         }
-        let preview =
-            |bytes| json!({"kind":"image","mime":"image/gif","content":STANDARD.encode(bytes)});
-        let image = prepare(&mut preview(gif(2))).unwrap().unwrap();
+        let preview = |bytes: Vec<u8>| preview("image/gif", bytes);
+        let (image, _) = prepare(preview(gif(2))).unwrap();
         assert_eq!(image.as_bytes(0).unwrap(), &[0, 0, 0, 255]);
         assert_eq!(image.as_bytes(1).unwrap(), &[0, 0, 1, 255]);
-        assert!(prepare(&mut preview(gif(super::MAX_FRAMES + 1))).is_err());
+        assert!(prepare(preview(gif(super::MAX_FRAMES + 1))).is_err());
         let mut oversized = gif(1);
         oversized[6..10].fill(255);
-        let error = prepare(&mut preview(oversized)).err().unwrap();
+        let error = prepare(preview(oversized)).err().unwrap();
         assert!(error.contains("dimensions"));
         // A small logical screen must not permit an enormous frame allocation.
         let mut oversized_frame = gif(1);
@@ -379,6 +424,6 @@ mod tests {
             &[1, 0, 1, 0]
         );
         oversized_frame[descriptor + 5..descriptor + 9].fill(255);
-        assert!(prepare(&mut preview(oversized_frame)).is_err());
+        assert!(prepare(preview(oversized_frame)).is_err());
     }
 }

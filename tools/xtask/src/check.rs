@@ -1,5 +1,5 @@
 //! Formatting, Clippy and tests, and the everyday desktop build commands.
-use crate::{BuildArgs, command, grammars, pdfium, util};
+use crate::{BuildArgs, command, grammars, util};
 use anyhow::{Context, Result, ensure};
 use clap::ValueEnum;
 use std::ffi::OsString;
@@ -47,6 +47,7 @@ pub fn run(scope: Option<Scope>, packages: &[String]) -> Result<()> {
 fn rust(packages: &[String]) -> Result<()> {
     util::run(command("cargo").args(["fmt", "--all", "--check"]))?;
     protocol_contracts()?;
+    crate::typed_ui::check(&crate::root())?;
     for action in ["clippy", "test"] {
         let mut cargo = command("cargo");
         cargo.args([action, "--locked"]);
@@ -145,7 +146,7 @@ fn standalone(manifest: &str) -> Result<()> {
     util::run(command("cargo").args(["test", "--manifest-path", manifest, "--locked"]))
 }
 
-/// Prepare the selected agent composition, grammars and platform resources.
+/// Prepare the selected agent composition and the grammars.
 fn resources(
     release: bool,
     target: Option<&str>,
@@ -154,14 +155,7 @@ fn resources(
     prepare_resources(
         remote_apps,
         agents_if_changed,
-        || {
-            grammars::ensure(release, target)?;
-            let target = util::build_target(target);
-            if util::Platform::of(target.as_deref())?.os == util::Os::Windows {
-                pdfium::stage(release, target.as_deref())?;
-            }
-            Ok(())
-        },
+        || grammars::ensure(release, target).map(drop),
         crate::remote_apps::prepare,
     )
 }
@@ -169,7 +163,7 @@ fn resources(
 fn prepare_resources<T>(
     remote_apps: bool,
     core: impl FnOnce() -> Result<()>,
-    platform: impl FnOnce() -> Result<()>,
+    grammars: impl FnOnce() -> Result<()>,
     full: impl FnOnce() -> Result<T>,
 ) -> Result<Option<T>> {
     if !remote_apps {
@@ -177,7 +171,7 @@ fn prepare_resources<T>(
     }
     // Grammar builds use the public locked graph, before full composition
     // temporarily adds private dependencies to the workspace.
-    platform()?;
+    grammars()?;
     if remote_apps {
         full().map(Some)
     } else {
@@ -213,7 +207,7 @@ pub fn agents_if_changed() -> Result<()> {
     match built {
         None => {
             eprintln!("Linux agent binaries are missing; building them in Docker");
-            crate::remote::build_agents(&[])?;
+            crate::remote::build_agents(&[], false)?;
         }
         // Prebuilt agents (CI artifacts) are verified, not rebuilt.
         Some(built)
@@ -221,7 +215,7 @@ pub fn agents_if_changed() -> Result<()> {
                 && newest_source(&crate::root())? > Some(built) =>
         {
             eprintln!("Linux agent sources changed; rebuilding the agents in Docker");
-            crate::remote::build_agents(&[])?;
+            crate::remote::build_agents(&[], false)?;
         }
         Some(_) => {}
     }
@@ -409,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn locked_platform_builds_precede_temporary_private_dependencies() {
+    fn locked_grammar_builds_precede_temporary_private_dependencies() {
         let order = std::cell::RefCell::new(Vec::new());
         prepare_resources(
             true,

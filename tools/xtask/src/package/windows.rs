@@ -1,8 +1,8 @@
 //! Windows payload: the exact file allowlist, PE checks, the NSIS installer and the zip.
 //! The installer is an unsigned candidate; it is never installed or published here.
-use super::{Staged, copy_dir, copy_file, probe};
+use super::{Staged, copy_file, probe};
 use crate::util::{self, Arch, Os, sha256_hex};
-use crate::{build_info, grammars, pdfium, pe};
+use crate::{build_info, grammars, pe};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -17,8 +17,6 @@ use std::{
 const FILES: &[&str] = &[
     "agents/newport-agent-x86_64.gz",
     "agents/newport-agent-aarch64.gz",
-    "pdfium/pdfium.dll",
-    "pdfium/LICENSE-PDFIUM",
     "Fonts/SymbolsNerdFontMono-Regular.ttf",
     "Fonts/NERD-FONTS-LICENSE",
     "Fonts/README.md",
@@ -233,7 +231,6 @@ pub fn inspect(app: &Path, arch: Arch) -> Result<Payload> {
     {
         pe::verify(&fs::read(join(&app, file))?, arch, true)?;
     }
-    pe::verify(&fs::read(join(&app, "pdfium/pdfium.dll"))?, arch, true)?;
     let entries = files
         .iter()
         .map(|path| {
@@ -526,18 +523,11 @@ fn agent_notices(remote_apps: bool, export: Option<&Path>) -> Result<Vec<String>
     crate::remote_apps::full_agent::exported_notices(export)
 }
 
-/// Stage PDFium and the package metadata, run the self-checks, then build the
-/// installer (with `nsis`) and the zip. Returns the zip and the installer.
+/// Stage the package metadata, run the self-checks, then build the installer
+/// (with `nsis`) and the zip. Returns the zip and the installer.
 pub(super) fn finish(staged: &Staged) -> Result<(PathBuf, Option<PathBuf>)> {
     let layout = staged.layout;
     let arch = staged.platform.arch;
-    let pdfium = pdfium::stage(staged.release, staged.target)?;
-    pdfium::validate_library(
-        &fs::read(pdfium.join("pdfium.dll"))?,
-        arch,
-        &pdfium::pins()?,
-    )?;
-    copy_dir(&pdfium, &layout.resources.join("pdfium"))?;
     build_info::read(&layout.executable, staged.expect)?;
     copy_file(
         &staged.root.join("resources/icons/icon.ico"),
@@ -561,7 +551,7 @@ pub(super) fn finish(staged: &Staged) -> Result<(PathBuf, Option<PathBuf>)> {
         layout.app.join("newport-package.json"),
         serde_json::to_string_pretty(&metadata)? + "\n",
     )?;
-    for check in ["--check-needle", "--check-grammars", "--check-pdf"] {
+    for check in ["--check-needle", "--check-grammars"] {
         probe(&layout.executable, check)?;
     }
     if let Some(export) = staged.signed_agent_export {
@@ -597,6 +587,7 @@ pub(super) fn finish(staged: &Staged) -> Result<(PathBuf, Option<PathBuf>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::package::copy_dir;
     use crate::root;
 
     struct Fixture {
@@ -641,9 +632,6 @@ mod tests {
             }
         }
         fs::create_dir_all(app.join("grammars")).unwrap();
-        fs::create_dir_all(app.join("pdfium")).unwrap();
-        fs::write(app.join("pdfium/pdfium.dll"), pe::fixture(arch, true)).unwrap();
-        fs::write(app.join("pdfium/LICENSE-PDFIUM"), "Fixture license").unwrap();
         copy_dir(&root().join("resources/fonts"), &app.join("Fonts")).unwrap();
         crate::package::stage_icon_notices(&root(), &app).unwrap();
         fs::write(
@@ -702,7 +690,7 @@ mod tests {
         let directories = directories(&files);
         assert!(files.contains(&format!("Licenses/{}", crate::notices::FILE)));
         assert!(files.contains(&"LICENSE".to_owned()));
-        assert_eq!(directories.last().unwrap(), "pdfium");
+        assert_eq!(directories.last().unwrap(), "Licenses");
         assert!(directories.contains(&"Licenses/icons/file-icons".to_owned()));
         assert!(directories.contains(&"Licenses/icons".to_owned()));
         for (index, directory) in directories.iter().enumerate() {

@@ -80,8 +80,8 @@ fn walk(mut body: &[u8], schema: &[Rule], total: &mut usize) -> Result<(), Error
 }
 
 macro_rules! schema {
-    ($name:ident { $($tag:literal => ($count:expr, $group:literal, $kind:expr)),* $(,)? }) => {
-        const $name: &[Rule] = &[$(Rule { tag: $tag, count: $count, group: $group, kind: $kind }),*];
+    ($vis:vis $name:ident { $($tag:literal => ($count:expr, $group:literal, $kind:expr)),* $(,)? }) => {
+        $vis const $name: &[Rule] = &[$(Rule { tag: $tag, count: $count, group: $group, kind: $kind }),*];
     };
 }
 
@@ -91,6 +91,43 @@ pub(crate) use discovery::measure as measure_discovery;
 pub(crate) use discovery::measure_report as measure_discovery_report;
 pub(crate) use discovery::records as discovery_records;
 pub(crate) use discovery::{check_helper_reply, check_helper_request};
+
+#[cfg(test)]
+use crate::desktop::wire::wire_tables::{Row, Table, Wire};
+
+#[cfg(test)]
+pub(crate) fn tables() -> Vec<(Table, &'static str)> {
+    let mut tables = vec![
+        (table(CLIENT_FRAME), "newport.monitor.ClientFrame"),
+        (table(SERVER_FRAME), "newport.monitor.ServerFrame"),
+    ];
+    tables.extend(discovery::tables());
+    tables
+}
+
+#[cfg(test)]
+#[track_caller]
+fn table(rules: &'static [Rule]) -> Table {
+    Table::new(format!("monitor {:p}", rules.as_ptr()), move || {
+        rules
+            .iter()
+            .map(|rule| {
+                let wire = match rule.kind {
+                    Kind::Scalar => Wire::Scalar,
+                    Kind::Integer32 => Wire::Varint32,
+                    Kind::Bool => Wire::Bool,
+                    Kind::Text(_) => Wire::Len,
+                    Kind::Packed64 => Wire::Fixed64,
+                    Kind::Message(child) => Wire::Message(table(child)),
+                    Kind::Discovery => Wire::Message(table(discovery::SNAPSHOT)),
+                };
+                Row::new(rule.tag, wire)
+                    .repeated(rule.count > 1 || matches!(rule.kind, Kind::Packed64))
+                    .oneof(rule.group)
+            })
+            .collect()
+    })
+}
 
 schema!(STRING_LIST {
     1 => (containers::MAX_ITEMS, false, Kind::Text(containers::MAX_TEXT)),

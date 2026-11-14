@@ -1,5 +1,5 @@
 //! Typed desktop configuration contracts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AuthMethod {
     PublicKey,
     Password,
@@ -17,13 +17,13 @@ pub enum Feature {
     Browser,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Proxy {
     Command(Box<String>),
     Jump(Box<uuid::Uuid>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Server {
     pub id: uuid::Uuid,
     pub name: String,
@@ -41,7 +41,7 @@ pub struct Server {
     pub proxy: Option<crate::desktop::configuration::Proxy>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Tunnel {
     pub id: uuid::Uuid,
     pub name: String,
@@ -57,13 +57,13 @@ pub struct Tunnel {
     pub project: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub servers: Vec<crate::desktop::configuration::Server>,
     pub tunnels: Vec<crate::desktop::configuration::Tunnel>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConnectionSettings {
     pub server_id: uuid::Uuid,
     pub ssh_host: String,
@@ -76,7 +76,7 @@ pub struct ConnectionSettings {
     pub proxy: Option<crate::desktop::configuration::Proxy>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConnectionScope {
     pub settings: crate::desktop::configuration::ConnectionSettings,
     pub connection_revision: u64,
@@ -92,7 +92,7 @@ pub enum TransportStatus {
     Failed,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Transport {
     pub status: crate::desktop::configuration::TransportStatus,
     pub generation: u64,
@@ -107,7 +107,7 @@ pub enum RuntimeStatus {
     Failed,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeInstance {
     pub instance_id: uuid::Uuid,
     pub build_sha256: String,
@@ -119,7 +119,7 @@ pub struct RuntimeInstance {
     pub worker_leases: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeSnapshot {
     pub status: crate::desktop::configuration::RuntimeStatus,
     pub generation: u64,
@@ -130,7 +130,7 @@ pub struct RuntimeSnapshot {
     pub instances: Vec<crate::desktop::configuration::RuntimeInstance>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PermissionsSnapshot {
     pub desired: crate::runtime::Permissions,
     /// Revision zero means no acknowledgement, with both permissions disabled.
@@ -152,7 +152,7 @@ pub enum BuildRelation {
     SameRelease,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UpdateOutcome {
     pub at: u64,
     pub from: Option<String>,
@@ -160,7 +160,7 @@ pub struct UpdateOutcome {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct InstallationStatus {
     pub installed: Option<bool>,
     pub update_available: Option<bool>,
@@ -189,7 +189,7 @@ pub enum InstallStage {
     Error,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct InstallProgress {
     pub stage: crate::desktop::configuration::InstallStage,
     pub sent: u64,
@@ -208,7 +208,7 @@ pub enum ConnectionStatus {
     Error,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ConnectionState {
     pub status: crate::desktop::configuration::ConnectionStatus,
     pub error_message: Option<String>,
@@ -224,7 +224,7 @@ pub enum DestinationStatus {
     Unknown,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DestinationHealth {
     pub local_port: u16,
     pub remote_port: u16,
@@ -233,66 +233,66 @@ pub struct DestinationHealth {
     pub checked_at: Option<u64>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DestinationHealthList {
     pub values: Vec<crate::desktop::configuration::DestinationHealth>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TransportRow {
     pub id: uuid::Uuid,
     pub value: crate::desktop::configuration::Transport,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeRow {
     pub id: uuid::Uuid,
     pub value: crate::desktop::configuration::RuntimeSnapshot,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PermissionsRow {
     pub id: uuid::Uuid,
     pub value: crate::desktop::configuration::PermissionsSnapshot,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct InstallRow {
     pub id: uuid::Uuid,
     pub value: crate::desktop::configuration::InstallProgress,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct InstallationRow {
     pub id: uuid::Uuid,
     pub value: crate::desktop::configuration::InstallationStatus,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ConnectionRow {
     pub id: uuid::Uuid,
     pub value: crate::desktop::configuration::ConnectionState,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct HealthRow {
     pub id: uuid::Uuid,
     pub value: crate::desktop::configuration::DestinationHealthList,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MessageRow {
     pub id: uuid::Uuid,
     pub value: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RevisionRow {
     pub id: uuid::Uuid,
     pub value: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Runtime {
     pub agent_transport: Vec<crate::desktop::configuration::TransportRow>,
     pub agent_runtime: Vec<crate::desktop::configuration::RuntimeRow>,
@@ -307,7 +307,7 @@ pub struct Runtime {
     pub awaiting_agent: Vec<uuid::Uuid>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
     pub instance_id: uuid::Uuid,
     pub revision: u64,
@@ -437,4 +437,135 @@ pub enum Reply {
     OpenTunnel(Box<crate::common::Present>),
     OpenTerminalLink(Box<crate::common::Present>),
     Snapshot(Box<crate::desktop::configuration::Snapshot>),
+}
+
+impl Server {
+    /// Every setting whose change needs a new SSH connection.
+    pub fn connection_settings(&self) -> ConnectionSettings {
+        ConnectionSettings {
+            server_id: self.id,
+            ssh_host: self.ssh_host.clone(),
+            ssh_user: self.ssh_user.clone(),
+            ssh_port: self.ssh_port,
+            auth_method: self.auth_method,
+            identity_file: self.identity_file.clone(),
+            agent_source: self.agent_source.clone(),
+            agent_key_fingerprint: self.agent_key_fingerprint.clone(),
+            proxy: self.proxy.clone(),
+        }
+    }
+}
+
+impl Config {
+    /// The saved server with this id.
+    pub fn server(&self, id: uuid::Uuid) -> Option<&Server> {
+        self.servers.iter().find(|server| server.id == id)
+    }
+
+    /// The forwards saved for a server, in saved order.
+    pub fn tunnels_of(&self, server: uuid::Uuid) -> impl Iterator<Item = &Tunnel> + Clone {
+        self.tunnels
+            .iter()
+            .filter(move |tunnel| tunnel.server_id == server)
+    }
+}
+
+impl Runtime {
+    /// A server's agent transport, once the backend has tried to reach it.
+    pub fn agent_transport(&self, server: uuid::Uuid) -> Option<&Transport> {
+        self.agent_transport
+            .iter()
+            .find(|row| row.id == server)
+            .map(|row| &row.value)
+    }
+
+    /// A server's agent runtime: its state and the agent's hello.
+    pub fn agent_runtime(&self, server: uuid::Uuid) -> Option<&RuntimeSnapshot> {
+        self.agent_runtime
+            .iter()
+            .find(|row| row.id == server)
+            .map(|row| &row.value)
+    }
+
+    /// A server's desired and acknowledged integration permissions.
+    pub fn agent_permissions(&self, server: uuid::Uuid) -> Option<&PermissionsSnapshot> {
+        self.agent_permissions
+            .iter()
+            .find(|row| row.id == server)
+            .map(|row| &row.value)
+    }
+
+    /// The last check of the agent installed on a server.
+    pub fn agent_status(&self, server: uuid::Uuid) -> Option<&InstallationStatus> {
+        self.agent_status
+            .iter()
+            .find(|row| row.id == server)
+            .map(|row| &row.value)
+    }
+
+    /// The progress of an agent install running on a server.
+    pub fn agent_installation(&self, server: uuid::Uuid) -> Option<&InstallProgress> {
+        self.agent_installation
+            .iter()
+            .find(|row| row.id == server)
+            .map(|row| &row.value)
+    }
+
+    /// A forward's connection.
+    pub fn tunnel(&self, tunnel: uuid::Uuid) -> Option<&ConnectionState> {
+        self.tunnels
+            .iter()
+            .find(|row| row.id == tunnel)
+            .map(|row| &row.value)
+    }
+
+    /// A forward's destination checks.
+    pub fn tunnel_health(&self, tunnel: uuid::Uuid) -> &[DestinationHealth] {
+        self.tunnel_health
+            .iter()
+            .find(|row| row.id == tunnel)
+            .map_or(&[], |row| &row.value.values)
+    }
+
+    /// A server's clipboard connection.
+    pub fn clipboard(&self, server: uuid::Uuid) -> Option<&ConnectionState> {
+        self.clipboard
+            .iter()
+            .find(|row| row.id == server)
+            .map(|row| &row.value)
+    }
+
+    /// The last clipboard message for a server.
+    pub fn clipboard_message(&self, server: uuid::Uuid) -> Option<&str> {
+        self.clipboard_messages
+            .iter()
+            .find(|row| row.id == server)
+            .map(|row| row.value.as_str())
+    }
+
+    /// A server's connection revision. A server the backend has not connected
+    /// yet is at revision zero.
+    pub fn connection_revision(&self, server: uuid::Uuid) -> u64 {
+        self.connection_revisions
+            .iter()
+            .find(|row| row.id == server)
+            .map_or(0, |row| row.value)
+    }
+
+    /// Whether a server waits for approval to install its agent.
+    pub fn awaiting_agent(&self, server: uuid::Uuid) -> bool {
+        self.awaiting_agent.contains(&server)
+    }
+}
+
+impl Snapshot {
+    /// A saved server's connection scope in this snapshot: its connection
+    /// settings, its connection revision and this backend instance.
+    pub fn connection_scope(&self, server: &Server) -> ConnectionScope {
+        ConnectionScope {
+            settings: server.connection_settings(),
+            connection_revision: self.runtime.connection_revision(server.id),
+            backend_instance: self.instance_id,
+        }
+    }
 }

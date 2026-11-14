@@ -1,8 +1,7 @@
 //! Bounded worker capacity reserved for revocation. Slow ordinary RPCs and
 //! preview rendering cannot occupy these workers or their request queue.
-use super::{Completion, Work, backend, file_image, file_pdf};
+use super::{Completion, Outcome, Work, backend, file_image};
 use newport_protocol::desktop;
-use serde_json::Value;
 use std::{
     sync::{Arc, Mutex, mpsc},
     time::Duration,
@@ -16,16 +15,20 @@ const REVOCATION_QUEUE: usize = 8;
 /// Local presentation work is explicit and never encoded as a desktop request.
 #[derive(Debug)]
 pub(super) enum Request {
-    Desktop(Box<desktop::Operation>),
+    /// A desktop operation whose decoded reply goes back as is.
+    Typed(Box<desktop::Operation>),
+    /// A Git read whose checked reply goes back as is.
+    Git(Box<desktop::git::RequestArgs>),
     Discovery {
         server: uuid::Uuid,
-        scope: Value,
+        scope: desktop::configuration::ConnectionScope,
         refresh: bool,
         previous: Option<newport_client::discovery::Reading>,
     },
+    /// Decodes a file preview's image off the UI thread.
     PreparePreview {
         server: Option<uuid::Uuid>,
-        data: Value,
+        preview: Box<desktop::files::Preview>,
     },
     AddProject {
         server: uuid::Uuid,
@@ -44,9 +47,18 @@ pub(super) enum Request {
     },
 }
 impl Request {
+    /// The desktop operation this request sends.
+    #[cfg(test)]
+    pub(super) fn operation(&self) -> Option<&desktop::Operation> {
+        match self {
+            Self::Typed(operation) => Some(operation),
+            _ => None,
+        }
+    }
     fn server(&self) -> Option<uuid::Uuid> {
         match self {
-            Self::Desktop(operation) => operation.server_id(),
+            Self::Typed(operation) => operation.server_id(),
+            Self::Git(args) => Some(args.server),
             Self::PreparePreview { server, .. } => *server,
             Self::AddProject { server, .. }
             | Self::Discovery { server, .. }
@@ -56,7 +68,7 @@ impl Request {
     }
     fn revokes_integration(&self) -> bool {
         match self {
-            Self::Desktop(operation) => match operation.as_ref() {
+            Self::Typed(operation) => match operation.as_ref() {
                 desktop::Operation::Configuration(operation) => match operation.as_ref() {
                     desktop::configuration::Operation::SetClipboardEnabled(args) => !args.enabled,
                     desktop::configuration::Operation::SetIntegrationEnabled(args) => !args.enabled,
@@ -149,89 +161,57 @@ fn execute(request: Work) -> Completion {
         .server()
         .map(|value| value.to_string())
         .unwrap_or_default();
-    let mut pdf = request.pdf;
-    let mut pdf_text = None;
-    let mut discovery = None;
-    let mut result = match request.request {
+    let result = match request.request {
+        Request::Typed(operation) => {
+            Outcome::Typed(backend.execute(*operation).map_err(Into::into))
+        }
+        Request::Git(args) => {
+            let args = *args;
+            Outcome::Git(backend.git(args.server, args.request, args.retry_connection))
+        }
         Request::Discovery {
             server,
             scope,
             refresh,
             previous,
-        } => {
-            discovery = Some(crate::connections::DiscoveryCompletion {
-                scope,
-                reading: newport_client::discovery::Reading::prepare(
-                    backend.discover_ports(server, refresh),
-                    previous.as_ref(),
-                ),
-            });
-            Ok(Value::Null)
+        } => Outcome::Discovery(crate::connections::DiscoveryCompletion {
+            scope,
+            reading: newport_client::discovery::Reading::prepare(
+                backend.discover_ports(server, refresh),
+                previous.as_ref(),
+            ),
+        }),
+        Request::PreparePreview { preview, .. } => {
+            Outcome::Preview(file_image::prepare(*preview).map_err(Into::into))
         }
-        Request::PreparePreview { data, .. } => Ok(data),
         Request::AddProject { server, name, path } => {
-            backend.add_project(server, &name, path).map_err(Into::into)
+            Outcome::Project(backend.add_project(server, &name, path).map_err(Into::into))
         }
         Request::RepositorySettings { server, repo_id } => {
-            backend.repository_settings(&server.to_string(), &repo_id)
+            Outcome::Git(backend.repository_settings(&server.to_string(), &repo_id))
         }
         Request::GitLogs {
-            server,
+            server: scope,
             repo_id,
             after,
             columns,
-        } => backend
-            .execute_with_timeout(
-                desktop::Operation::Events(Box::new(desktop::events::Operation::Poll(Box::new(
-                    desktop::events::PollArgs { after },
-                )))),
-                Duration::from_secs(5),
-            )
-            .map_err(Into::into)
-            .and_then(newport_client::desktop_result::project)
-            .and_then(|value| {
-                crate::git_log_text::batch_at(value, &server.to_string(), &repo_id, columns)
-                    .map_err(Into::into)
-            }),
-        Request::Desktop(operation) => backend.execute_rendered(*operation),
+        } => Outcome::GitLog(
+            backend
+                .execute_with_timeout(
+                    desktop::Operation::Events(Box::new(desktop::events::Operation::Poll(
+                        Box::new(desktop::events::PollArgs { after }),
+                    ))),
+                    Duration::from_secs(5),
+                )
+                .map_err(Into::into)
+                .and_then(newport_client::backend::events_reply)
+                .and_then(|batch| {
+                    crate::git_log_text::batch_at(batch, scope, &repo_id, columns)
+                        .map_err(Into::into)
+                }),
+        ),
     };
-    let image =
-        if request.key == "preview" && result.as_ref().is_ok_and(|data| data["kind"] == "pdf") {
-            let data = result.as_ref().unwrap();
-            let bytes = pdf
-                .clone()
-                .map(Ok)
-                .unwrap_or_else(|| file_pdf::decode(data["content"].as_str().unwrap_or_default()));
-            match bytes.and_then(|bytes| {
-                file_pdf::render(bytes, data["page"].as_u64().unwrap_or(1) as usize)
-            }) {
-                Ok(page) => {
-                    result = Ok(page.data);
-                    pdf = Some(page.bytes);
-                    pdf_text = Some(page.text);
-                    Some(page.image)
-                }
-                Err(error) => {
-                    result = Err(error.into());
-                    None
-                }
-            }
-        } else if request.key == "preview" {
-            match result.as_mut().ok().map(file_image::prepare).transpose() {
-                Ok(image) => image.flatten(),
-                Err(error) => {
-                    result = Err(error.into());
-                    None
-                }
-            }
-        } else {
-            None
-        };
     Completion {
-        discovery,
-        pdf,
-        pdf_text,
-        image,
         server,
         key: request.key,
         generation: request.generation,
@@ -242,7 +222,6 @@ fn execute(request: Work) -> Completion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use std::sync::Condvar;
     struct Release(Arc<(Mutex<bool>, Condvar)>);
     impl Drop for Release {
@@ -253,16 +232,23 @@ mod tests {
     }
     fn work(request: Request, hold: bool) -> Work {
         Work {
-            pdf: None,
             key: if hold { "hold" } else { "complete" }.into(),
             generation: 1,
             request,
         }
     }
+    fn text_preview() -> desktop::files::Preview {
+        desktop::files::Preview {
+            kind: desktop::files::PreviewKind::Text,
+            mime: "text/plain".into(),
+            content: desktop::files::Content::Text(Box::new("Restored".into())),
+            truncated: false,
+        }
+    }
     fn ordinary() -> Request {
         Request::PreparePreview {
             server: None,
-            data: Value::Null,
+            preview: Box::new(text_preview()),
         }
     }
     fn integration(enabled: bool, clipboard: bool) -> Request {
@@ -297,7 +283,7 @@ mod tests {
                 feature: Feature::Browser,
             }))
         };
-        Request::Desktop(Box::new(desktop::Operation::Configuration(Box::new(
+        Request::Typed(Box::new(desktop::Operation::Configuration(Box::new(
             operation,
         ))))
     }
@@ -307,7 +293,7 @@ mod tests {
         let mut work = work(
             Request::PreparePreview {
                 server: Some(server),
-                data: json!("Restored"),
+                preview: Box::new(text_preview()),
             },
             false,
         );
@@ -315,7 +301,13 @@ mod tests {
         let result = execute(work);
         assert_eq!(result.server, server.to_string());
         assert_eq!(result.key, format!("integration:helper-restore:{server}"));
-        assert_eq!(result.result.unwrap(), json!("Restored"));
+        assert!(
+            matches!(result.result, Outcome::Preview(Ok(prepared)) if prepared.preview == text_preview())
+        );
+    }
+    /// Whether the next completion reports a revocation.
+    fn revoked(replies: &mpsc::Receiver<Completion>) -> bool {
+        replies.recv_timeout(Duration::from_secs(3)).unwrap().key == "revoked"
     }
     #[test]
     fn integration_revocation_workers_and_queue_survive_ordinary_saturation() {
@@ -331,14 +323,10 @@ mod tests {
                 }
                 let revoked = request.request.revokes_integration();
                 Completion {
-                    discovery: None,
-                    pdf: None,
-                    pdf_text: None,
-                    image: None,
                     server: String::new(),
-                    key: request.key,
+                    key: if revoked { "revoked" } else { "kept" }.into(),
                     generation: request.generation,
-                    result: Ok(json!({"revoked":revoked})),
+                    result: Outcome::Typed(Err("Not sent".into())),
                 }
             });
             let (workers, queue) = if block_revocations {
@@ -372,14 +360,7 @@ mod tests {
                         .try_send(work(integration(true, false), false))
                         .is_ok()
                 );
-                assert_eq!(
-                    replies
-                        .recv_timeout(Duration::from_secs(3))
-                        .unwrap()
-                        .result
-                        .unwrap()["revoked"],
-                    false
-                );
+                assert!(!revoked(&replies));
             } else {
                 for clipboard in [false, true] {
                     assert!(
@@ -387,14 +368,7 @@ mod tests {
                             .try_send(work(integration(false, clipboard), false))
                             .is_ok()
                     );
-                    assert_eq!(
-                        replies
-                            .recv_timeout(Duration::from_secs(3))
-                            .unwrap()
-                            .result
-                            .unwrap()["revoked"],
-                        true
-                    );
+                    assert!(revoked(&replies));
                 }
                 for request in [integration(true, false), ordinary()] {
                     assert!(matches!(

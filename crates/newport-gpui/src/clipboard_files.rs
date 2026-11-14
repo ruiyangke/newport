@@ -197,7 +197,7 @@ fn summary(question: &ClipboardFilesQuestion) -> String {
         1 => "1 item".to_owned(),
         n => format!("{n} items"),
     };
-    let size = crate::bytes(&serde_json::json!(question.bytes));
+    let size = crate::bytes(question.bytes);
     let mut text = format!("{items}, {size}");
     if !question.names.is_empty() {
         let more = question

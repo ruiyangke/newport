@@ -2,7 +2,10 @@
 //! to the core agent. The host owns early helper/supervisor dispatch; call the
 //! shared CLI only after that dispatch, before starting unrelated threads.
 use crate::worker_session::Lease;
-use newport_protocol::{runtime::Capability, worker::Transport};
+use newport_protocol::{
+    runtime::{Capability, service},
+    worker::Transport,
+};
 use std::{collections::BTreeMap, io, path::Path};
 
 /// A compiled service. Availability describes host support, not account access
@@ -91,16 +94,16 @@ impl Cancellation {
 }
 
 const CORE_NAMES: &[&str] = &[
-    "clipboard-service",
-    "clipboard-export",
-    "git",
-    "monitor",
-    "integration",
+    newport_protocol::clipboard::SERVICE_CAPABILITY,
+    newport_protocol::clipboard::exports::CAPABILITY,
+    service::GIT,
+    service::MONITOR,
+    service::INTEGRATION,
     newport_protocol::browser::CAPABILITY,
-    "gui-notices",
-    "worker-stream",
-    "lsp",
-    "terminal",
+    service::GUI_NOTICES,
+    newport_protocol::worker::admission::CAPABILITY,
+    service::LSP,
+    service::TERMINAL,
     newport_protocol::terminal::holder::CAPABILITY,
 ];
 
@@ -140,11 +143,11 @@ pub(crate) fn capabilities(services: &[&dyn Service]) -> io::Result<BTreeMap<Str
 pub(crate) fn transports(services: &[&dyn Service]) -> io::Result<BTreeMap<String, Transport>> {
     capabilities(services)?;
     let mut result = BTreeMap::from([
-        ("git".into(), Transport::GIT),
-        ("monitor".into(), Transport::MONITOR),
-        ("terminal".into(), Transport::TERMINAL),
-        ("integration".into(), Transport::INTEGRATION),
-        ("lsp".into(), Transport::Opaque),
+        (service::GIT.into(), Transport::GIT),
+        (service::MONITOR.into(), Transport::MONITOR),
+        (service::TERMINAL.into(), Transport::TERMINAL),
+        (service::INTEGRATION.into(), Transport::INTEGRATION),
+        (service::LSP.into(), Transport::Opaque),
     ]);
     result.extend(
         services

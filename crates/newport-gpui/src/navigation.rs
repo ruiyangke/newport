@@ -100,6 +100,14 @@ pub(super) fn install_desktop_commands(cx: &mut App) {
         crate::project_editor::PreviousTab,
     ));
     items.push(MenuItem::action(
+        "Move tab left",
+        crate::project_editor::MoveTabLeft,
+    ));
+    items.push(MenuItem::action(
+        "Move tab right",
+        crate::project_editor::MoveTabRight,
+    ));
+    items.push(MenuItem::action(
         "Show/hide project terminal",
         crate::project_editor::ToggleTerminal,
     ));
@@ -332,9 +340,10 @@ fn destination(index: usize, key: &str, count: usize) -> Option<usize> {
 }
 impl Newport {
     pub(super) fn navigation(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
-        let tunnel_count = rows(&self.snapshot["config"]["tunnels"])
+        let tunnel_count = self
+            .tunnels()
             .iter()
-            .filter(|tunnel| text(tunnel, "serverId") == self.server)
+            .filter(|tunnel| Some(tunnel.server_id) == self.server_id())
             .count();
         let disabled = self.server.is_empty() || self.server_form.is_some() || self.modal_open;
         let views = views(cx);

@@ -1,9 +1,8 @@
 //! Render untrusted command output with terminal semantics, without terminal side effects.
 use newport_terminal::{CellWide, Engine, StyleColor, Underline};
-use serde::{Deserialize, Serialize};
 use std::ops::Range;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LogColor {
     Palette(usize),
     Rgb([u8; 3]),
@@ -17,7 +16,7 @@ impl LogColor {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Style {
     pub foreground: LogColor,
     pub background: LogColor,
@@ -46,12 +45,12 @@ impl Default for Style {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Span {
     pub range: Range<usize>,
     pub style: Style,
 }
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LogLine {
     pub text: String,
     pub spans: Vec<Span>,
@@ -287,11 +286,6 @@ mod tests {
         assert!(span.style.bold && span.style.italic && span.style.underline && span.style.strike);
         assert_eq!(span.style.foreground, LogColor::Palette(1));
         assert_eq!(span.style.background, LogColor::Palette(4));
-        let encoded = serde_json::to_vec(&lines).unwrap();
-        assert_eq!(
-            serde_json::from_slice::<Vec<super::LogLine>>(&encoded).unwrap(),
-            lines
-        );
     }
     #[test]
     fn soft_wraps_preserve_unicode_spaces_styles_and_logical_newlines() {
@@ -391,7 +385,7 @@ mod tests {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct LogRecord {
     pub source: String,
     pub lines: Vec<LogLine>,
@@ -409,77 +403,112 @@ pub fn plain_text(lines: &[LogLine]) -> String {
     }
     output
 }
+/// One event poll, with the selected repository's commands rendered.
+pub struct LogBatch {
+    /// The event log's cursor after this poll, for every repository.
+    pub cursor: u64,
+    /// How many events the poll returned, for every repository.
+    pub event_count: usize,
+    pub records: Vec<LogRecord>,
+    /// Some of the repository's commands were too large to show.
+    pub omitted: bool,
+    /// The width the records were rendered at.
+    pub columns: u16,
+}
 /// Called on a worker; filter before terminal parsing to avoid processing another repo's output.
 pub fn batch(
-    value: serde_json::Value,
-    server: &str,
+    batch: newport_protocol::desktop::events::Batch,
+    server: uuid::Uuid,
     repo: &str,
-) -> Result<serde_json::Value, String> {
-    batch_at(value, server, repo, 160)
+) -> Result<LogBatch, String> {
+    batch_at(batch, server, repo, 160)
 }
 pub fn batch_at(
-    value: serde_json::Value,
-    server: &str,
+    batch: newport_protocol::desktop::events::Batch,
+    server: uuid::Uuid,
     repo: &str,
     columns: u16,
-) -> Result<serde_json::Value, String> {
-    use serde_json::json;
-    let cursor = value["cursor"].as_u64().ok_or("Invalid Git log cursor")?;
-    let events = value["entries"]
-        .as_array()
-        .ok_or("Invalid Git log events")?;
-    if events.len() > 100 {
+) -> Result<LogBatch, String> {
+    use newport_protocol::desktop::events::Event;
+    if batch.entries.len() > 100 {
         return Err("Git log batch exceeds its limit".into());
     }
     let mut records = Vec::new();
     let mut omitted = false;
-    for event in events {
-        if event["serverId"] != server || event["repoId"] != repo {
+    for Event::GitCommand(event) in &batch.entries {
+        if event.server != server || event.repo_id.as_deref() != Some(repo) {
             continue;
         }
-        let entry = &event["entry"];
-        let Some(command) = entry["command"].as_str() else {
-            omitted = true;
-            continue;
-        };
-        let output = entry["output"].as_str().unwrap_or("");
-        if command.len() > 1024 || output.len() > 32768 {
+        let entry = &event.entry;
+        if entry.command.len() > 1024 || entry.output.len() > 32768 {
             omitted = true;
             continue;
         }
-        let status = if entry["interrupted"] == true {
-            "Interrupted".into()
-        } else if entry["exitCode"] == 0 {
-            "Done".into()
-        } else {
-            format!("Exit {}", entry["exitCode"])
+        let status = match entry.exit_code {
+            _ if entry.interrupted => "Interrupted".into(),
+            Some(0) => "Done".into(),
+            Some(code) => format!("Exit {code}"),
+            None => "Exit null".into(),
         };
         let source = format!(
-            "$ {command}\n{status} · {} ms\n{output}\x1b[0m",
-            entry["durationMs"]
+            "$ {}\n{status} · {} ms\n{}\x1b[0m",
+            entry.command, entry.duration_ms, entry.output
         );
         let lines = render_styled_at(&source, columns)?;
         records.push(LogRecord { source, lines });
     }
-    Ok(
-        json!({"cursor":cursor,"eventCount":events.len(),"records":records,"omitted":omitted,"columns":columns}),
-    )
+    Ok(LogBatch {
+        cursor: batch.cursor,
+        event_count: batch.entries.len(),
+        records,
+        omitted,
+        columns,
+    })
 }
 
 #[cfg(test)]
 mod batch_tests {
     use super::batch;
-    use serde_json::json;
+    use newport_protocol::{
+        desktop::events::{Batch, Event, GitCommand},
+        git::CommandLog,
+    };
+    const SERVER: uuid::Uuid = uuid::Uuid::from_u128(1);
+    fn event(server: uuid::Uuid, repo: &str, command: &str, output: String) -> Event {
+        Event::GitCommand(Box::new(GitCommand {
+            server,
+            repo_id: Some(repo.into()),
+            operation_id: None,
+            entry: CommandLog {
+                command: command.into(),
+                duration_ms: 3,
+                exit_code: Some(0),
+                output,
+                interrupted: false,
+            },
+        }))
+    }
     #[test]
     fn filters_exact_scope_before_parsing_and_preserves_global_cursor() {
-        let event = |server, repo, output| json!({"serverId":server,"repoId":repo,"entry":{"command":"git status","durationMs":3,"exitCode":0,"output":output}});
-        let result = batch(json!({"cursor":42,"entries":[event("a","one","first\rfinal"),event("b","one","foreign server"),event("a","two","foreign repo")]}),"a","one").unwrap();
-        assert_eq!(result["cursor"], 42);
-        assert_eq!(result["eventCount"], 3);
-        let records: Vec<super::LogRecord> =
-            serde_json::from_value(result["records"].clone()).unwrap();
+        let other = uuid::Uuid::from_u128(2);
+        let result = batch(
+            Batch {
+                cursor: 42,
+                entries: vec![
+                    event(SERVER, "one", "git status", "first\rfinal".into()),
+                    event(other, "one", "git status", "foreign server".into()),
+                    event(SERVER, "two", "git status", "foreign repo".into()),
+                ],
+            },
+            SERVER,
+            "one",
+        )
+        .unwrap();
+        assert_eq!(result.cursor, 42);
+        assert_eq!(result.event_count, 3);
+        assert_eq!(result.records.len(), 1);
         assert_eq!(
-            records[0]
+            result.records[0]
                 .lines
                 .iter()
                 .map(|line| line.text.as_str())
@@ -488,18 +517,22 @@ mod batch_tests {
         );
     }
     #[test]
-    fn rejects_malformed_batches_and_reports_oversized_output() {
-        assert!(batch(json!({"entries":[]}), "a", "one").is_err());
-        assert!(
-            batch(
-                json!({"cursor":0,"entries":vec![json!({});101]}),
-                "a",
-                "one"
-            )
-            .is_err()
-        );
-        let result=batch(json!({"cursor":1,"entries":[{"serverId":"a","repoId":"one","entry":{"command":"git log","output":"x".repeat(32769)}}]}),"a","one").unwrap();
-        assert_eq!(result["omitted"], true);
-        assert_eq!(result["records"], json!([]));
+    fn rejects_oversized_batches_and_reports_oversized_output() {
+        let oversized = Batch {
+            cursor: 0,
+            entries: vec![event(SERVER, "one", "git status", String::new()); 101],
+        };
+        assert!(batch(oversized, SERVER, "one").is_err());
+        let result = batch(
+            Batch {
+                cursor: 1,
+                entries: vec![event(SERVER, "one", "git log", "x".repeat(32769))],
+            },
+            SERVER,
+            "one",
+        )
+        .unwrap();
+        assert!(result.omitted);
+        assert!(result.records.is_empty());
     }
 }

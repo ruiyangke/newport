@@ -1,0 +1,79 @@
+gpui: Preserve native keyboard metadata for terminal input
+
+Key events carry the physical key and the original layout and modifier
+metadata, without changing shortcut matching. macOS and Windows supply
+layout metadata; Linux and web keep optional fallbacks. Window::numlock()
+reads the current lock state, implemented on Windows. Synthetic events carry
+no native metadata.
+
+Newport needs it for terminal key encoding. KeyDownEvent and KeyUpEvent gain
+optional fields, so struct literals downstream must set them.
+
+Remove when GPUI exposes physical keys and layout metadata on key events.
+
+diff --git a/src/linux/wayland/client.rs b/src/linux/wayland/client.rs
+index 2d40cf7..e3c1550 100644
+--- a/src/linux/wayland/client.rs
++++ b/src/linux/wayland/client.rs
+@@ -2207,6 +2207,8 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
+                             state.compose_state = Some(compose);
+                         }
+                         let input = PlatformInput::KeyDown(KeyDownEvent {
++                            physical_key: Some(gpui::PhysicalKey::Native(keycode.raw())),
++                            key_metadata: None,
+                             keystroke: keystroke.clone(),
+                             is_held: false,
+                             prefer_character_input: false,
+@@ -2222,6 +2224,8 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
+                             .loop_handle
+                             .insert_source(Timer::from_duration(state.repeat.delay), {
+                                 let input = PlatformInput::KeyDown(KeyDownEvent {
++                                    physical_key: Some(gpui::PhysicalKey::Native(keycode.raw())),
++                                    key_metadata: None,
+                                     keystroke,
+                                     is_held: true,
+                                     prefer_character_input: false,
+@@ -2257,6 +2261,8 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
+                     }
+                     wl_keyboard::KeyState::Released if !keysym.is_modifier_key() => {
+                         let input = PlatformInput::KeyUp(KeyUpEvent {
++                            physical_key: Some(gpui::PhysicalKey::Native(keycode.raw())),
++                            key_metadata: None,
+                             keystroke: keystroke_from_xkb(keymap_state, state.modifiers, keycode),
+                         });
+ 
+@@ -2307,6 +2313,8 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandClientStatePtr {
+                     // We should only send ASCII characters to Zed, otherwise a user could remap a letter like `か` or `相`.
+                     if commit_text.len() == 1 {
+                         window.handle_input(PlatformInput::KeyDown(KeyDownEvent {
++                            physical_key: None,
++                            key_metadata: None,
+                             keystroke: Keystroke {
+                                 modifiers: Modifiers::default(),
+                                 key: commit_text.clone(),
+diff --git a/src/linux/x11/client.rs b/src/linux/x11/client.rs
+index e21f019..9214b24 100644
+--- a/src/linux/x11/client.rs
++++ b/src/linux/x11/client.rs
+@@ -1201,6 +1201,8 @@ impl X11Client {
+                 };
+                 drop(state);
+                 window.handle_input(PlatformInput::KeyDown(gpui::KeyDownEvent {
++                    physical_key: Some(gpui::PhysicalKey::Native(u32::from(event.detail))),
++                    key_metadata: None,
+                     keystroke,
+                     is_held: false,
+                     prefer_character_input: false,
+@@ -1226,7 +1228,11 @@ impl X11Client {
+                     keystroke
+                 };
+                 drop(state);
+-                window.handle_input(PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }));
++                window.handle_input(PlatformInput::KeyUp(gpui::KeyUpEvent {
++                    physical_key: Some(gpui::PhysicalKey::Native(u32::from(event.detail))),
++                    key_metadata: None,
++                    keystroke,
++                }));
+             }
+             Event::XinputButtonPress(event) => {
+                 let window = self.get_window(event.event)?;

@@ -4,6 +4,7 @@ use super::{
     journal,
     protocol::{Error, Path as WirePath},
 };
+use newport_protocol::git::code;
 use std::{
     ffi::{CString, OsStr},
     fs::{self, File, OpenOptions},
@@ -22,7 +23,7 @@ fn io_error(_: io::Error) -> Error {
 }
 fn unknown() -> Error {
     Error::new(
-        "OUTCOME_UNKNOWN",
+        code::OUTCOME_UNKNOWN,
         "Repository metadata may have been published. Query the operation and inspect the directory before retrying.",
     )
 }
@@ -34,10 +35,10 @@ pub(super) fn root(path: &WirePath) -> Result<(PathBuf, File, String), Error> {
         return Err(Error::invalid("Choose an absolute directory path."));
     }
     let meta = fs::symlink_metadata(path)
-        .map_err(|_| Error::new("DIRECTORY_REQUIRED", "Choose an existing directory."))?;
+        .map_err(|_| Error::new(code::DIRECTORY_REQUIRED, "Choose an existing directory."))?;
     if !meta.is_dir() {
         return Err(Error::new(
-            "DIRECTORY_REQUIRED",
+            code::DIRECTORY_REQUIRED,
             "Choose a directory, not a file or symbolic link.",
         ));
     }
@@ -50,7 +51,7 @@ pub(super) fn root(path: &WirePath) -> Result<(PathBuf, File, String), Error> {
     let actual = file.metadata().map_err(io_error)?;
     if actual.dev() != meta.dev() || actual.ino() != meta.ino() {
         return Err(Error::new(
-            "PATH_CHANGED",
+            code::PATH_CHANGED,
             "The selected directory changed.",
         ));
     }
@@ -102,7 +103,7 @@ pub(super) fn publish_to(directory: &File, source: &Path, destination: &Path) ->
         let error = io::Error::last_os_error();
         return Err(if error.kind() == io::ErrorKind::AlreadyExists {
             Error::new(
-                "ALREADY_REPOSITORY",
+                code::ALREADY_REPOSITORY,
                 "Git metadata appeared during initialization; it was not replaced.",
             )
         } else {

@@ -1,5 +1,6 @@
 //! Read existing editor settings on the remote host. Native project configs
 //! stay with the language server, which owns their discovery and precedence.
+use newport_protocol::lsp::Configuration;
 use serde_json::{Value, json};
 use std::{
     fs::OpenOptions,
@@ -158,24 +159,24 @@ fn vscode(settings: &Value, server: &str) -> io::Result<Value> {
     Ok(result)
 }
 
-/// The configuration to start `server` with. Editor settings that can't be
-/// used leave it at its defaults, with the problem as `settingsError`.
-pub(super) fn resolve(root: &Path, server: &str) -> Value {
-    load(root, server).unwrap_or_else(|error| {
-        let mut config = configure(&json!({}), &json!({}), server).expect("default settings");
-        config["settingsError"] = json!(format!(
+/// The configuration to start `server` with, before the worker watches the
+/// worktree. Editor settings that can't be used leave it at its defaults, with
+/// the problem as `settings_error`.
+pub(super) fn resolve(root: &Path, server: &str) -> Configuration {
+    load(root, server).unwrap_or_else(|error| Configuration {
+        settings_error: Some(format!(
             "{error} The language server started with its default settings."
-        ));
-        config
+        )),
+        ..configure(&json!({}), &json!({}), server).expect("default settings")
     })
 }
 
 /// `server` names the actual executable family (notably basedpyright vs pyright).
-fn load(root: &Path, server: &str) -> io::Result<Value> {
+fn load(root: &Path, server: &str) -> io::Result<Configuration> {
     configure(&read(root, VSCODE)?, &read(root, ZED)?, server)
 }
 
-fn configure(vscode_settings: &Value, zed: &Value, server: &str) -> io::Result<Value> {
+fn configure(vscode_settings: &Value, zed: &Value, server: &str) -> io::Result<Configuration> {
     let mut settings = vscode(vscode_settings, server)?;
     if zed.get("lsp").is_some_and(|lsp| !lsp.is_object()) {
         return Err(io::Error::other(format!("{ZED}: lsp must be an object.")));
@@ -225,7 +226,13 @@ fn configure(vscode_settings: &Value, zed: &Value, server: &str) -> io::Result<V
         settings[server] = initialization.clone();
     }
     merge(&mut settings, zed_settings);
-    Ok(json!({"settings":settings,"initializationOptions":initialization}))
+    Ok(Configuration {
+        settings,
+        initialization_options: initialization,
+        settings_error: None,
+        file_watch: false,
+        watch_error: None,
+    })
 }
 
 #[cfg(test)]
@@ -256,24 +263,21 @@ mod tests {
         let source = std::fs::read_to_string(root.path().join(VSCODE)).unwrap();
         write(root.path(), VSCODE, &format!("\u{feff}{source}"));
         let rust = load(root.path(), "rust-analyzer").unwrap();
+        assert_eq!(rust.settings["rust-analyzer"]["check"]["command"], "clippy");
+        assert_eq!(rust.initialization_options["files"]["watcher"], "server");
         assert_eq!(
-            rust["settings"]["rust-analyzer"]["check"]["command"],
-            "clippy"
-        );
-        assert_eq!(rust["initializationOptions"]["files"]["watcher"], "server");
-        assert_eq!(
-            rust["initializationOptions"]["cargo"]["features"],
+            rust.initialization_options["cargo"]["features"],
             json!(["feature.a"])
         );
         assert_eq!(
-            rust["initializationOptions"]["cargo"]["extraEnv"]["ENV.WITH.DOTS"],
+            rust.initialization_options["cargo"]["extraEnv"]["ENV.WITH.DOTS"],
             "https://example.test/*literal*/"
         );
-        assert!(rust["settings"].get("editor").is_none());
-        assert!(rust["settings"].get("gopls").is_none());
+        assert!(rust.settings.get("editor").is_none());
+        assert!(rust.settings.get("gopls").is_none());
         let go = load(root.path(), "gopls").unwrap();
-        assert_eq!(go["settings"]["gopls"]["formatting.gofumpt"], true);
-        assert_eq!(go["settings"]["gopls"], go["initializationOptions"]);
+        assert_eq!(go.settings["gopls"]["formatting.gofumpt"], true);
+        assert_eq!(go.settings["gopls"], go.initialization_options);
     }
 
     #[test]
@@ -292,27 +296,21 @@ mod tests {
         );
         let pyright = load(root.path(), "pyright").unwrap();
         assert_eq!(
-            pyright["settings"]["python"]["analysis"]["typeCheckingMode"],
+            pyright.settings["python"]["analysis"]["typeCheckingMode"],
             "strict"
         );
-        assert_eq!(
-            pyright["settings"]["pyright"]["disableOrganizeImports"],
-            true
-        );
-        assert!(pyright["settings"].get("basedpyright").is_none());
+        assert_eq!(pyright.settings["pyright"]["disableOrganizeImports"], true);
+        assert!(pyright.settings.get("basedpyright").is_none());
         let based = load(root.path(), "basedpyright").unwrap();
         assert_eq!(
-            based["settings"]["basedpyright"]["analysis"]["typeCheckingMode"],
+            based.settings["basedpyright"]["analysis"]["typeCheckingMode"],
             "recommended"
         );
         assert_eq!(
-            based["settings"]["basedpyright"]["analysis"]["diagnosticSeverityOverrides"]["reportUnusedImport"],
+            based.settings["basedpyright"]["analysis"]["diagnosticSeverityOverrides"]["reportUnusedImport"],
             "warning"
         );
-        assert_eq!(
-            based["settings"]["python"]["pythonPath"],
-            ".venv/bin/python"
-        );
+        assert_eq!(based.settings["python"]["pythonPath"], ".venv/bin/python");
     }
 
     #[test]
@@ -325,14 +323,14 @@ mod tests {
         );
         let config = load(root.path(), "typescript-language-server").unwrap();
         assert_eq!(
-            config["settings"]["typescript"]["format"]["semicolons"],
+            config.settings["typescript"]["format"]["semicolons"],
             "remove"
         );
         assert_eq!(
-            config["settings"]["javascript"]["format"]["semicolons"],
+            config.settings["javascript"]["format"]["semicolons"],
             "insert"
         );
-        assert!(config["settings"]["typescript"].get("tsdk").is_none());
+        assert!(config.settings["typescript"].get("tsdk").is_none());
     }
 
     #[test]
@@ -353,20 +351,17 @@ mod tests {
         }}}"#,
         );
         let config = load(root.path(), "rust-analyzer").unwrap();
+        assert_eq!(config.initialization_options["check"]["command"], "clippy");
         assert_eq!(
-            config["initializationOptions"]["check"]["command"],
-            "clippy"
-        );
-        assert_eq!(
-            config["initializationOptions"]["cargo"]["features"],
+            config.initialization_options["cargo"]["features"],
             json!(["new"])
         );
-        assert_eq!(config["initializationOptions"]["cargo"]["allTargets"], true);
+        assert_eq!(config.initialization_options["cargo"]["allTargets"], true);
         assert_eq!(
-            config["initializationOptions"],
-            config["settings"]["rust-analyzer"]
+            config.initialization_options,
+            config.settings["rust-analyzer"]
         );
-        assert!(config.get("binary").is_none());
+        assert!(config.initialization_options.get("binary").is_none());
     }
 
     #[test]
@@ -383,19 +378,16 @@ mod tests {
         );
         let based = load(root.path(), "basedpyright").unwrap();
         assert_eq!(
-            based["settings"]["basedpyright"]["analysis"]["typeCheckingMode"],
+            based.settings["basedpyright"]["analysis"]["typeCheckingMode"],
             "basic"
         );
-        assert!(based["settings"]["python"].get("analysis").is_none());
+        assert!(based.settings["python"].get("analysis").is_none());
         let ts = load(root.path(), "typescript-language-server").unwrap();
         assert_eq!(
-            ts["initializationOptions"]["preferences"]["quotePreference"],
+            ts.initialization_options["preferences"]["quotePreference"],
             "single"
         );
-        assert_eq!(
-            ts["settings"]["completions"]["completeFunctionCalls"],
-            false
-        );
+        assert_eq!(ts.settings["completions"]["completeFunctionCalls"], false);
     }
 
     #[test]
@@ -412,7 +404,7 @@ mod tests {
             "obsolete and deliberately invalid",
         );
         let config = load(root.path(), "pyright").unwrap();
-        assert_eq!(config["settings"], json!({"python":{},"pyright":{}}));
+        assert_eq!(config.settings, json!({"python":{},"pyright":{}}));
     }
 
     #[test]
@@ -450,7 +442,7 @@ mod tests {
     fn empty_settings_are_empty_and_unusable_settings_start_with_defaults() {
         let root = tempfile::tempdir().unwrap();
         let defaults = resolve(root.path(), "rust-analyzer");
-        assert!(defaults.get("settingsError").is_none());
+        assert!(defaults.settings_error.is_none());
         for file in [VSCODE, ZED] {
             for empty in ["", " \n", "\u{feff}"] {
                 write(root.path(), file, empty);
@@ -459,12 +451,12 @@ mod tests {
         }
         write(root.path(), ZED, "{\"lsp\":");
         let config = resolve(root.path(), "rust-analyzer");
-        assert!(config["settingsError"].as_str().unwrap().contains(ZED));
+        assert!(config.settings_error.unwrap().contains(ZED));
         assert_eq!(
-            config["initializationOptions"],
-            defaults["initializationOptions"]
+            config.initialization_options,
+            defaults.initialization_options
         );
-        assert_eq!(config["settings"], defaults["settings"]);
+        assert_eq!(config.settings, defaults.settings);
     }
 
     #[test]
@@ -476,8 +468,8 @@ mod tests {
         // SAFETY: a NUL-terminated path and a valid mode.
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         assert!(
-            resolve(root.path(), "gopls")["settingsError"]
-                .as_str()
+            resolve(root.path(), "gopls")
+                .settings_error
                 .unwrap()
                 .contains("isn't a regular file")
         );

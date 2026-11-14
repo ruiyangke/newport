@@ -248,47 +248,129 @@ fn varint(body: &mut &[u8]) -> Result<u64, Error> {
     }
     Err(FrameError::Malformed.into())
 }
+/// The most entries a repeated field may hold, where it isn't [`MAX_ITEMS`]:
+/// by message and field name, then by package prefix.
+const COUNT_LIMITS: &[(&str, &str, usize)] = &[
+    (
+        ".newport.desktop.connection.Discovery",
+        "retained",
+        crate::desktop::connection::discovery::MAX_RETAINED,
+    ),
+    (".newport.desktop.events.Batch", "entries", 100),
+    (
+        ".newport.desktop.applications.StatesArgs",
+        "applications",
+        128,
+    ),
+    (".newport.desktop.applications.Command", "argv", 128),
+    (".newport.desktop.applications.Desktop", "uris", 64),
+    (".newport.desktop.files.WatchArgs", "directories", 64),
+    (
+        ".newport.desktop.terminal.ShellList",
+        "shells",
+        crate::terminal::MAX_HOLDERS,
+    ),
+    (
+        ".newport.desktop.terminal.HeldShell",
+        "attached",
+        crate::terminal::MAX_ATTACHED,
+    ),
+    (".newport.runtime.Hello", "services", 15),
+    (".newport.runtime.Hello", "dependencies", 16),
+    (
+        ".newport.monitor.MetricsSnapshot",
+        "cpus",
+        crate::monitor::metrics::MAX_CPUS,
+    ),
+    (
+        ".newport.monitor.MetricsSnapshot",
+        "disks",
+        crate::monitor::metrics::MAX_DISKS,
+    ),
+    (
+        ".newport.desktop.metrics.HistoricalDisks",
+        "items",
+        crate::monitor::metrics::MAX_DISKS,
+    ),
+    (
+        ".newport.monitor.MetricsSnapshot",
+        "processes",
+        crate::monitor::metrics::MAX_PROCESSES,
+    ),
+    (
+        ".newport.monitor.MetricsSnapshot",
+        "network",
+        crate::monitor::metrics::MAX_INTERFACES,
+    ),
+    (
+        ".newport.desktop.metrics.ChartBucket",
+        "network",
+        crate::monitor::metrics::MAX_INTERFACES,
+    ),
+    (
+        ".newport.desktop.metrics.HistoricalNetwork",
+        "items",
+        crate::monitor::metrics::MAX_INTERFACES,
+    ),
+    (
+        ".newport.monitor.MetricsCore",
+        "history",
+        crate::monitor::metrics::MAX_HISTORY,
+    ),
+    (
+        ".newport.monitor.ServicesSnapshot",
+        "services",
+        crate::monitor::services::MAX_SERVICES,
+    ),
+    (
+        ".newport.monitor.ServicesSnapshot",
+        "timers",
+        crate::monitor::services::MAX_TIMERS,
+    ),
+    (
+        ".newport.monitor.ServicesLogs",
+        "entries",
+        crate::monitor::services::MAX_LOG_ENTRIES,
+    ),
+    (
+        ".newport.monitor.ContainersContainersSnapshot",
+        "containers",
+        crate::monitor::containers::MAX_CONTAINERS,
+    ),
+    (
+        ".newport.monitor.ContainersContainerLogPage",
+        "entries",
+        crate::monitor::containers::MAX_LOG_ENTRIES,
+    ),
+    (
+        ".newport.remote.catalogue.Catalogue",
+        "apps",
+        crate::remote_apps::apps::MAX_APPLICATIONS,
+    ),
+];
+const PACKAGE_COUNT_LIMITS: &[(&str, usize)] = &[(".newport.git.", 10_000)];
 fn count_limit(message: &str, field: &str) -> usize {
-    match (message, field) {
-        (".newport.desktop.connection.Discovery", "retained") => {
-            crate::desktop::connection::discovery::MAX_RETAINED
-        }
-        (".newport.desktop.events.Batch", "entries") => 100,
-        (".newport.desktop.applications.StatesArgs", "applications") => 128,
-        (".newport.desktop.applications.Command", "argv") => 128,
-        (".newport.desktop.applications.Desktop", "uris") => 64,
-        (".newport.desktop.files.WatchArgs", "directories") => 64,
-        (".newport.desktop.terminal.ShellList", "shells") => crate::terminal::MAX_HOLDERS,
-        (".newport.desktop.terminal.HeldShell", "attached") => crate::terminal::MAX_ATTACHED,
-        (".newport.runtime.Hello", "services") => 15,
-        (".newport.runtime.Hello", "dependencies") => 16,
-        (".newport.monitor.MetricsSnapshot", "cpus") => crate::monitor::metrics::MAX_CPUS,
-        (".newport.monitor.MetricsSnapshot", "disks")
-        | (".newport.desktop.metrics.HistoricalDisks", "items") => {
-            crate::monitor::metrics::MAX_DISKS
-        }
-        (".newport.monitor.MetricsSnapshot", "processes") => crate::monitor::metrics::MAX_PROCESSES,
-        (".newport.monitor.MetricsSnapshot", "network")
-        | (".newport.desktop.metrics.ChartBucket", "network")
-        | (".newport.desktop.metrics.HistoricalNetwork", "items") => {
-            crate::monitor::metrics::MAX_INTERFACES
-        }
-        (".newport.monitor.MetricsCore", "history") => crate::monitor::metrics::MAX_HISTORY,
-        (".newport.monitor.ServicesSnapshot", "services") => crate::monitor::services::MAX_SERVICES,
-        (".newport.monitor.ServicesSnapshot", "timers") => crate::monitor::services::MAX_TIMERS,
-        (".newport.monitor.ServicesLogs", "entries") => crate::monitor::services::MAX_LOG_ENTRIES,
-        (".newport.monitor.ContainersContainersSnapshot", "containers") => {
-            crate::monitor::containers::MAX_CONTAINERS
-        }
-        (".newport.monitor.ContainersContainerLogPage", "entries") => {
-            crate::monitor::containers::MAX_LOG_ENTRIES
-        }
-        (".newport.remote.catalogue.Catalogue", "apps") => {
-            crate::remote_apps::apps::MAX_APPLICATIONS
-        }
-        (name, _) if name.starts_with(".newport.git.") => 10_000,
-        _ => MAX_ITEMS,
-    }
+    COUNT_LIMITS
+        .iter()
+        .find(|(name, repeated, _)| *name == message && *repeated == field)
+        .map(|&(_, _, limit)| limit)
+        .or_else(|| {
+            PACKAGE_COUNT_LIMITS
+                .iter()
+                .find(|(package, _)| message.starts_with(package))
+                .map(|&(_, limit)| limit)
+        })
+        .unwrap_or(MAX_ITEMS)
+}
+#[cfg(test)]
+pub(super) fn count_limit_keys() -> impl Iterator<Item = (&'static str, &'static str)> {
+    COUNT_LIMITS
+        .iter()
+        .map(|&(message, field, _)| (message, field))
+}
+#[cfg(test)]
+pub(super) fn count_limit_packages() -> impl Iterator<Item = &'static str> {
+    PACKAGE_COUNT_LIMITS.iter().map(|&(package, _)| package)
 }
 
 #[cfg(test)]

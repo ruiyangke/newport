@@ -11,6 +11,9 @@ pub enum Retry {
     No,
 }
 
+/// The code of an error the sender expects to clear when it retries.
+pub const BUSY: &str = "busy";
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Error {
     pub code: String,

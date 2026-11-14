@@ -40,26 +40,25 @@ impl Sort {
     }
 }
 
-fn name_key(entry: &Value) -> (String, String) {
-    let name = text(entry, "name");
-    (name.to_lowercase(), name)
+fn name_key(entry: &files::Entry) -> (String, String) {
+    (entry.name.to_lowercase(), entry.name.clone())
 }
 
 /// Folders stay first in every order; the chosen column orders each group.
-pub(super) fn sort_entries(entries: &mut [Value], sort: Sort) {
+pub(super) fn sort_entries(entries: &mut [files::Entry], sort: Sort) {
     entries.sort_by(|a, b| {
-        let file = |entry: &Value| entry["kind"] != "directory";
+        let file = |entry: &files::Entry| entry.kind != files::EntryKind::Directory;
         file(a).cmp(&file(b)).then_with(|| {
             let order = match sort.column {
                 SortColumn::Name => name_key(a).cmp(&name_key(b)),
-                SortColumn::Modified => a["modified"]
-                    .as_i64()
-                    .cmp(&b["modified"].as_i64())
+                SortColumn::Modified => a
+                    .modified
+                    .cmp(&b.modified)
                     .then_with(|| name_key(a).cmp(&name_key(b))),
                 // Folders carry SFTP attribute sizes the list never shows.
-                SortColumn::Size if file(a) => a["size"]
-                    .as_u64()
-                    .cmp(&b["size"].as_u64())
+                SortColumn::Size if file(a) => a
+                    .size
+                    .cmp(&b.size)
                     .then_with(|| name_key(a).cmp(&name_key(b))),
                 SortColumn::Size => name_key(a).cmp(&name_key(b)),
             };
@@ -75,15 +74,15 @@ pub(super) fn sort_entries(entries: &mut [Value], sort: Sort) {
 /// "35 items · 14 folders, 21 files · 3 hidden", or the filtered share of a
 /// trimmed query.
 pub(super) fn folder_summary(
-    listing: &Value,
-    shown: &[Value],
+    listing: &files::Listing,
+    shown: &[files::Entry],
     query: &str,
     hidden_shown: bool,
 ) -> String {
-    let all = listing["entries"].as_array().map_or(&[][..], Vec::as_slice);
+    let all = &listing.entries;
     let hidden = all
         .iter()
-        .filter(|entry| text(entry, "name").starts_with('.'))
+        .filter(|entry| entry.name.starts_with('.'))
         .count();
     let plural = |count: usize, one: &str, many: &str| {
         format!("{count} {}", if count == 1 { one } else { many })
@@ -98,7 +97,7 @@ pub(super) fn folder_summary(
     }
     let folders = shown
         .iter()
-        .filter(|entry| entry["kind"] == "directory")
+        .filter(|entry| entry.kind == files::EntryKind::Directory)
         .count();
     let mut summary = plural(shown.len(), "item", "items");
     if !shown.is_empty() {
@@ -182,27 +181,26 @@ fn metadata_cell(id: impl Into<ElementId>, value: String) -> Stateful<Div> {
         .child(value)
 }
 
-fn file_name(entry: &Value, cx: &App) -> AnyElement {
+fn file_name(entry: &files::Entry, cx: &App) -> AnyElement {
     div()
         .flex_1()
         .min_w_0()
         .flex()
         .items_center()
         .gap(px(8.))
-        .child(file_icon::icon(&text(entry, "name"), &text(entry, "kind")))
-        .child(div().min_w_0().truncate().child(text(entry, "name")))
-        .when(entry["kind"] == "symlink", |name| {
+        .child(file_icon::icon(&entry.name, entry.kind))
+        .child(div().min_w_0().truncate().child(entry.name.clone()))
+        .when(entry.kind == files::EntryKind::Symlink, |name| {
             name.child(crate::controls::tag("Link", cx))
         })
         .into_any_element()
 }
 
-fn file_name_label(entry: &Value) -> String {
-    let name = text(entry, "name");
-    if entry["kind"] == "symlink" {
-        format!("{name} · Link")
+fn file_name_label(entry: &files::Entry) -> String {
+    if entry.kind == files::EntryKind::Symlink {
+        format!("{} · Link", entry.name)
     } else {
-        name
+        entry.name.clone()
     }
 }
 
@@ -256,13 +254,13 @@ fn retained_row<K: PartialEq + Clone + 'static>(
 // A row's identity follows the remote file, so its cache and menu state move
 // with it when sorting or a refresh reorders the folder.
 fn file_row_identity(server: &str, path: &str) -> SharedString {
-    SharedString::from(serde_json::to_string(&("file-row", server, path)).expect("string tuple"))
+    SharedString::from(format!("{:?}", ("file-row", server, path)))
 }
 
 #[derive(Clone, PartialEq)]
 struct FileRowProps {
     index: usize,
-    entry: Value,
+    entry: files::Entry,
     group: SharedString,
     target: Option<FileTarget>,
     selected: bool,
@@ -285,16 +283,16 @@ fn file_listener(
 
 fn file_row(props: &FileRowProps, view: &WeakEntity<Newport>, cx: &App) -> AnyElement {
     let entry = &props.entry;
-    let path = text(entry, "path");
-    let name = text(entry, "name");
-    let directory = entry["kind"] == "directory";
+    let path = entry.path.clone();
+    let name = entry.name.clone();
+    let directory = entry.kind == files::EntryKind::Directory;
     let target = props.target.clone();
     let action_target = target.clone();
     let menu_target = target.clone();
     let menu_view = view.clone();
-    let modified = entry["modified"]
-        .as_i64()
-        .and_then(|seconds| seconds.checked_mul(1000));
+    let modified = entry
+        .modified
+        .and_then(|seconds| i64::from(seconds).checked_mul(1000));
     let primary = if directory {
         Some(
             crate::controls::compact_icon_button("file-project")
@@ -388,10 +386,9 @@ fn file_row(props: &FileRowProps, view: &WeakEntity<Newport>, cx: &App) -> AnyEl
         .child(
             metadata_cell(
                 "file-size",
-                if directory || entry["size"].is_null() {
-                    String::new()
-                } else {
-                    bytes(&entry["size"])
+                match entry.size {
+                    Some(size) if !directory => byte_size(size as f64),
+                    _ => String::new(),
                 },
             )
             .w(px(SIZE_WIDTH))
@@ -627,7 +624,7 @@ impl Newport {
                         range
                             .filter_map(|index| {
                                 let entry = entries.get(index)?;
-                                let path = text(entry, "path");
+                                let path = entry.path.clone();
                                 let identity = file_row_identity(&server, &path);
                                 let props = FileRowProps {
                                     index,
@@ -691,28 +688,24 @@ impl Newport {
         let selected = browser
             .selected
             .as_ref()
-            .and_then(|path| entries.iter().find(|entry| entry["path"] == *path));
+            .and_then(|path| entries.iter().find(|entry| entry.path == *path));
         let summary = match (selected, browser.reads.listing()) {
             (Some(entry), _) => {
-                let kind = if entry["kind"] == "directory" {
-                    "Folder".to_owned()
-                } else if entry["size"].is_null() {
-                    "File".to_owned()
-                } else {
-                    bytes(&entry["size"])
+                let kind = match entry.size {
+                    _ if entry.kind == files::EntryKind::Directory => "Folder".to_owned(),
+                    None => "File".to_owned(),
+                    Some(size) => byte_size(size as f64),
                 };
-                let modified = entry["modified"]
-                    .as_i64()
-                    .and_then(|seconds| seconds.checked_mul(1000))
+                let modified = entry
+                    .modified
+                    .and_then(|seconds| i64::from(seconds).checked_mul(1000))
                     .map(|at| format!(" · Modified {}", crate::localized_time::detail_date(at)))
                     .unwrap_or_default();
-                let permissions = text(entry, "permissions");
-                let permissions = if permissions.trim().is_empty() {
-                    String::new()
-                } else {
-                    format!(" · Permissions {permissions}")
-                };
-                format!("{} · {kind}{modified}{permissions}", text(entry, "name"))
+                let permissions = Some(entry.permissions.as_deref().unwrap_or("—"))
+                    .filter(|permissions| !permissions.trim().is_empty())
+                    .map(|permissions| format!(" · Permissions {permissions}"))
+                    .unwrap_or_default();
+                format!("{} · {kind}{modified}{permissions}", entry.name)
             }
             // A refresh keeps the listing on screen, so its summary stays too.
             (None, None) if browser.reads.listing_pending() => "Reading folder…".into(),

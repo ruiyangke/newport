@@ -6,6 +6,7 @@
 //! account's display to its shell.
 mod display;
 mod holder;
+mod reaper;
 
 use crate::transport::Cancellation;
 use newport_protocol::terminal::{
@@ -25,6 +26,8 @@ use std::{
 
 /// The worker's version. Desktops speaking another one are told to update.
 pub(crate) const VERSIONS: &[u32] = &[newport_protocol::terminal::VERSION];
+// A replica's snapshot fits in one holder frame unless its screen alone is larger.
+const _: () = assert!(newport_terminal::SNAPSHOT_BUDGET <= protocol::MAX_SNAPSHOT);
 /// How long `start` waits for a new holder's socket.
 const START_WAIT: Duration = Duration::from_secs(10);
 
@@ -190,6 +193,8 @@ struct Record {
     name: Option<String>,
     #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
+    agent: Option<String>,
     creator: Computer,
     attached: Vec<Attached>,
     exited: Option<Exit>,
@@ -500,8 +505,12 @@ fn launch(id: &str, columns: u16, rows: u16) -> io::Result<()> {
         columns.to_string(),
         rows.to_string(),
     ];
-    crate::detached::launch(&format!("newport-terminal-{id}"), &args)
-        .map_err(|_| io::Error::other("The terminal did not start on the server."))
+    crate::detached::launch(
+        &format!("newport-terminal-{id}"),
+        crate::detached::TERMINAL_SCOPE,
+        &args,
+    )
+    .map_err(|_| io::Error::other("The terminal did not start on the server."))
 }
 
 fn list() -> io::Result<Vec<Holder>> {
@@ -578,6 +587,7 @@ fn holder(files: &Files) -> Option<Holder> {
         started: record.started,
         name: record.name,
         title: record.title,
+        agent: record.agent,
         creator: record.creator,
         attached: record.attached,
         exited: record.exited,
@@ -929,11 +939,12 @@ fn watch(
     }
 }
 
-/// `terminal <holder|attach|display|route> …`; `route <terminal> <mac-id>
+/// `terminal <holder|reaper|attach|display|route> …`; `route <terminal> <mac-id>
 /// <name>` takes the name as `name_from_hex` reads it.
 pub fn run(args: &[String]) -> io::Result<()> {
     match args.first().map(String::as_str) {
         Some("holder") => holder::run(&args[1..]),
+        Some("reaper") => reaper::run(&args[1..]),
         Some("attach") if args.len() == 2 => attach(&valid_id(&args[1])?),
         Some("display") if args.len() == 1 => display::print(),
         Some("route") if args.len() == 4 => route(

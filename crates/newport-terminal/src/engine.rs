@@ -1,4 +1,5 @@
 use crate::handler::{Extensions, Handler};
+use crate::queries::Sequence;
 use crate::{Error, Frame, Mode, Point, PointCoordinate, Result, RgbColor, ScrollViewport};
 use alacritty_terminal::{
     Term,
@@ -55,6 +56,9 @@ pub struct Effects {
     pub replies: Vec<Vec<u8>>,
     pub bell: bool,
     pub copy: Option<String>,
+    /// What programs report about themselves changed; see
+    /// [`Engine::program_statuses`].
+    pub program_statuses: bool,
 }
 #[derive(Clone, Default)]
 pub(crate) struct Listener(Rc<RefCell<Vec<Event>>>);
@@ -94,6 +98,8 @@ pub struct Engine {
     renderer: crate::frame::Renderer,
     input: crate::input::InputState,
     pub(crate) selection: crate::selection::SelectionState,
+    pub(crate) program_statuses: crate::ProgramStatuses,
+    program_statuses_changed: bool,
 }
 impl Engine {
     pub fn new(columns: u16, rows: u16) -> Result<Self> {
@@ -117,6 +123,8 @@ impl Engine {
             renderer: crate::frame::Renderer::default(),
             input: crate::input::InputState::new(columns, rows)?,
             selection: Default::default(),
+            program_statuses: Default::default(),
+            program_statuses_changed: false,
         })
     }
     pub fn set_theme(&mut self, theme: Theme) -> Result<()> {
@@ -136,9 +144,14 @@ impl Engine {
                 listener: &self.listener,
             };
             self.parser.advance(&mut handler, &rest[..read]);
-            if let Some(query) = query {
-                self.listener
-                    .send_event(Event::PtyWrite(query.reply(&self.terminal)));
+            match query {
+                Some(Sequence::Query(query)) => self
+                    .listener
+                    .send_event(Event::PtyWrite(query.reply(&self.terminal))),
+                Some(Sequence::ProgramStatus(report)) => {
+                    self.program_statuses_changed |= self.program_statuses.apply(&report);
+                }
+                None => {}
             }
             rest = &rest[read..];
         }
@@ -150,9 +163,10 @@ impl Engine {
             self.renderer.invalidate();
         }
     }
-    fn effects(&self, redraw: bool) -> Effects {
+    fn effects(&mut self, redraw: bool) -> Effects {
         let mut effects = Effects {
             redraw,
+            program_statuses: std::mem::take(&mut self.program_statuses_changed),
             ..Effects::default()
         };
         for event in self.listener.0.borrow_mut().drain(..) {
@@ -191,8 +205,15 @@ impl Engine {
         let mut fresh = Engine::new(size.columns, size.rows)?;
         fresh.theme = self.theme.clone();
         fresh.resize(size.columns, size.rows, size.width, size.height)?;
+        // What the snapshot reports replaces what this terminal knew, even
+        // when it reports nothing.
+        fresh.program_statuses_changed = !self.program_statuses.is_empty();
         *self = fresh;
         self.advance(snapshot)
+    }
+    /// What programs in the terminal last reported about themselves.
+    pub fn program_statuses(&self) -> &crate::ProgramStatuses {
+        &self.program_statuses
     }
     pub(crate) fn cell_size(&self) -> (u16, u16) {
         (self.size.width, self.size.height)
@@ -447,6 +468,8 @@ impl Engine {
         let cursor = self.terminal.grid().cursor.point;
         let line = cursor.line.0 + 1;
         let fresh_line = if cursor.column.0 == 0 { "" } else { "\r\n" };
+        // The programs that reported belonged to the old session.
+        self.program_statuses_changed |= self.program_statuses.clear();
         self.advance(
             format!("\x1b[r\x1b[0m\x1b[?25h\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1005l\x1b[?1004l\x1b[?1l\x1b>\x1b[4l\x1b[?6l\x1b[?7h\x1b[<999u\x1b[=0u\x1b[{line}H{fresh_line}")
                 .as_bytes(),
@@ -531,6 +554,35 @@ fn sanitize_title(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn programs_asking_for_status_support_are_answered_and_their_reports_kept() {
+        let mut engine = Engine::new(20, 3).unwrap();
+        let effects = engine.advance(b"\x1b]7501;?\x1b\\").unwrap();
+        assert_eq!(effects.replies, [b"\x1b]7501;?\x1b\\".to_vec()]);
+        assert!(!effects.program_statuses);
+
+        let effects = engine
+            .advance(b"ab\x1b]7501;state=done:app=claude-code\x07cd")
+            .unwrap();
+        assert!(effects.program_statuses);
+        assert_eq!(engine.visible_lines().unwrap(), ["abcd"]);
+        let program = engine.program_statuses().program().unwrap();
+        assert_eq!(program.state, crate::ProgramState::Done);
+
+        assert!(engine.reconnect().unwrap().program_statuses);
+        assert!(engine.program_statuses().is_empty());
+    }
+
+    #[test]
+    fn restoring_a_snapshot_without_reports_clears_the_old_ones() {
+        let mut engine = Engine::new(20, 3).unwrap();
+        engine.advance(b"\x1b]7501;state=working\x07").unwrap();
+        let effects = engine.restore(b"$ ").unwrap();
+        assert!(effects.program_statuses, "the tab must drop its mark");
+        assert!(engine.program_statuses().is_empty());
+        assert!(!engine.restore(b"$ ").unwrap().program_statuses);
+    }
+
     #[test]
     fn synchronized_output_captures_before_hold_and_times_out() {
         let mut engine = Engine::new(20, 3).unwrap();

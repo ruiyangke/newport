@@ -73,6 +73,12 @@ pub enum Event {
     /// Needle couldn't hold this new tab's shell, for this reason: an
     /// ordinary shell follows, and ends when the connection does.
     NotHeld(String),
+    /// The held shell's size: the tab draws the shell at it, whatever its own
+    /// size, since its output is drawn for it. The computer last used sets it.
+    Size {
+        columns: u16,
+        rows: u16,
+    },
 }
 impl From<TerminalEvent> for Event {
     fn from(event: TerminalEvent) -> Self {
@@ -89,6 +95,10 @@ impl From<TerminalEvent> for Event {
             TerminalEvent::Active(value) => Self::Active(value.active),
             TerminalEvent::DisplayLost(_) => Self::DisplayLost,
             TerminalEvent::NotHeld(value) => Self::NotHeld(value.reason),
+            TerminalEvent::Size(value) => Self::Size {
+                columns: value.columns,
+                rows: value.rows,
+            },
         }
     }
 }
@@ -598,6 +608,7 @@ pub fn held_shells(server: uuid::Uuid) -> Result<newport_domain::terminal::HeldS
                     terminal: value.terminal,
                     name: value.name,
                     title: value.title,
+                    agent: value.agent,
                     creator: domain::Mac {
                         id: value.creator.id,
                         name: value.creator.name,

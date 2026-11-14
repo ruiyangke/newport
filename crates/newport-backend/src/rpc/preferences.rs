@@ -5,7 +5,6 @@ use newport_protocol::{
     common::Present,
     desktop::{Failure, preferences as dto},
 };
-use serde_json::{Map, Value};
 
 fn project(value: projects::Project) -> dto::Project {
     dto::Project {
@@ -49,33 +48,6 @@ fn stored_settings(value: &dto::Settings) -> remote_apps::Settings {
         separate_apps: value.separate_apps,
     }
 }
-fn window(value: &dto::WindowPatch) -> Value {
-    let mut fields = Map::new();
-    if let Some(width) = value.sidebar_width {
-        fields.insert("sidebarWidth".into(), Value::from(width));
-    }
-    if let Some(compact) = value.sidebar_compact {
-        fields.insert("sidebarCompact".into(), Value::Bool(compact));
-    }
-    if let Some(appearance) = value.appearance {
-        fields.insert(
-            "appearance".into(),
-            Value::String(
-                match appearance {
-                    dto::Appearance::System => "system",
-                    dto::Appearance::Light => "light",
-                    dto::Appearance::Dark => "dark",
-                }
-                .into(),
-            ),
-        );
-    }
-    if let Some(meta) = value.terminal_option_as_meta {
-        fields.insert("terminalOptionAsMeta".into(), Value::Bool(meta));
-    }
-    Value::Object(fields)
-}
-
 pub async fn dispatch(
     command: &dto::Operation,
     state: &Preferences,
@@ -83,7 +55,7 @@ pub async fn dispatch(
     use dto::{Operation as O, Reply as R};
     Ok(match command {
         O::SetWindow(args) => {
-            preferences::set_window_preferences(state, window(&args.patch))
+            preferences::set_window_preferences(state, &args.patch)
                 .await
                 .map_err(operation)?;
             R::SetWindow(Box::new(Present {}))

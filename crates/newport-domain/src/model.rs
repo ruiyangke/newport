@@ -1,3 +1,4 @@
+use newport_protocol::desktop::configuration as contract;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -148,19 +149,106 @@ pub fn host_valid(s: &str) -> bool {
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || ".-_:".contains(c))
 }
+impl From<&Proxy> for contract::Proxy {
+    fn from(value: &Proxy) -> Self {
+        match value {
+            Proxy::Command(command) => Self::Command(Box::new(command.clone())),
+            Proxy::Jump(id) => Self::Jump(Box::new(*id)),
+        }
+    }
+}
+impl From<&Server> for contract::Server {
+    fn from(value: &Server) -> Self {
+        Self {
+            id: value.id,
+            name: value.name.clone(),
+            ssh_user: value.ssh_user.clone(),
+            ssh_host: value.ssh_host.clone(),
+            ssh_port: value.ssh_port,
+            identity_file: value.identity_file.clone(),
+            agent_source: value.agent_source.clone(),
+            agent_key_fingerprint: value.agent_key_fingerprint.clone(),
+            auth_method: match value.auth_method {
+                AuthMethod::PublicKey => contract::AuthMethod::PublicKey,
+                AuthMethod::Password => contract::AuthMethod::Password,
+            },
+            clipboard_enabled: value.clipboard_enabled,
+            browser_enabled: value.browser_enabled,
+            agent_install_approved: value.agent_install_approved,
+            setup_complete: value.setup_complete,
+            proxy: value.proxy.as_ref().map(contract::Proxy::from),
+        }
+    }
+}
+impl From<&Tunnel> for contract::Tunnel {
+    fn from(value: &Tunnel) -> Self {
+        Self {
+            id: value.id,
+            name: value.name.clone(),
+            server_id: value.server_id,
+            local_port: value.local_port,
+            local_port_end: value.local_port_end,
+            remote_host: value.remote_host.clone(),
+            remote_port: value.remote_port,
+            remote_port_end: value.remote_port_end,
+            auto_connect: value.auto_connect,
+            auto_reconnect: value.auto_reconnect,
+            direction: match value.direction {
+                Direction::Local => contract::Direction::Local,
+                Direction::Remote => contract::Direction::Remote,
+            },
+            project: value.project.clone(),
+        }
+    }
+}
+impl From<&contract::Tunnel> for Tunnel {
+    fn from(value: &contract::Tunnel) -> Self {
+        Self {
+            id: value.id,
+            name: value.name.clone(),
+            server_id: value.server_id,
+            local_port: value.local_port,
+            local_port_end: value.local_port_end,
+            remote_host: value.remote_host.clone(),
+            remote_port: value.remote_port,
+            remote_port_end: value.remote_port_end,
+            auto_connect: value.auto_connect,
+            auto_reconnect: value.auto_reconnect,
+            direction: match value.direction {
+                contract::Direction::Local => Direction::Local,
+                contract::Direction::Remote => Direction::Remote,
+            },
+            project: value.project.clone(),
+        }
+    }
+}
 impl Server {
     pub fn same_destination(&self, other: &Self) -> bool {
         self.ssh_host == other.ssh_host
             && self.ssh_port == other.ssh_port
             && self.ssh_user == other.ssh_user
     }
+    /// Every setting whose change needs a new SSH connection, as the
+    /// desktop contract lists them.
+    pub fn connection_settings(&self) -> contract::ConnectionSettings {
+        contract::Server::from(self).connection_settings()
+    }
+    /// The connection a view observed: the settings, the server's connection
+    /// revision and the backend instance.
+    pub fn connection_scope(
+        &self,
+        connection_revision: u64,
+        backend_instance: Uuid,
+    ) -> contract::ConnectionScope {
+        contract::ConnectionScope {
+            settings: self.connection_settings(),
+            connection_revision,
+            backend_instance,
+        }
+    }
+    /// Whether one SSH connection serves both.
     pub fn same_connection(&self, other: &Self) -> bool {
-        self.same_destination(other)
-            && self.identity_file == other.identity_file
-            && self.agent_source == other.agent_source
-            && self.agent_key_fingerprint == other.agent_key_fingerprint
-            && self.auth_method == other.auth_method
-            && self.proxy == other.proxy
+        self.connection_settings() == other.connection_settings()
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -384,6 +472,55 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Every field the model saves either changes the connection scope or is
+    /// named here, so a new field can't be left out of the comparison.
+    #[test]
+    fn every_saved_field_but_presentation_and_consent_changes_the_scope() {
+        const KEEP_THE_CONNECTION: [&str; 5] = [
+            "name",
+            "clipboardEnabled",
+            "browserEnabled",
+            "agentInstallApproved",
+            "setupComplete",
+        ];
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id":"7a9c1d4e-0000-4000-8000-000000000001","name":"Box","sshHost":"host",
+            "sshUser":"user","sshPort":22,"identityFile":null
+        }))
+        .unwrap();
+        let instance = Uuid::new_v4();
+        let scope = server.connection_scope(3, instance);
+        let original = serde_json::to_value(&server).unwrap();
+        for (field, value) in original.as_object().unwrap() {
+            let changed = match (field.as_str(), value) {
+                ("id", _) => serde_json::json!(Uuid::new_v4()),
+                ("authMethod", _) => serde_json::json!("password"),
+                ("proxy", _) => serde_json::json!({"command":"nc %h %p"}),
+                (_, serde_json::Value::Bool(flag)) => serde_json::json!(!flag),
+                (_, serde_json::Value::Number(number)) => {
+                    serde_json::json!(number.as_u64().unwrap() + 1)
+                }
+                _ => serde_json::json!("changed"),
+            };
+            let mut updated = original.clone();
+            updated[field] = changed;
+            let updated: Server = serde_json::from_value(updated).unwrap();
+            let same = updated.connection_scope(3, instance) == scope;
+            assert_eq!(
+                same,
+                KEEP_THE_CONNECTION.contains(&field.as_str()),
+                "{field}"
+            );
+            assert_eq!(updated.same_connection(&server), same, "{field}");
+        }
+        let jump = Server {
+            proxy: Some(Proxy::Jump(Uuid::new_v4())),
+            ..server.clone()
+        };
+        assert_ne!(jump.connection_scope(3, instance), scope);
+        assert_ne!(server.connection_scope(4, instance), scope);
+        assert_ne!(server.connection_scope(3, Uuid::new_v4()), scope);
+    }
     fn tunnel() -> Tunnel {
         serde_json::from_value(serde_json::json!({"id":Uuid::new_v4(),"serverId":Uuid::new_v4(),"name":"test","localPort":8000,"remotePort":80,"remoteHost":"127.0.0.1"})).unwrap()
     }
@@ -443,6 +580,19 @@ mod tests {
         );
         assert_eq!(forwarding_host("0:0:0:0:0:0:0:0"), forwarding_host("::1"));
         assert_ne!(forwarding_host("::1"), forwarding_host("127.0.0.1"));
+    }
+    #[test]
+    fn a_tunnel_keeps_every_field_through_the_desktop_contract() {
+        let mut t = tunnel();
+        t.local_port_end = Some(8002);
+        t.remote_port_end = Some(82);
+        t.auto_connect = true;
+        t.auto_reconnect = false;
+        t.direction = Direction::Remote;
+        t.project = Some("/srv/app".into());
+        let contract = contract::Tunnel::from(&t);
+        assert_eq!(contract.direction, contract::Direction::Remote);
+        assert_eq!(Tunnel::from(&contract), t);
     }
     #[test]
     fn tunnels_default_to_local_without_a_project() {

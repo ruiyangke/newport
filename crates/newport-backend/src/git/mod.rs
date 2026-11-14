@@ -11,6 +11,7 @@
 pub mod client;
 pub mod pending;
 use newport_protocol::git as protocol;
+use newport_protocol::git::code;
 mod queries;
 use crate::{manager::Shared, server_session};
 use client::Client;
@@ -201,6 +202,25 @@ fn request_lane(request: &Request) -> usize {
         | Request::Diff { .. } => 2,
         _ => 0,
     }
+}
+
+/// The operation ID and action name a write is recorded under before it is sent.
+fn receipt(request: &Request) -> Result<Option<(Uuid, String)>, Error> {
+    let (Request::Start { operation_id, .. }
+    | Request::Init { operation_id, .. }
+    | Request::Clone { operation_id, .. }) = request
+    else {
+        return Ok(None);
+    };
+    let id = Uuid::parse_str(operation_id)
+        .map_err(|_| Error::invalid("Operation ID must be a UUID."))?;
+    let value = serde_json::to_value(request).map_err(|e| Error::invalid(e.to_string()))?;
+    let action = value["params"]["action"]["kind"]
+        .as_str()
+        .or_else(|| value["method"].as_str())
+        .ok_or_else(|| Error::invalid("Missing Git action."))?
+        .to_owned();
+    Ok(Some((id, action)))
 }
 
 fn is_mutation(request: &Request) -> bool {
@@ -509,16 +529,16 @@ pub async fn git_request(
         state,
         pending,
         server_id,
-        request.clone(),
+        request,
         retry,
     )
     .await?;
-    project_result(&value, &request)
+    project_result(&value)
 }
 
-pub(crate) fn project_result(value: &GitResult, request: &Request) -> Result<Value, Error> {
+pub(crate) fn project_result(value: &GitResult) -> Result<Value, Error> {
     match value {
-        GitResult::Reply(reply) => serde_json::to_value(reply.projection(request)),
+        GitResult::Reply(reply) => serde_json::to_value(reply),
         GitResult::Diff(value) => {
             serde_json::to_value(json!({"snapshot": value.snapshot, "diff": value.diff}))
         }
@@ -536,6 +556,39 @@ pub(crate) async fn git_request_typed(
     retry: bool,
 ) -> Result<GitResult, Error> {
     client::validate_request(&request)?;
+    let unsent = receipt(&request)?;
+    let result = request_once(
+        events,
+        preferences,
+        state,
+        pending,
+        server_id,
+        request,
+        retry,
+    )
+    .await;
+    // A write is recorded before it is sent, so one that failed with no record
+    // never reached the agent. Say so, or it blocks every later write.
+    if result.is_err()
+        && let Some((id, action)) = unsent
+    {
+        let ledger = pending.clone();
+        let _ =
+            tokio::task::spawn_blocking(move || ledger.reject_unrecorded(server_id, id, action))
+                .await;
+    }
+    result
+}
+
+async fn request_once(
+    events: LogSink,
+    preferences: &dyn ClientIdentity,
+    state: &Shared,
+    pending: &pending::PendingOperations,
+    server_id: Uuid,
+    request: Request,
+    retry: bool,
+) -> Result<GitResult, Error> {
     // Connect, or reconnect, BEFORE sending -- never after.
     let session = connection(preferences, state, server_id, retry).await?;
     if queries::cacheable(&request) {
@@ -663,14 +716,7 @@ async fn execute(
     let repository_write = matches!(&request, Request::Start { .. });
     let bootstrap_write = matches!(&request, Request::Init { .. } | Request::Clone { .. });
     let lookup = matches!(&request, Request::Get { .. });
-    if let Some(id) = &operation_id {
-        let id = Uuid::parse_str(id).map_err(|_| Error::invalid("Operation ID must be a UUID."))?;
-        let value = serde_json::to_value(&request).map_err(|e| Error::invalid(e.to_string()))?;
-        let action = value["params"]["action"]["kind"]
-            .as_str()
-            .or_else(|| value["method"].as_str())
-            .ok_or_else(|| Error::invalid("Missing Git action."))?
-            .to_owned();
+    if let Some((id, action)) = receipt(&request)? {
         let ledger = pending.clone();
         let server_id = session.server_id;
         tokio::task::spawn_blocking(move || ledger.begin(server_id, id, action))
@@ -730,7 +776,7 @@ async fn execute(
     if result.as_ref().is_err_and(|e| {
         matches!(
             e.code.as_str(),
-            "TRANSPORT_ERROR" | "PROTOCOL_ERROR" | "CANCELLED"
+            code::TRANSPORT_ERROR | code::PROTOCOL_ERROR | "CANCELLED"
         )
     }) {
         *guard = None;
@@ -786,18 +832,16 @@ async fn execute(
     // is what stops one uncertain operation from blocking every later write.
     if let (Some(id), Err(error)) = (observed_id.as_deref(), &result)
         && lookup
-        && error.code == "OPERATION_NOT_FOUND"
+        && error.code == code::OPERATION_NOT_FOUND
     {
         let ledger = pending.clone();
         let server_id = session.server_id;
         let operation =
             Uuid::parse_str(id).map_err(|_| Error::invalid("Operation ID must be a UUID."))?;
-        tokio::task::spawn_blocking(move || {
-            ledger.observe(server_id, operation, pending::ReceiptState::Rejected)
-        })
-        .await
-        .map_err(|_| uncertain(id))?
-        .map_err(|_| uncertain(id))?;
+        tokio::task::spawn_blocking(move || ledger.reject_missing(server_id, operation))
+            .await
+            .map_err(|_| uncertain(id))?
+            .map_err(|_| uncertain(id))?;
     }
     if let (Some(id), Err(error)) = (operation_id.as_deref(), &result)
         && ((repository_write && pending::rejected_before_mutation(&error.code))
@@ -837,7 +881,7 @@ mod journal;
 
 fn uncertain(operation_id: &str) -> Error {
     Error::new(
-        "OUTCOME_UNKNOWN",
+        code::OUTCOME_UNKNOWN,
         format!(
             "Operation {operation_id} may have completed. Reconnect and query operation.get with this ID; do not repeat the write."
         ),

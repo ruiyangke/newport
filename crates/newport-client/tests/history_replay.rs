@@ -5,9 +5,11 @@ use newport_client::{
     backend::Backend,
     git_conflict::{recovery_allowed, resolution},
     git_history::{MainlineReview, commit_action},
-    git_operation::{Operation, State},
 };
-use newport_protocol::{common::Present, desktop, git as protocol};
+use newport_protocol::{
+    desktop,
+    git::{self as protocol, Operation, OperationState as State},
+};
 use serde_json::Value;
 use std::{
     process::Command,
@@ -57,9 +59,14 @@ impl Drop for Fixture {
         }
     }
 }
-fn request(backend: &Backend, server: &str, request: protocol::Request) -> Result<Value, String> {
+/// Sends a Git read and returns its checked reply.
+fn reply(
+    backend: &Backend,
+    server: &str,
+    request: protocol::Request,
+) -> Result<protocol::Reply, String> {
     backend
-        .request_git(
+        .git(
             server
                 .parse::<uuid::Uuid>()
                 .map_err(|error| error.to_string())?,
@@ -67,6 +74,10 @@ fn request(backend: &Backend, server: &str, request: protocol::Request) -> Resul
             false,
         )
         .map_err(|error| error.to_string())
+}
+/// [`reply`] as JSON, for assertions on its fields.
+fn request(backend: &Backend, server: &str, request: protocol::Request) -> Result<Value, String> {
+    serde_json::to_value(reply(backend, server, request)?).map_err(|error| error.to_string())
 }
 
 fn acknowledge(backend: &Backend, server: &str, operation_id: uuid::Uuid) -> Result<(), String> {
@@ -126,24 +137,21 @@ fn replay_mainline_selection_changes_the_actual_patch() -> Result<(), String> {
     assert_eq!(exec(&["id", "-un"])?.trim(), "fixture");
     let backend = Backend::discover();
     let state = backend
-        .execute_rendered(desktop::Operation::Configuration(Box::new(
-            desktop::configuration::Operation::Snapshot(Box::new(Present {})),
-        )))
+        .configuration_snapshot()
         .map_err(|error| error.to_string())?;
-    let servers: Vec<_> = state["config"]["servers"]
-        .as_array()
-        .ok_or("Missing servers")?
+    let servers: Vec<_> = state
+        .config
+        .servers
         .iter()
-        .filter(|s| {
-            s["sshHost"] == "127.0.0.1" && s["sshPort"] == port && s["sshUser"] == "fixture"
-        })
+        .filter(|s| s.ssh_host == "127.0.0.1" && s.ssh_port == port && s.ssh_user == "fixture")
         .collect();
     assert_eq!(
         servers.len(),
         1,
         "Expected one disposable loopback fixture server"
     );
-    let server = servers[0]["id"].as_str().ok_or("Missing server ID")?;
+    let server = servers[0].id.to_string();
+    let server = server.as_str();
     let fixture = Fixture::new()?;
     let source = format!("{}/source", fixture.0);
     exec(&["mkdir", "--", &source])?;
@@ -186,14 +194,17 @@ fn replay_mainline_selection_changes_the_actual_patch() -> Result<(), String> {
             )?;
             assert_eq!(opened["root"]["bytesB64"], STANDARD.encode(&path));
             let repo = opened["repoId"].as_str().ok_or("Missing repository ID")?;
-            let detail = request(
+            let protocol::Reply::Commit(detail) = reply(
                 &backend,
                 server,
                 protocol::Request::Commit {
                     repo_id: repo.into(),
                     commit_oid: merged.clone(),
                 },
-            )?;
+            )?
+            else {
+                return Err("Invalid commit detail".into());
+            };
             let review =
                 MainlineReview::from_commit(&detail, &merged).ok_or("Invalid merge detail")?;
             assert_eq!(review.parents(), &[left.clone(), right.clone()]);
@@ -275,14 +286,17 @@ fn replay_mainline_selection_changes_the_actual_patch() -> Result<(), String> {
     )?;
     assert_eq!(opened["root"]["bytesB64"], STANDARD.encode(&path));
     let repo = opened["repoId"].as_str().ok_or("Missing repository ID")?;
-    let detail = request(
+    let protocol::Reply::Commit(detail) = reply(
         &backend,
         server,
         protocol::Request::Commit {
             repo_id: repo.into(),
             commit_oid: merged.clone(),
         },
-    )?;
+    )?
+    else {
+        return Err("Invalid commit detail".into());
+    };
     let action = commit_action("revert", &detail, &merged, 0).ok_or("Invalid replay action")?;
     let before = request(
         &backend,
@@ -375,7 +389,7 @@ fn replay_mainline_selection_changes_the_actual_patch() -> Result<(), String> {
         )
         .map_err(|e| e.message)?;
     settled(&backend, server, operation, State::NeedsResolution)?;
-    let conflict = request(
+    let protocol::Reply::Status(conflict) = reply(
         &backend,
         server,
         protocol::Request::Status {
@@ -384,13 +398,15 @@ fn replay_mainline_selection_changes_the_actual_patch() -> Result<(), String> {
             page_size: 10,
             cursor: None,
         },
-    )?;
+    )?
+    else {
+        return Err("Invalid status".into());
+    };
     assert!(!recovery_allowed(&conflict, "integration.continue"));
-    let entry = conflict["entries"]
-        .as_array()
-        .ok_or("Missing entries")?
+    let entry = conflict
+        .entries
         .iter()
-        .find(|entry| entry["conflicted"] == true)
+        .find(|entry| entry.conflicted)
         .ok_or("Missing conflict")?;
     let action = resolution(entry, "theirs").ok_or("Missing recorded deletion")?;
     assert!(matches!(
@@ -402,16 +418,10 @@ fn replay_mainline_selection_changes_the_actual_patch() -> Result<(), String> {
     ));
     let resolve_id = uuid::Uuid::new_v4();
     let operation = backend
-        .apply_reviewed_action(
-            server,
-            repo,
-            conflict["snapshot"].as_str().ok_or("Missing snapshot")?,
-            action,
-            resolve_id,
-        )
+        .apply_reviewed_action(server, repo, &conflict.snapshot, action, resolve_id)
         .map_err(|e| e.message)?;
     settled(&backend, server, operation, State::Succeeded)?;
-    let resolved = request(
+    let protocol::Reply::Status(resolved) = reply(
         &backend,
         server,
         protocol::Request::Status {
@@ -420,7 +430,10 @@ fn replay_mainline_selection_changes_the_actual_patch() -> Result<(), String> {
             page_size: 10,
             cursor: None,
         },
-    )?;
+    )?
+    else {
+        return Err("Invalid status".into());
+    };
     assert!(recovery_allowed(&resolved, "integration.continue"));
     let continue_id = uuid::Uuid::new_v4();
     let message = "Resolve recorded deletion through Newport";
@@ -428,7 +441,7 @@ fn replay_mainline_selection_changes_the_actual_patch() -> Result<(), String> {
         .apply_reviewed_action(
             server,
             repo,
-            resolved["snapshot"].as_str().ok_or("Missing snapshot")?,
+            &resolved.snapshot,
             protocol::Action::IntegrationContinue {
                 message: Some(message.into()),
                 author: None,

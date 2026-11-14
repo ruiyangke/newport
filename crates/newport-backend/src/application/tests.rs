@@ -62,6 +62,17 @@ async fn call(endpoint: &Path, method: &'static str, args: Value) -> Result<Valu
     .unwrap()
 }
 
+async fn snapshot(
+    endpoint: &Path,
+) -> Result<newport_protocol::desktop::configuration::Snapshot, String> {
+    let endpoint = endpoint.to_owned();
+    tokio::task::spawn_blocking(move || {
+        rpc::test_fixture::snapshot(endpoint, Duration::from_secs(30))
+    })
+    .await
+    .unwrap()
+}
+
 #[tokio::test]
 async fn terminal_rpc_dials_ssh_without_account_or_remote_apps_setup() {
     use newport_client::terminal_transport::Session;
@@ -108,9 +119,9 @@ async fn long_profile_starts_restarts_and_preserves_single_instance_ownership() 
     for _ in 0..2 {
         let application = start(&directory).await;
         assert_eq!(application.endpoint(), endpoint);
-        let snapshot = call(&endpoint, "snapshot", json!({})).await.unwrap();
-        assert_eq!(snapshot["loadError"], Value::Null);
-        assert!(snapshot["config"]["servers"].as_array().unwrap().is_empty());
+        let snapshot = snapshot(&endpoint).await.unwrap();
+        assert_eq!(snapshot.load_error, None);
+        assert!(snapshot.config.servers.is_empty());
         assert!(Instance::acquire(&directory).unwrap().is_none());
         application.stop().await.unwrap();
         assert!(!endpoint.exists());
@@ -150,10 +161,8 @@ async fn reservation_excludes_other_owners_before_any_service_starts_and_transfe
     // A profile with no passwords and no sign-in never reads credential storage.
     assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert!(reserve().is_none());
-    let snapshot = call(application.endpoint(), "snapshot", json!({}))
-        .await
-        .unwrap();
-    assert_eq!(snapshot["loadError"], Value::Null);
+    let snapshot = snapshot(application.endpoint()).await.unwrap();
+    assert_eq!(snapshot.load_error, None);
     application.stop().await.unwrap();
     assert!(reserve().is_some());
 }
@@ -166,8 +175,8 @@ async fn standalone_start_dispatch_shutdown_and_restart_preserve_profile_and_rel
     let server = json!({"id":id,"name":"Standalone fixture","sshHost":"127.0.0.1","sshPort":9,"sshUser":"fixture"});
     let mut application = start(directory.path()).await;
     let endpoint = application.endpoint().to_owned();
-    let first = call(&endpoint, "snapshot", json!({})).await.unwrap();
-    assert!(first["config"]["servers"].as_array().unwrap().is_empty());
+    let first = snapshot(&endpoint).await.unwrap();
+    assert!(first.config.servers.is_empty());
     assert!(
         Application::start(
             Store::for_test(directory.path().into()),
@@ -196,25 +205,49 @@ async fn standalone_start_dispatch_shutdown_and_restart_preserve_profile_and_rel
     assert!(
         crate::credentials::register(Arc::new(Store::for_test(directory.path().into()))).is_err()
     );
-    let snapshot = call(&endpoint, "snapshot", json!({})).await.unwrap();
-    assert_eq!(snapshot["config"]["servers"][0]["id"], id.to_string());
-    assert!(!snapshot.to_string().contains("fixture secret"));
+    let saved = snapshot(&endpoint).await.unwrap();
+    assert_eq!(saved.config.servers[0].id, id);
+    assert!(!format!("{saved:?}").contains("fixture secret"));
     let stored: serde_json::Value =
         serde_json::from_slice(&std::fs::read(directory.path().join("preferences.json")).unwrap())
             .unwrap();
     assert_eq!(stored["sidebarWidth"], 260.0);
-    assert_eq!(
-        call(&endpoint, "git_pending_operations", json!({"serverId":id}))
-            .await
-            .unwrap(),
-        json!([])
-    );
-    assert_eq!(
-        call(&endpoint, "get_startup_settings", json!({}))
-            .await
-            .unwrap()["available"],
-        false
-    );
+    let receipts_endpoint = endpoint.clone();
+    let receipts = tokio::task::spawn_blocking(move || {
+        rpc::test_fixture::execute(
+            receipts_endpoint,
+            "git_pending_operations",
+            json!({"serverId":id}),
+            Duration::from_secs(30),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        receipts,
+        newport_protocol::desktop::Reply::Git(reply)
+            if matches!(*reply, newport_protocol::desktop::git::Reply::PendingOperations(ref receipts) if receipts.receipts.is_empty())
+    ));
+    let startup_endpoint = endpoint.clone();
+    let startup = tokio::task::spawn_blocking(move || {
+        newport_client::backend::Backend::at_path(startup_endpoint).execute(
+            newport_protocol::desktop::Operation::Host(Box::new(
+                newport_protocol::desktop::host::Operation::StartupSettings(Box::new(
+                    newport_protocol::common::Present {},
+                )),
+            )),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        startup,
+        newport_protocol::desktop::Reply::Host(reply)
+            if matches!(&*reply, newport_protocol::desktop::host::Reply::StartupSettings(startup)
+                if !startup.available)
+    ));
     assert!(
         call(&endpoint, "activate_window", json!({}))
             .await
@@ -229,13 +262,11 @@ async fn standalone_start_dispatch_shutdown_and_restart_preserve_profile_and_rel
     application.wait().await.unwrap();
     application.stop().await.unwrap();
     assert!(crate::credentials::get(id).is_err());
-    assert!(call(&endpoint, "snapshot", json!({})).await.is_err());
+    assert!(snapshot(&endpoint).await.is_err());
     let restarted = start(directory.path()).await;
-    let second = call(restarted.endpoint(), "snapshot", json!({}))
-        .await
-        .unwrap();
-    assert_ne!(first["instanceId"], second["instanceId"]);
-    assert_eq!(second["config"], snapshot["config"]);
+    let second = snapshot(restarted.endpoint()).await.unwrap();
+    assert_ne!(first.instance_id, second.instance_id);
+    assert_eq!(second.config, saved.config);
     assert_eq!(&*crate::credentials::get(id).unwrap(), "fixture secret");
     assert_eq!(
         std::fs::read(directory.path().join("profiles.json")).unwrap(),
@@ -277,12 +308,11 @@ async fn standalone_start_dispatch_shutdown_and_restart_preserve_profile_and_rel
         .await
         .unwrap()
         .unwrap();
-    let error = call(locked.endpoint(), "snapshot", json!({}))
+    let error = snapshot(locked.endpoint())
         .await
-        .unwrap()["loadError"]
-        .as_str()
         .unwrap()
-        .to_owned();
+        .load_error
+        .unwrap();
     assert!(error.contains("Cannot unlock saved profiles"), "{error}");
     assert!(
         call(locked.endpoint(), "save_server", json!({"server":server}))

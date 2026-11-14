@@ -2,6 +2,9 @@
 //! thread parses the server's messages and a writer thread sends ours, so the
 //! UI thread never blocks on the connection. Server requests Newport doesn't
 //! act on get neutral answers; dropping a pending request cancels it.
+use newport_protocol::lsp::{
+    Configuration, Environment, FilesChanged, Notification, Server, WatchError,
+};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -27,7 +30,7 @@ const OUTBOUND_OVERFLOW: &str = "The language server stopped reading and was dis
 /// What the editor asks the backend to start.
 pub struct Open<'a> {
     pub server_id: &'a str,
-    pub expected_connection: &'a Value,
+    pub expected_connection: Option<&'a newport_protocol::desktop::configuration::ConnectionScope>,
     pub root: &'a str,
     /// A server id Needle knows, such as `rust-analyzer`.
     pub server: &'a str,
@@ -37,8 +40,18 @@ pub struct Open<'a> {
 
 #[derive(Debug, PartialEq)]
 pub enum Event {
-    /// A server notification, or one of the worker's `$/newport/*` states.
+    /// A language server notification.
     Notification { method: String, params: Value },
+    /// How far the worker got preparing the server's environment.
+    Environment(Environment),
+    /// What the server starts with, before it starts.
+    Configuration(Configuration),
+    /// The server process started, is missing or ended.
+    Server(Server),
+    /// Files that changed in the worktree.
+    FilesChanged(FilesChanged),
+    /// Watching the worktree failed or lost events.
+    WatchError(WatchError),
     /// A request requiring workspace state. Answering never blocks the reader.
     Request(IncomingRequest),
     /// The stream ended; `error` says why when it wasn't a clean stop.
@@ -185,7 +198,11 @@ impl Connection {
             let mut input = BufReader::new(crate::lsp_stream::Frames::new(input));
             let failure = loop {
                 match read_message(&mut input) {
-                    Ok(Some(body)) => dispatch(&reader, &events, &folders, &body),
+                    Ok(Some(body)) => {
+                        if let Err(error) = dispatch(&reader, &events, &folders, &body) {
+                            break Some(error);
+                        }
+                    }
                     Ok(None) => break None,
                     Err(error) => break Some(error.to_string()),
                 }
@@ -410,19 +427,23 @@ impl Drop for Pending {
     }
 }
 
+/// Routes one message. A worker notification it can't read ends the connection,
+/// since the editor would otherwise show the server in the wrong state.
 fn dispatch(
     inner: &Arc<Inner>,
     events: &async_channel::Sender<Event>,
     folders: &Value,
     body: &[u8],
-) {
+) -> Result<(), String> {
     let Ok(message) = serde_json::from_slice::<Value>(body) else {
-        return;
+        return Ok(());
     };
     let method = message["method"].as_str();
     match (message.get("id"), method) {
         (Some(id), None) => {
-            let Some(id) = id.as_i64() else { return };
+            let Some(id) = id.as_i64() else {
+                return Ok(());
+            };
             let reply = inner
                 .pending()
                 .as_mut()
@@ -453,7 +474,7 @@ fn dispatch(
                         inner: Arc::downgrade(inner),
                     }),
                 );
-                return;
+                return Ok(());
             }
             let configuration = inner
                 .configuration
@@ -468,16 +489,32 @@ fn dispatch(
             inner.send(&response);
         }
         (None, Some(method)) => {
-            notify_ui(
-                events,
-                Event::Notification {
+            let params = message.get("params").cloned().unwrap_or(Value::Null);
+            let event = match method {
+                Environment::METHOD => Event::Environment(worker_notification(params)?),
+                Configuration::METHOD => Event::Configuration(worker_notification(params)?),
+                Server::METHOD => Event::Server(worker_notification(params)?),
+                FilesChanged::METHOD => Event::FilesChanged(worker_notification(params)?),
+                WatchError::METHOD => Event::WatchError(worker_notification(params)?),
+                _ => Event::Notification {
                     method: method.to_owned(),
-                    params: message.get("params").cloned().unwrap_or(Value::Null),
+                    params,
                 },
-            );
+            };
+            notify_ui(events, event);
         }
         (None, None) => {}
     }
+    Ok(())
+}
+
+fn worker_notification<N: Notification>(params: Value) -> Result<N, String> {
+    serde_json::from_value(params).map_err(|error| {
+        format!(
+            "The language server worker sent a {} message Newport couldn’t read: {error}",
+            N::METHOD
+        )
+    })
 }
 
 /// Queue an event unless the UI has fallen behind. Responses never come
@@ -751,13 +788,75 @@ mod tests {
         let (connection, events, mut from_client, mut to_client) = connect();
         server_says(
             &mut to_client,
-            json!({"jsonrpc": "2.0", "method": "$/newport/environment", "params": {"state": "loaded"}}),
+            json!({"jsonrpc": "2.0", "method": "$/newport/environment",
+                "params": {"state": "loaded", "path": "/w/.envrc"}}),
+        );
+        assert_eq!(
+            block_on(events.recv()).unwrap(),
+            Event::Environment(Environment::Loaded {
+                path: "/w/.envrc".into()
+            })
+        );
+        server_says(
+            &mut to_client,
+            json!({"jsonrpc": "2.0", "method": "$/newport/server",
+                "params": {"state": "missing", "server": "gopls"}}),
+        );
+        assert_eq!(
+            block_on(events.recv()).unwrap(),
+            Event::Server(Server::Missing {
+                server: "gopls".into()
+            })
+        );
+        server_says(
+            &mut to_client,
+            json!({"jsonrpc": "2.0", "method": "$/newport/configuration",
+                "params": {"settings": {"a": 1}, "initializationOptions": {}, "fileWatch": true}}),
+        );
+        assert_eq!(
+            block_on(events.recv()).unwrap(),
+            Event::Configuration(Configuration {
+                settings: json!({"a": 1}),
+                initialization_options: json!({}),
+                settings_error: None,
+                file_watch: true,
+                watch_error: None,
+            })
+        );
+        server_says(
+            &mut to_client,
+            json!({"jsonrpc": "2.0", "method": "$/newport/filesChanged",
+                "params": {"changes": [{"uri": "file:///w/a", "type": 3}]}}),
+        );
+        assert_eq!(
+            block_on(events.recv()).unwrap(),
+            Event::FilesChanged(FilesChanged {
+                changes: vec![newport_protocol::lsp::FileChange {
+                    uri: "file:///w/a".into(),
+                    kind: newport_protocol::lsp::FileChangeKind::Deleted,
+                }]
+            })
+        );
+        server_says(
+            &mut to_client,
+            json!({"jsonrpc": "2.0", "method": "$/newport/watchError",
+                "params": {"error": "lost events"}}),
+        );
+        assert_eq!(
+            block_on(events.recv()).unwrap(),
+            Event::WatchError(WatchError {
+                error: "lost events".into()
+            })
+        );
+        server_says(
+            &mut to_client,
+            json!({"jsonrpc": "2.0", "method": "window/logMessage", "params": {"a": 1}}),
         );
         assert_eq!(
             block_on(events.recv()).unwrap(),
             Event::Notification {
-                method: "$/newport/environment".into(),
-                params: json!({"state": "loaded"})
+                method: "window/logMessage".into(),
+                params: json!({"a": 1})
             }
         );
         let waiting = connection.request_value("shutdown", Value::Null);
@@ -770,6 +869,43 @@ mod tests {
             Event::Closed { error: None }
         );
         assert!(block_on(connection.request_value("x", Value::Null)).is_err());
+    }
+
+    #[test]
+    fn a_malformed_worker_notification_closes_the_connection_with_why() {
+        for (method, params, why) in [
+            (
+                "$/newport/environment",
+                json!({"state": "paused"}),
+                "paused",
+            ),
+            ("$/newport/server", json!({"state": "paused"}), "paused"),
+            (
+                "$/newport/configuration",
+                json!({"settings": {}, "initializationOptions": {}}),
+                "fileWatch",
+            ),
+            (
+                "$/newport/filesChanged",
+                json!({"changes": [{"uri": "file:///w/a", "type": 4}]}),
+                "unknown file change type 4",
+            ),
+            ("$/newport/watchError", json!({}), "missing field `error`"),
+        ] {
+            let (connection, events, mut from_client, mut to_client) = connect();
+            let waiting = connection.request_value("initialize", Value::Null);
+            client_said(&mut from_client);
+            server_says(
+                &mut to_client,
+                json!({"jsonrpc": "2.0", "method": method, "params": params}),
+            );
+            let Event::Closed { error: Some(error) } = block_on(events.recv()).unwrap() else {
+                panic!("{method}: expected the connection to close with an error");
+            };
+            assert!(error.contains(method), "{error}");
+            assert!(error.contains(why), "{error}");
+            assert_eq!(block_on(waiting).unwrap_err(), STOPPED);
+        }
     }
 
     #[test]

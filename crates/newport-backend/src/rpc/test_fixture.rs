@@ -3,8 +3,8 @@
 use newport_protocol::{
     common::{Present, Secret},
     desktop::{
-        self, configuration as config, connection, containers, events, files, git, host, metrics,
-        preferences, services, terminal,
+        self, configuration as config, connection, containers, files, git, host, metrics,
+        preferences, services,
     },
 };
 use serde::de::DeserializeOwned;
@@ -28,14 +28,14 @@ fn defaulted<T: DeserializeOwned + Default>(value: &Value, key: &str) -> Result<
     optional(value, key).map(Option::unwrap_or_default)
 }
 fn model_server(value: &Value, key: &str) -> Result<config::Server, String> {
-    get(value, key).map(super::configuration::server)
+    get(value, key).map(|server: crate::model::Server| config::Server::from(&server))
 }
 fn model_tunnel(value: &Value, key: &str) -> Result<config::Tunnel, String> {
-    get(value, key).map(super::configuration::tunnel)
+    get(value, key).map(|tunnel: crate::model::Tunnel| config::Tunnel::from(&tunnel))
 }
 fn tunnels(value: &Value, key: &str) -> Result<Vec<config::Tunnel>, String> {
     get::<Vec<crate::model::Tunnel>>(value, key)
-        .map(|rows| rows.into_iter().map(super::configuration::tunnel).collect())
+        .map(|rows: Vec<crate::model::Tunnel>| rows.iter().map(config::Tunnel::from).collect())
 }
 fn scope(value: &Value) -> Result<config::ConnectionScope, String> {
     let decode = || -> Result<_, String> {
@@ -61,13 +61,37 @@ fn scope(value: &Value) -> Result<config::ConnectionScope, String> {
                 identity_file: at(rows, 5)?,
                 agent_source: at(rows, 6)?,
                 agent_key_fingerprint: at(rows, 7)?,
-                proxy: proxy.map(super::configuration::proxy),
+                proxy: proxy.as_ref().map(config::Proxy::from),
             },
             connection_revision: at(rows, 9)?,
             backend_instance: at(rows, 10)?,
         })
     };
     decode().map_err(|_| "The server connection changed. Reopen the project.".into())
+}
+/// The list form `scope` reads, for fixtures that describe calls in JSON.
+pub(crate) fn tuple(scope: &config::ConnectionScope) -> Value {
+    let settings = &scope.settings;
+    serde_json::json!([
+        settings.server_id,
+        settings.ssh_host,
+        settings.ssh_user,
+        settings.ssh_port,
+        match settings.auth_method {
+            config::AuthMethod::PublicKey => "publicKey",
+            config::AuthMethod::Password => "password",
+        },
+        settings.identity_file,
+        settings.agent_source,
+        settings.agent_key_fingerprint,
+        match &settings.proxy {
+            None => Value::Null,
+            Some(config::Proxy::Command(command)) => serde_json::json!({"command": **command}),
+            Some(config::Proxy::Jump(id)) => serde_json::json!({"jump": **id}),
+        },
+        scope.connection_revision,
+        scope.backend_instance,
+    ])
 }
 fn expected(args: &Value) -> Result<config::ConnectionScope, String> {
     scope(field(args, "expectedConnection")?)
@@ -93,7 +117,7 @@ fn local_path(args: &Value) -> Result<files::NativePath, String> {
         )))
     }
 }
-fn project(value: &Value) -> Result<preferences::Project, String> {
+pub(crate) fn project(value: &Value) -> Result<preferences::Project, String> {
     let project: crate::preferences::projects::Project =
         serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
     Ok(preferences::Project {
@@ -107,7 +131,6 @@ fn project(value: &Value) -> Result<preferences::Project, String> {
 pub(crate) fn operation(method: &str, a: Value) -> Result<desktop::Operation, String> {
     use desktop::Operation as O;
     Ok(match method {
-        "snapshot" => O::Configuration(Box::new(config::Operation::Snapshot(Box::new(Present {})))),
         "save_server" => O::Configuration(Box::new(config::Operation::SaveServer(Box::new(
             config::SaveServerArgs {
                 server: model_server(&a, "server")?,
@@ -190,7 +213,7 @@ pub(crate) fn operation(method: &str, a: Value) -> Result<desktop::Operation, St
                     .get("expected")
                     .map(|v| {
                         serde_json::from_value(v.clone())
-                            .map(super::configuration::tunnel)
+                            .map(|tunnel: crate::model::Tunnel| config::Tunnel::from(&tunnel))
                             .map_err(|e| e.to_string())
                     })
                     .transpose()?,
@@ -246,9 +269,6 @@ pub(crate) fn operation(method: &str, a: Value) -> Result<desktop::Operation, St
                 refresh: defaulted(&a, "refresh")?,
             }),
         ))),
-        "get_startup_settings" => O::Host(Box::new(host::Operation::StartupSettings(Box::new(
-            Present {},
-        )))),
         "set_window_preferences" => {
             let p = field(&a, "preferences")?;
             O::Preferences(Box::new(preferences::Operation::SetWindow(Box::new(
@@ -315,11 +335,6 @@ pub(crate) fn operation(method: &str, a: Value) -> Result<desktop::Operation, St
                 operation_id: get(&a, "operationId")?,
             },
         )))),
-        "$events" => O::Events(Box::new(events::Operation::Poll(Box::new(
-            events::PollArgs {
-                after: get(&a, "after")?,
-            },
-        )))),
         "cockpit_history" => O::Metrics(Box::new(metrics::Operation::History(Box::new(
             metrics::HistoryArgs {
                 server: get(&a, "id")?,
@@ -331,11 +346,6 @@ pub(crate) fn operation(method: &str, a: Value) -> Result<desktop::Operation, St
         }
         "clear_metrics_cache" => O::Metrics(Box::new(metrics::Operation::ClearCache(Box::new(
             Present {},
-        )))),
-        "terminal_close" => O::Terminal(Box::new(terminal::Operation::Close(Box::new(
-            terminal::CloseArgs {
-                session: get(&a, "session")?,
-            },
         )))),
         "files_list" => O::Files(Box::new(files::Operation::List(Box::new(
             files::ListArgs {
@@ -458,6 +468,29 @@ pub(crate) fn operation(method: &str, a: Value) -> Result<desktop::Operation, St
         _ => return Err("Unknown command".into()),
     })
 }
+/// The backend's configuration snapshot, read typed as the app reads it.
+pub(crate) fn snapshot(endpoint: PathBuf, timeout: Duration) -> Result<config::Snapshot, String> {
+    let reply = newport_client::backend::Backend::at_path(endpoint)
+        .execute_with_timeout(
+            desktop::Operation::Configuration(Box::new(config::Operation::Snapshot(Box::new(
+                Present {},
+            )))),
+            timeout,
+        )
+        .map_err(|e| format!("{}: {e}", e.code()))?;
+    newport_client::backend::snapshot_reply(reply).map_err(|e| e.to_string())
+}
+/// A fixture method's decoded reply, for replies the app reads typed.
+pub(crate) fn execute(
+    endpoint: PathBuf,
+    method: &str,
+    args: Value,
+    timeout: Duration,
+) -> Result<desktop::Reply, String> {
+    newport_client::backend::Backend::at_path(endpoint)
+        .execute_with_timeout(operation(method, args)?, timeout)
+        .map_err(|e| format!("{}: {e}", e.code()))
+}
 pub(crate) fn call(
     endpoint: PathBuf,
     method: &str,
@@ -465,27 +498,16 @@ pub(crate) fn call(
     timeout: Duration,
 ) -> Result<Value, String> {
     let operation = operation(method, args)?;
-    let request = match &operation {
-        desktop::Operation::Git(command) => match command.as_ref() {
-            git::Operation::Request(args) => Some(args.request.clone()),
-            _ => None,
-        },
-        _ => None,
-    };
     let reply = newport_client::backend::Backend::at_path(endpoint)
         .execute_with_timeout(operation, timeout)
         .map_err(|e| format!("{}: {e}", e.code()))?;
     if let desktop::Reply::Git(command) = &reply
         && let git::Reply::Request(result) = command.as_ref()
     {
-        return crate::git::project_result(
-            result.as_ref(),
-            request.as_ref().ok_or("Missing Git request")?,
-        )
-        .map_err(|e| e.to_string());
+        return crate::git::project_result(result.as_ref()).map_err(|e| e.to_string());
     }
-    // The app reads transfer replies in its native transfer adapter, not the
-    // JSON projection; fixtures see the destination it would report.
+    // Fixtures see the destination the app's native transfer adapter would
+    // report, and a listing's folder and entries.
     if let desktop::Reply::Files(command) = reply {
         return match *command {
             files::Reply::Upload(result) | files::Reply::Download(result) => {
@@ -498,13 +520,64 @@ pub(crate) fn call(
                     }
                 }
             }
-            other => {
-                newport_client::desktop_result::project(desktop::Reply::Files(Box::new(other)))
-                    .map_err(|e| e.to_string())
-            }
+            files::Reply::List(listing) => Ok(serde_json::json!({
+                "path": listing.path,
+                "entries": listing
+                    .entries
+                    .iter()
+                    .map(|entry| serde_json::json!({"name": entry.name, "path": entry.path}))
+                    .collect::<Vec<_>>(),
+            })),
+            files::Reply::Cancel(_) => Ok(Value::Null),
+            _ => Err("This file reply is read as a typed reply".into()),
         };
     }
-    newport_client::desktop_result::project(reply).map_err(|e| e.to_string())
+    acknowledged(reply)
+}
+
+/// What fixtures read back from a write: a forward batch's saved tunnels, or
+/// null for an acknowledgement.
+fn acknowledged(reply: desktop::Reply) -> Result<Value, String> {
+    let typed = || Err("This reply is read as a typed reply".to_owned());
+    match reply {
+        desktop::Reply::Configuration(reply) => match *reply {
+            config::Reply::Snapshot(_) => typed(),
+            config::Reply::ForwardTunnelBatch(batch) => serde_json::to_value(
+                batch
+                    .tunnels
+                    .iter()
+                    .map(crate::model::Tunnel::from)
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|e| e.to_string()),
+            _ => Ok(Value::Null),
+        },
+        // Setup fixtures check only that the server reported a plan.
+        desktop::Reply::Connection(reply) => match *reply {
+            connection::Reply::SetupInspect(inspection) => Ok(serde_json::json!({
+                "installed": inspection.installed,
+                "total": inspection.total,
+            })),
+            connection::Reply::SetupInstall(_)
+            | connection::Reply::SetupFinish(_)
+            | connection::Reply::SetupSkip(_)
+            | connection::Reply::TestConnection(_) => Ok(Value::Null),
+            _ => typed(),
+        },
+        desktop::Reply::Host(reply) => match *reply {
+            host::Reply::Activate(_) | host::Reply::OpenRemoteApp(_) => Ok(Value::Null),
+            _ => typed(),
+        },
+        desktop::Reply::Preferences(reply) => match *reply {
+            preferences::Reply::SetWindow(_) => Ok(Value::Null),
+            _ => typed(),
+        },
+        desktop::Reply::Git(reply) => match *reply {
+            git::Reply::AcknowledgeOperation(_) | git::Reply::ReviewOperation(_) => Ok(Value::Null),
+            _ => typed(),
+        },
+        _ => typed(),
+    }
 }
 
 /// Test-only bridge for existing business fixture syntax. No method names or

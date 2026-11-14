@@ -18,7 +18,6 @@ mod keychain;
 mod notices;
 mod package;
 mod patched;
-mod pdfium;
 mod pe;
 mod process;
 mod protocol_reference;
@@ -30,6 +29,7 @@ mod ssh;
 #[cfg(all(test, unix))]
 mod test_support;
 mod trace;
+mod typed_ui;
 mod util;
 mod windows_clipboard_tests;
 mod windows_window_tests;
@@ -97,23 +97,27 @@ enum Task {
     },
     /// Build and stage the tree-sitter grammar libraries.
     Grammars(BuildArgs),
-    /// Download, verify and stage PDFium (Windows targets).
-    Pdfium(BuildArgs),
-    /// Generate the patched dependencies in patches/ from their crates.io
+    /// Generate the patched dependencies in vendor/ from their crates.io
     /// releases and patches; every other task does this first.
     Patched {
-        /// Write this crate's patch from the edits made to its generated source.
-        #[arg(long, value_name = "CRATE")]
+        /// Write this patch (patches/<crate>/NNN-<subject>.patch) from the
+        /// edits made to the crate's generated source; it must be the crate's
+        /// last patch.
+        #[arg(long, value_name = "PATCH")]
         save: Option<String>,
     },
     /// Build the Linux agent binaries in Docker, or verify prebuilt ones with NEWPORT_PREBUILT=1.
     Agents {
         /// Build the full agent resources from the private checkout.
-        #[arg(long, conflicts_with_all = ["if_changed", "architectures"])]
+        #[arg(long, conflicts_with_all = ["if_changed", "architectures", "clean"])]
         remote_apps: bool,
         /// Only when they are missing or older than the agent's sources.
         #[arg(long)]
         if_changed: bool,
+        /// Compile everything again instead of reusing the build Docker
+        /// caches for every checkout, as a release does.
+        #[arg(long, conflicts_with = "if_changed")]
+        clean: bool,
         /// Only these architectures (x86_64, aarch64); default both. CI
         /// builds each on a runner of that architecture.
         #[arg(long = "arch", conflicts_with = "if_changed")]
@@ -264,8 +268,8 @@ enum TestSuite {
 
 fn main() -> Result<()> {
     let task = Cli::parse().command;
-    if let Task::Patched { save: Some(name) } = &task {
-        return patched::save(name);
+    if let Task::Patched { save: Some(path) } = &task {
+        return patched::save(path);
     }
     patched::ensure_all()?;
     match task {
@@ -275,7 +279,6 @@ fn main() -> Result<()> {
         Task::Dev { remote_apps, args } => check::dev(&args, remote_apps),
         Task::Build { build, remote_apps } => check::build(&build, remote_apps),
         Task::Grammars(args) => grammars::build(args.release, args.target().as_deref()).map(drop),
-        Task::Pdfium(args) => pdfium::stage(args.release, args.target().as_deref()).map(drop),
         Task::Agents {
             remote_apps: true, ..
         } => remote_apps::build_full_resources().map(drop),
@@ -283,7 +286,8 @@ fn main() -> Result<()> {
             remote_apps: false,
             if_changed: false,
             architectures,
-        } => remote::build_agents(&architectures),
+            clean,
+        } => remote::build_agents(&architectures, clean),
         Task::Agents {
             if_changed: true, ..
         } => check::agents_if_changed(),
@@ -360,7 +364,11 @@ mod dev_identity_cli_tests {
                 ..
             }
         ));
-        for option in [vec!["--if-changed"], vec!["--arch", "aarch64"]] {
+        for option in [
+            vec!["--if-changed"],
+            vec!["--arch", "aarch64"],
+            vec!["--clean"],
+        ] {
             let mut args = vec!["xtask", "agents", "--remote-apps"];
             args.extend(option);
             assert!(Cli::try_parse_from(args).is_err());
@@ -369,6 +377,7 @@ mod dev_identity_cli_tests {
             vec!["xtask", "agents"],
             vec!["xtask", "agents", "--if-changed"],
             vec!["xtask", "agents", "--arch", "aarch64"],
+            vec!["xtask", "agents", "--clean", "--arch", "aarch64"],
         ] {
             assert!(matches!(
                 Cli::try_parse_from(args).unwrap().command,

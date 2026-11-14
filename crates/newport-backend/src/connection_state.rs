@@ -4,8 +4,9 @@ use newport_domain::connectivity::{Phase, ServerState, Snapshot};
 use newport_ssh::{Login, Reach, Retry, Status};
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -18,10 +19,14 @@ struct State {
     entries: HashMap<Uuid, Entry>,
     snapshot: Snapshot,
 }
+/// Each ready server's latest ping round trip. Apart from the snapshot, so
+/// readings that change every few seconds never look like a connection change.
+pub type Latencies = BTreeMap<Uuid, Duration>;
 #[derive(Clone)]
 pub(crate) struct Store {
     state: Arc<Mutex<State>>,
     updates: watch::Sender<Snapshot>,
+    latencies: watch::Sender<Latencies>,
 }
 impl Default for Store {
     fn default() -> Self {
@@ -40,10 +45,14 @@ impl Store {
                 snapshot: snapshot.clone(),
             })),
             updates: watch::channel(snapshot).0,
+            latencies: watch::channel(Latencies::new()).0,
         }
     }
     pub fn subscribe(&self) -> watch::Receiver<Snapshot> {
         self.updates.subscribe()
+    }
+    pub fn latencies(&self) -> watch::Receiver<Latencies> {
+        self.latencies.subscribe()
     }
     pub fn register(&self, server: Uuid, revision: u64) -> Publisher {
         let owner = Uuid::new_v4();
@@ -75,6 +84,8 @@ impl Store {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.entries.remove(&server);
         self.publish(&mut state);
+        self.latencies
+            .send_if_modified(|latencies| latencies.remove(&server).is_some());
     }
     pub fn clear(&self) {
         let mut state = self
@@ -83,6 +94,11 @@ impl Store {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.entries.clear();
         self.publish(&mut state);
+        self.latencies.send_if_modified(|latencies| {
+            let any = !latencies.is_empty();
+            latencies.clear();
+            any
+        });
     }
     fn publish(&self, state: &mut State) {
         let servers = state
@@ -125,6 +141,28 @@ impl Publisher {
             ..server_state(status, generation)
         };
         self.store.publish(&mut state);
+    }
+
+    /// Publishes the link's latest ping round trip, or that it has none.
+    pub fn latency(&self, latency: Option<Duration>) {
+        let state = self
+            .store
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state
+            .entries
+            .get(&self.server)
+            .is_some_and(|e| e.owner == self.owner)
+        {
+            return;
+        }
+        self.store
+            .latencies
+            .send_if_modified(|latencies| match latency {
+                Some(latency) => latencies.insert(self.server, latency) != Some(latency),
+                None => latencies.remove(&self.server).is_some(),
+            });
     }
 }
 
@@ -216,6 +254,29 @@ mod tests {
         store.remove(id);
         next.status(&ready(), 1);
         assert!(updates.borrow().servers.is_empty());
+    }
+
+    #[test]
+    fn latency_readings_leave_the_snapshot_alone_and_follow_the_owner() {
+        let store = Store::default();
+        let updates = store.subscribe();
+        let latencies = store.latencies();
+        let id = Uuid::new_v4();
+        let old = store.register(id, 1);
+        let next = store.register(id, 2);
+        next.status(&ready(), 1);
+        let revision = updates.borrow().revision;
+        let reading = Duration::from_millis(24);
+        old.latency(Some(Duration::from_millis(900)));
+        assert!(latencies.borrow().is_empty());
+        next.latency(Some(reading));
+        assert_eq!(latencies.borrow().get(&id), Some(&reading));
+        assert_eq!(updates.borrow().revision, revision);
+        next.latency(None);
+        assert!(latencies.borrow().is_empty());
+        next.latency(Some(reading));
+        store.remove(id);
+        assert!(latencies.borrow().is_empty());
     }
 
     #[test]

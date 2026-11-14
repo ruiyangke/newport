@@ -6,6 +6,7 @@ use super::super::{
 };
 use super::*;
 use base64::{Engine, engine::general_purpose::STANDARD};
+use newport_protocol::git::code;
 use std::ffi::OsString;
 fn strings(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
@@ -284,7 +285,7 @@ pub(super) fn working(
         || snapshot.p.is_some()
     {
         return Err(Error::new(
-            "STALE_SNAPSHOT",
+            code::STALE_SNAPSHOT,
             "The file changed. Refresh status.",
         ));
     }
@@ -292,7 +293,12 @@ pub(super) fn working(
         .rows
         .iter()
         .find(|r| r["entryId"] == entry)
-        .ok_or_else(|| Error::new("STALE_ENTRY", "The changed file is no longer available."))?;
+        .ok_or_else(|| {
+            Error::new(
+                code::STALE_ENTRY,
+                "The changed file is no longer available.",
+            )
+        })?;
     let paths = EntryRef::decode(entry)?.paths()?;
     let mut base = strings(&["--literal-pathspecs", "diff"]);
     match side {
@@ -342,7 +348,7 @@ pub(super) fn working(
     }
     if status::capture(repo)?.fingerprint != snapshot.f {
         return Err(Error::new(
-            "STALE_SNAPSHOT",
+            code::STALE_SNAPSHOT,
             "The file changed while reading its diff.",
         ));
     }

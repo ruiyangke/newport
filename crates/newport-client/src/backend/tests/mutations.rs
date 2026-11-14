@@ -34,13 +34,20 @@ fn apply_once(action: git::Action, snapshot: &str) {
             .apply_reviewed_action(SERVER, "repo", snapshot, action, id)
             .unwrap()
             .state,
-        crate::git_operation::State::Succeeded
+        git::OperationState::Succeeded
     );
     task.join().unwrap();
 }
 #[test]
 fn partial_index_write_keeps_the_reviewed_ids_and_snapshot() {
-    let page = json!({"nextCursor":"more","metadata":{"readOnly":false,"totalFiles":1,"sourceSnapshot":"reviewed","entryId":"file","side":"index_to_worktree","contextLines":3},"entries":[{"fileIndex":0,"status":"Modified","oldMode":33188,"newMode":33188,"oldPath":{"bytesB64":"Zg=="},"newPath":{"bytesB64":"Zg=="},"hunks":[{"id":"hunk","totalLines":2,"lines":[{"lineIndex":0,"id":"line","origin":"+","lineComplete":true}]}]}]});
+    let mut page = crate::git_diff_page::tests::page(true);
+    page.next_cursor = Some("more".into());
+    page.metadata.source_snapshot = Some("reviewed".into());
+    page.metadata.entry_id = Some("file".into());
+    let hunk = &mut page.entries[0].hunks[0];
+    hunk.id = Some("hunk".into());
+    hunk.total_lines = 2;
+    hunk.lines[0].id = Some("line".into());
     let review = crate::git_selection::Review::from_page(&page).unwrap();
     let host = Host::new();
     let backend = Backend::at_path(host.path.clone());
@@ -88,12 +95,47 @@ fn discard_dispatches_once_with_the_reviewed_snapshot_and_restore_source() {
         crate::git_discard::Source::Index,
         crate::git_discard::Source::Head,
     ] {
-        let entry = json!({"entryId":"e","unstaged":true});
-        let review = crate::git_discard::Review::file(
-            &json!({"snapshot":"reviewed","entries":[entry]}),
-            &entry,
-        )
-        .unwrap();
+        let entry = git::StatusEntry {
+            entry_id: "e".into(),
+            path: git::Path::new(b"file"),
+            old_path: None,
+            flags: 0,
+            staged: false,
+            unstaged: true,
+            untracked: false,
+            conflicted: false,
+            conflict: None,
+        };
+        let status = git::Page {
+            snapshot: "reviewed".into(),
+            entries: vec![entry.clone()],
+            next_cursor: None,
+            metadata: git::StatusSummary {
+                head: git::Head {
+                    oid: None,
+                    name: None,
+                    detached: false,
+                    unborn: true,
+                },
+                operation_state: "none".into(),
+                integration: None,
+                ahead: None,
+                behind: None,
+                basis: "local".into(),
+                upstream_ref: None,
+                upstream: None,
+                truncated: false,
+                total_entries: 1,
+                group_counts: git::GroupCounts {
+                    staged: 0,
+                    unstaged: 1,
+                    untracked: 0,
+                    conflicted: 0,
+                },
+                matched_entries: None,
+            },
+        };
+        let review = crate::git_discard::Review::file(Some(&status), Some(&entry)).unwrap();
         let expected = review.action(source).unwrap();
         let host = Host::new();
         let backend = Backend::at_path(host.path.clone());
@@ -300,7 +342,7 @@ fn branch_action_disconnect_is_not_replayed_and_recovers_original_operation_id()
     assert!(error.message.contains("not retried"));
     assert_eq!(
         backend.git_operation(SERVER, id).unwrap().state,
-        crate::git_operation::State::Succeeded
+        git::OperationState::Succeeded
     );
     task.join().unwrap();
 }
@@ -340,7 +382,27 @@ fn malformed_creation_outcome_remains_uncertain() {
 }
 #[test]
 fn reviewed_branch_actions_preserve_snapshot_oid_token_and_explicit_force() {
-    let entry = |name: &str, remote: bool| json!({"name":git::Path::new(name.as_bytes()),"reference":git::Path::new(format!("refs/{}/{name}",if remote {"remotes"} else {"heads"}).as_bytes()),"remote":remote,"current":false,"upstream":null,"oid":{"algorithm":"sha1","hex":"a".repeat(40)},"tracking":{"editable":true,"token":"reviewed-tracking"}});
+    let entry = |name: &str, remote: bool| git::Branch {
+        name: git::Path::new(name.as_bytes()),
+        reference: git::Path::new(
+            format!("refs/{}/{name}", if remote { "remotes" } else { "heads" }).as_bytes(),
+        ),
+        oid: git::ObjectId {
+            algorithm: "sha1".into(),
+            hex: "a".repeat(40),
+        },
+        remote,
+        current: false,
+        upstream: None,
+        tracking: Some(git::Tracking {
+            token: "reviewed-tracking".into(),
+            editable: true,
+            configuration: git::TrackingConfiguration {
+                remote: vec![],
+                merge: vec![],
+            },
+        }),
+    };
     let review = crate::git_branch::BranchReview::from_entry(
         "repo",
         "reviewed-snapshot",
@@ -388,7 +450,15 @@ fn git_sync_transfers_dispatch_the_reviewed_snapshot_and_remote_once() {
     for kind in [Kind::Fetch, Kind::Pull, Kind::Push] {
         apply_once(
             target
-                .action(kind, &json!({"name":"origin","token":"reviewed-config"}))
+                .action(
+                    kind,
+                    &git::Remote {
+                        name: "origin".into(),
+                        url: None,
+                        push_url: None,
+                        token: "reviewed-config".into(),
+                    },
+                )
                 .unwrap(),
             &target.snapshot,
         );
@@ -532,7 +602,7 @@ fn bookmark_retry_after_a_lost_save_reply_reuses_the_saved_project_without_git_c
         name: "Project".into(),
         path: canonical.clone(),
     };
-    let expected = newport_client_projection(saved.clone());
+    let expected = saved.clone();
     let task = thread::spawn(move || {
         for attempt in 0..2 {
             let mut peer = host.receive();
@@ -578,12 +648,6 @@ fn bookmark_retry_after_a_lost_save_reply_reuses_the_saved_project_without_git_c
         expected
     );
     task.join().unwrap();
-}
-fn newport_client_projection(project: desktop::preferences::Project) -> Value {
-    crate::desktop_result::project(desktop::Reply::Preferences(Box::new(
-        desktop::preferences::Reply::ProjectsSave(Box::new(project)),
-    )))
-    .unwrap()
 }
 #[test]
 fn terminal_link_opener_rejects_unsafe_schemes_and_dispatches_exact_url_once() {

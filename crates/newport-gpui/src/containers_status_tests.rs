@@ -3,11 +3,10 @@ use super::tests::{FakeBackend, click, draw, element, fixture, select, settle, s
 use gpui::{Entity, TestAppContext, VisualTestContext};
 use gpui_kit as gpui;
 use newport_client::containers::Action;
-use newport_domain::compose::{ComposeJob, JobState};
-use newport_domain::containers::{
+use newport_protocol::monitor::compose::{Job, State};
+use newport_protocol::monitor::containers::{
     ContainerHealth, ContainerInspect, ContainerState, HealthResult, ProjectVerb,
 };
-use serde_json::json;
 use std::{thread, time::Duration};
 
 fn refresh(panel: &Entity<ContainersPanel>, cx: &mut VisualTestContext) {
@@ -167,19 +166,19 @@ fn project_header_shows_compose_start_before_receipt_and_restores_after_rejectio
 #[gpui::test]
 fn project_output_link_is_in_header_and_hidden_on_activity(cx: &mut TestAppContext) {
     let (panel, cx, backend) = fixture(cx);
-    let job = ComposeJob {
+    let job = Job {
         job: "running-project".into(),
         project: "stack".into(),
         command: "docker compose up --detach".into(),
-        state: JobState::Running,
+        state: State::Running,
         started_at: 1_000,
         finished_at: None,
         exit_code: None,
         output: String::new(),
         offset: 0,
     };
-    backend.set_compose_jobs(Ok(json!({"jobs": [job]})));
-    backend.set_compose_output("running-project", Ok(json!(job)));
+    backend.set_compose_jobs(Ok(vec![job.clone()]));
+    backend.set_compose_output("running-project", Ok(job));
     select(&panel, cx, "p:stack");
     panel.update(cx, |p, _| p.client.retry_jobs());
     settle(&panel, cx);
@@ -387,19 +386,19 @@ fn compose_output_link_captures_container_identity_and_opens_only_retained_job(
     cx: &mut TestAppContext,
 ) {
     let (panel, cx, backend) = fixture(cx);
-    let job = ComposeJob {
+    let job = Job {
         job: "running-web".into(),
         project: "stack".into(),
         command: "docker compose up --detach web".into(),
-        state: JobState::Running,
+        state: State::Running,
         started_at: 1_000,
         finished_at: None,
         exit_code: None,
         output: String::new(),
         offset: 0,
     };
-    backend.set_compose_jobs(Ok(json!({"jobs": [job]})));
-    backend.set_compose_output("running-web", Ok(json!(job)));
+    backend.set_compose_jobs(Ok(vec![job.clone()]));
+    backend.set_compose_output("running-web", Ok(job));
     select(&panel, cx, "c:stack-web-1");
     panel.update(cx, |p, _| p.client.retry_jobs());
     settle(&panel, cx);

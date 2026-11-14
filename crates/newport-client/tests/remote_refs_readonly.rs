@@ -4,12 +4,17 @@ use newport_client::{
     backend::Backend,
     git_remote_refs::{Listing, PAGE_SIZE},
 };
-use newport_protocol::{common::Present, desktop, git as protocol};
+use newport_protocol::git as protocol;
 use serde_json::Value;
 
-fn request(backend: &Backend, server: &str, request: protocol::Request) -> Result<Value, String> {
+/// Sends a Git read and returns its checked reply.
+fn reply(
+    backend: &Backend,
+    server: &str,
+    request: protocol::Request,
+) -> Result<protocol::Reply, String> {
     backend
-        .request_git(
+        .git(
             server
                 .parse::<uuid::Uuid>()
                 .map_err(|error| error.to_string())?,
@@ -17,6 +22,10 @@ fn request(backend: &Backend, server: &str, request: protocol::Request) -> Resul
             false,
         )
         .map_err(|error| error.to_string())
+}
+/// [`reply`] as JSON, for assertions on its fields.
+fn request(backend: &Backend, server: &str, request: protocol::Request) -> Result<Value, String> {
+    serde_json::to_value(reply(backend, server, request)?).map_err(|error| error.to_string())
 }
 
 struct Opened<'a> {
@@ -26,7 +35,9 @@ struct Opened<'a> {
 }
 impl Drop for Opened<'_> {
     fn drop(&mut self) {
-        self.backend.release_repository(self.server, &self.repo);
+        if let Some(repo_id) = self.repo["repoId"].as_str() {
+            self.backend.release_repository(self.server, repo_id);
+        }
     }
 }
 
@@ -43,20 +54,19 @@ fn configured_remote_advertisement_accepts_bounded_pages() -> Result<(), String>
     }
     let backend = Backend::discover();
     let snapshot = backend
-        .execute_rendered(desktop::Operation::Configuration(Box::new(
-            desktop::configuration::Operation::Snapshot(Box::new(Present {})),
-        )))
+        .configuration_snapshot()
         .map_err(|error| error.to_string())?;
-    let servers: Vec<_> = snapshot["config"]["servers"]
-        .as_array()
-        .ok_or("Missing servers")?
+    let servers: Vec<_> = snapshot
+        .config
+        .servers
         .iter()
-        .filter(|s| s["sshHost"] == host && s["sshUser"] == user)
+        .filter(|s| s.ssh_host == host && s.ssh_user == user)
         .collect();
     if servers.len() != 1 {
         return Err("Expected exactly one matching configured server".into());
     }
-    let server = servers[0]["id"].as_str().ok_or("Missing server ID")?;
+    let server = servers[0].id.to_string();
+    let server = server.as_str();
     let opened = Opened {
         backend: &backend,
         server,
@@ -74,49 +84,51 @@ fn configured_remote_advertisement_accepts_bounded_pages() -> Result<(), String>
     let repo = opened.repo["repoId"]
         .as_str()
         .ok_or("Missing repository ID")?;
-    let remote = request(
+    let protocol::Reply::Remote(remote) = reply(
         &backend,
         server,
         protocol::Request::Remote {
             repo_id: repo.into(),
             name: remote_name.clone(),
         },
-    )?;
+    )?
+    else {
+        return Err("Invalid remote".into());
+    };
     let mut listing = Listing::default();
     let mut pages = 0;
     // Deliberately stop after three pages rather than draining a large remote.
     for _ in 0..3 {
-        let cursor = listing.page()["nextCursor"].as_str().map(str::to_owned);
-        let response = request(
+        let cursor = listing.page().and_then(|page| page.next_cursor.clone());
+        let protocol::Reply::RemoteRefs(response) = reply(
             &backend,
             server,
             protocol::Request::RemoteRefs {
                 repo_id: repo.into(),
                 remote: remote_name.clone(),
-                expected_token: remote["token"]
-                    .as_str()
-                    .ok_or("Missing remote token")?
-                    .into(),
+                expected_token: remote.token.clone(),
                 for_push: true,
                 filter: String::new(),
                 page_size: PAGE_SIZE,
                 cursor: cursor.clone(),
             },
-        )?;
-        listing.accept(response, &remote, cursor.as_deref())?;
+        )?
+        else {
+            return Err("Invalid remote references".into());
+        };
+        listing.accept(*response, &remote, cursor.as_deref())?;
         pages += 1;
-        if listing.page()["nextCursor"].is_null() {
+        if listing.page().is_none_or(|page| page.next_cursor.is_none()) {
             break;
         }
     }
     // Counts only: no repository contents, URLs or credentials in the test log.
     eprintln!(
         "Validated {pages} remote pages, {} references; more={}",
-        listing.page()["entries"]
-            .as_array()
-            .ok_or("Missing rows")?
-            .len(),
-        listing.page()["nextCursor"].is_string()
+        listing.page().ok_or("Missing rows")?.entries.len(),
+        listing
+            .page()
+            .is_some_and(|page| page.next_cursor.is_some())
     );
     Ok(())
 }

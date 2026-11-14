@@ -371,8 +371,6 @@ struct Staged<'a> {
     pub stage: &'a Path,
     pub layout: &'a Layout,
     pub platform: Platform,
-    pub release: bool,
-    pub target: Option<&'a str>,
     pub expect: build_info::Expect<'a>,
     pub product: &'a util::App,
     pub nsis: bool,
@@ -460,8 +458,6 @@ pub fn run(options: &Options) -> Result<Package> {
         stage: &stage,
         layout: &layout,
         platform,
-        release,
-        target,
         expect: build_info::Expect {
             os: Some(platform.os.as_str()),
             arch: Some(platform.arch.as_str()),

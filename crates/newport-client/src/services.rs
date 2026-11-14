@@ -4,16 +4,11 @@
 //! when the connection identity changes; an old action must never refresh a new
 //! endpoint that happens to reuse the same server ID.
 use crate::{backend::Backend, resources::Resource};
-pub use newport_domain::services::{
-    ActionResult, JournalPage, Scope, ServiceVerb, ServicesSnapshot, UnitFile,
-};
-use newport_domain::services::{action_blocked_reason, available_verbs, valid_unit};
+use newport_domain::services::{action_blocked_reason, available_verbs};
 use newport_protocol::{
     desktop::{self, services as protocol},
-    monitor::services as monitor,
+    monitor::services::{self as monitor, ActionReply, Logs, Scope, Snapshot, UnitFile, Verb},
 };
-use serde::{Serialize, de::DeserializeOwned};
-use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, mpsc},
@@ -30,10 +25,11 @@ const MAX_FILES: usize = 32;
 const MAX_ACTIONS: usize = 32;
 const MAX_CONCURRENT_ACTIONS: usize = 8;
 const MAX_ACTION_COMPLETIONS: usize = 64;
+const INVALID_REPLY: &str = "Invalid Services response.";
 const WORKER_ERROR: &str =
     "Services worker stopped before confirming the result. Refresh before trying again.";
 
-type Outcome = Result<Value, String>;
+type Outcome = Result<protocol::Reply, String>;
 type Dispatch = dyn Fn(protocol::Operation) -> Result<mpsc::Receiver<Outcome>, String>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -57,9 +53,9 @@ struct UnitKey {
 /// An action result belongs to both the unit name and its system/user scope.
 #[derive(Clone, Debug)]
 pub struct ActionStatus {
-    pub verb: ServiceVerb,
+    pub verb: Verb,
     pub pending: bool,
-    pub result: Option<ActionResult>,
+    pub result: Option<ActionReply>,
     pub error: Option<String>,
 }
 
@@ -68,8 +64,8 @@ pub struct ActionStatus {
 pub struct ActionCompletion {
     pub unit: String,
     pub scope: Scope,
-    pub verb: ServiceVerb,
-    pub result: Result<ActionResult, String>,
+    pub verb: Verb,
+    pub result: Result<ActionReply, String>,
 }
 
 struct Slot<T> {
@@ -99,7 +95,7 @@ enum Job {
     Snapshot,
     Logs(LogKey),
     File(UnitKey),
-    Action(UnitKey, ServiceVerb),
+    Action(UnitKey, Verb),
 }
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Kind {
@@ -127,15 +123,15 @@ struct Pending {
 pub struct Services {
     server: String,
     retired: bool,
-    snapshot: Slot<ServicesSnapshot>,
-    logs: VecDeque<(LogKey, Slot<JournalPage>)>,
+    snapshot: Slot<Snapshot>,
+    logs: VecDeque<(LogKey, Slot<Logs>)>,
     files: VecDeque<(UnitKey, Slot<UnitFile>)>,
     actions: VecDeque<(UnitKey, ActionStatus)>,
     action_completions: VecDeque<ActionCompletion>,
     action_resource: Resource,
     selected_logs: Option<LogKey>,
     selected_file: Option<UnitKey>,
-    logs_placeholder: Option<JournalPage>,
+    logs_placeholder: Option<Logs>,
     live: bool,
     visible: bool,
     wanted_snapshot: bool,
@@ -170,7 +166,10 @@ impl Services {
                                     timeout,
                                 )
                                 .map_err(|error| error.to_string())
-                                .and_then(project_reply)
+                                .and_then(|reply| match reply {
+                                    desktop::Reply::Services(reply) => Ok(*reply),
+                                    _ => Err("Unexpected Services response".into()),
+                                })
                         }))
                         .unwrap_or_else(|_| Err(WORKER_ERROR.into()));
                         let _ = sender.send(result);
@@ -223,12 +222,12 @@ impl Services {
             _ => None,
         }
     }
-    pub fn snapshot(&self) -> Option<&ServicesSnapshot> {
+    pub fn snapshot(&self) -> Option<&Snapshot> {
         self.snapshot.data.as_ref()
     }
     /// Changing priority can temporarily retain the same target's lines. A new
     /// unit or scope never receives another target's placeholder.
-    pub fn logs(&self) -> Option<&JournalPage> {
+    pub fn logs(&self) -> Option<&Logs> {
         self.log_slot(self.selected_logs.as_ref()?)?
             .data
             .as_ref()
@@ -278,7 +277,7 @@ impl Services {
             || target
                 .unit
                 .as_deref()
-                .is_some_and(|unit| !valid_unit(unit, true))
+                .is_some_and(|unit| !monitor::valid_unit(unit, true))
             || priority
                 .as_deref()
                 .is_some_and(|priority| !matches!(priority, "err" | "warning"))
@@ -305,7 +304,7 @@ impl Services {
         true
     }
     pub fn select_unit_file(&mut self, unit: String, scope: Scope) -> bool {
-        if self.retired || !valid_unit(&unit, true) {
+        if self.retired || !monitor::valid_unit(&unit, true) {
             return false;
         }
         let key = UnitKey { unit, scope };
@@ -356,7 +355,7 @@ impl Services {
 
     /// Ordinary background reads keep the last accepted action capabilities.
     /// After a mutation, capabilities require a new successful snapshot.
-    pub fn can_action(&self, unit: &str, scope: Scope, verb: ServiceVerb) -> bool {
+    pub fn can_action(&self, unit: &str, scope: Scope, verb: Verb) -> bool {
         let key = UnitKey {
             unit: unit.to_owned(),
             scope,
@@ -365,7 +364,7 @@ impl Services {
             || self.pending.contains_key(&Kind::Action(key.clone()))
             || self.pending_action_count() >= MAX_CONCURRENT_ACTIONS
             || self.action_snapshot_dirty.contains(&key)
-            || !valid_unit(unit, false)
+            || !monitor::valid_unit(unit, false)
             || self.snapshot.resource.error.is_some()
         {
             return false;
@@ -386,7 +385,7 @@ impl Services {
     }
     /// Stop/disable confirmation belongs to the UI. Dispatch rechecks current
     /// permissions and verbs; one action owns its scoped unit until it settles.
-    pub fn action(&mut self, unit: String, scope: Scope, verb: ServiceVerb) -> bool {
+    pub fn action(&mut self, unit: String, scope: Scope, verb: Verb) -> bool {
         if !self.can_action(&unit, scope, verb) {
             return false;
         }
@@ -417,8 +416,8 @@ impl Services {
                 protocol::Operation::Action(Box::new(protocol::ActionArgs {
                     server,
                     unit: key.unit.clone(),
-                    scope: protocol_scope(scope),
-                    verb: protocol_verb(verb),
+                    scope,
+                    verb,
                 }))
             }),
             true,
@@ -534,7 +533,7 @@ impl Services {
                 server,
                 request: monitor::LogsRequest {
                     unit: key.target.unit.clone(),
-                    scope: protocol_scope(key.target.scope),
+                    scope: key.target.scope,
                     priority,
                     cursor: previous.and_then(|page| page.cursor.clone()),
                     lines: if previous.and_then(|page| page.cursor.as_ref()).is_some() {
@@ -572,7 +571,7 @@ impl Services {
             protocol::Operation::UnitFile(Box::new(protocol::UnitFileArgs {
                 server,
                 unit: key.unit.clone(),
-                scope: protocol_scope(key.scope),
+                scope: key.scope,
                 refresh: manual,
             }))
         });
@@ -644,7 +643,11 @@ impl Services {
             Job::Snapshot => {
                 let presentation = self.snapshot.resource.presentation_revision;
                 let dirty_actions = self.action_snapshot_dirty.len();
-                let accepted = finish(&mut self.snapshot, generation, result.and_then(decode), now);
+                let result = result.and_then(|reply| match reply {
+                    protocol::Reply::Snapshot(snapshot) => Ok(*snapshot),
+                    _ => Err(INVALID_REPLY.into()),
+                });
+                let accepted = finish(&mut self.snapshot, generation, result, now);
                 if accepted && self.snapshot.resource.error.is_none() {
                     self.action_snapshot_dirty
                         .retain(|key| self.pending.contains_key(&Kind::Action(key.clone())));
@@ -660,7 +663,11 @@ impl Services {
                 if slot.generation != generation {
                     return;
                 }
-                let result = result.and_then(decode::<JournalPage>).map(|mut page| {
+                let result = result.and_then(|reply| match reply {
+                    protocol::Reply::Logs(page) => Ok(*page),
+                    _ => Err(INVALID_REPLY.into()),
+                });
+                let result = result.map(|mut page| {
                     // Without a cursor the next response is another latest-lines
                     // snapshot, not an appendable continuation.
                     if let Some(previous) = &slot.data
@@ -683,13 +690,21 @@ impl Services {
             }
             Job::File(key) => self.file_slot_mut(&key).is_some_and(|slot| {
                 let presentation = slot.resource.presentation_revision;
-                finish(slot, generation, result.and_then(decode), now)
+                let result = result.and_then(|reply| match reply {
+                    protocol::Reply::UnitFile(file) => Ok(*file),
+                    _ => Err(INVALID_REPLY.into()),
+                });
+                finish(slot, generation, result, now)
                     && presentation != slot.resource.presentation_revision
             }),
             Job::Action(key, verb) => {
                 self.snapshot.invalidate();
                 self.wanted_snapshot = !self.retired;
-                let result = result.and_then(decode::<ActionResult>).and_then(|result| {
+                let result = result.and_then(|reply| match reply {
+                    protocol::Reply::Action(result) => Ok(*result),
+                    _ => Err(INVALID_REPLY.into()),
+                });
+                let result = result.and_then(|result| {
                     if result.ok
                         || (result.needs_password == Some(true)
                             && result
@@ -724,12 +739,8 @@ impl Services {
                 // Completion order can differ from dispatch order. Keep the
                 // aggregate resource revision monotonic; receipts carry identity.
                 self.next += 1;
-                finish_resource(
-                    &mut self.action_resource,
-                    self.next,
-                    result.and_then(encode),
-                    now,
-                );
+                self.action_resource
+                    .finish_owned(self.next, result.map(|_| true), now);
                 self.action_resource.pending = self.pending_action_count() > 0;
                 self.action_resource.manual_pending = self.action_resource.pending;
                 true
@@ -737,7 +748,7 @@ impl Services {
         };
         self.changed |= accepted;
     }
-    fn log_slot(&self, key: &LogKey) -> Option<&Slot<JournalPage>> {
+    fn log_slot(&self, key: &LogKey) -> Option<&Slot<Logs>> {
         self.logs
             .iter()
             .find(|(target, _)| target == key)
@@ -749,7 +760,7 @@ impl Services {
             .filter(|kind| matches!(kind, Kind::Action(_)))
             .count()
     }
-    fn log_slot_mut(&mut self, key: &LogKey) -> Option<&mut Slot<JournalPage>> {
+    fn log_slot_mut(&mut self, key: &LogKey) -> Option<&mut Slot<Logs>> {
         self.logs
             .iter_mut()
             .find(|(target, _)| target == key)
@@ -797,13 +808,8 @@ fn due(resource: &Resource, now: Instant, interval: Duration) -> bool {
             .finished_at
             .is_none_or(|at| now.saturating_duration_since(at) >= interval)
 }
-fn decode<T: DeserializeOwned>(value: Value) -> Result<T, String> {
-    serde_json::from_value(value).map_err(|error| format!("Invalid Services response: {error}"))
-}
-fn encode<T: Serialize>(value: T) -> Outcome {
-    serde_json::to_value(value).map_err(|error| format!("Invalid Services response: {error}"))
-}
-fn finish<T: Serialize>(
+/// Settles a read whose owner keeps its typed data in `slot`.
+fn finish<T: PartialEq>(
     slot: &mut Slot<T>,
     generation: u64,
     result: Result<T, String>,
@@ -812,16 +818,13 @@ fn finish<T: Serialize>(
     if slot.generation != generation {
         return false;
     }
-    let result = result.and_then(|value| {
-        let encoded = encode(&value)?;
+    let result = result.map(|value| {
+        let changed = slot.data.as_ref() != Some(&value);
         slot.data = Some(value);
-        Ok(encoded)
+        changed
     });
-    finish_resource(&mut slot.resource, generation, result, now);
+    slot.resource.finish_owned(generation, result, now);
     true
-}
-fn finish_resource(resource: &mut Resource, generation: u64, result: Outcome, now: Instant) {
-    resource.finish_read(generation, result, now, None);
 }
 fn request_timeout(kind: desktop::Kind) -> Duration {
     // Outlast the backend's remote deadlines so its error reaches the UI.
@@ -829,58 +832,6 @@ fn request_timeout(kind: desktop::Kind) -> Duration {
         desktop::Kind::ServicesAction => 90,
         desktop::Kind::ServicesSnapshot => 40,
         _ => 30,
-    })
-}
-
-fn protocol_scope(value: Scope) -> monitor::Scope {
-    match value {
-        Scope::System => monitor::Scope::System,
-        Scope::User => monitor::Scope::User,
-    }
-}
-fn protocol_verb(value: ServiceVerb) -> monitor::Verb {
-    match value {
-        ServiceVerb::Start => monitor::Verb::Start,
-        ServiceVerb::Stop => monitor::Verb::Stop,
-        ServiceVerb::Restart => monitor::Verb::Restart,
-        ServiceVerb::Reload => monitor::Verb::Reload,
-        ServiceVerb::Enable => monitor::Verb::Enable,
-        ServiceVerb::Disable => monitor::Verb::Disable,
-    }
-}
-fn scope_name(value: monitor::Scope) -> &'static str {
-    match value {
-        monitor::Scope::System => "system",
-        monitor::Scope::User => "user",
-    }
-}
-pub(crate) fn project_reply(reply: desktop::Reply) -> Outcome {
-    let desktop::Reply::Services(value) = reply else {
-        return Err("Unexpected Services response".into());
-    };
-    Ok(match *value {
-        protocol::Reply::Snapshot(value) => {
-            let services: Vec<_> = value.services.into_iter().map(|value| {
-                let exit_kind = value.exit_kind.map(|value| match value { monitor::ExitKind::Exited=>"exited",monitor::ExitKind::Killed=>"killed",monitor::ExitKind::Dumped=>"dumped" });
-                json!({"name":value.name,"scope":scope_name(value.scope),"description":value.description,"load":value.load,"active":value.active,"sub":value.sub,"enabled":value.enabled,"mainPid":value.main_pid,"since":value.since,"memory":value.memory,"cpu":value.cpu,"restarts":value.restarts,"result":value.result,"exitCode":value.exit_code,"exitKind":exit_kind,"fragment":value.fragment,"dropIns":value.drop_ins,"triggeredBy":value.triggered_by,"user":value.user})
-            }).collect();
-            let timers: Vec<_> = value.timers.into_iter().map(|value| json!({"name":value.name,"scope":scope_name(value.scope),"description":value.description,"active":value.active,"next":value.next,"last":value.last,"unit":value.unit})).collect();
-            let privilege = match value.privilege {
-                monitor::Privilege::Root => "root",
-                monitor::Privilege::Sudo => "sudo",
-                monitor::Privilege::Password => "password",
-                monitor::Privilege::None => "none",
-            };
-            json!({"services":services,"timers":timers,"user":{"available":value.user.available,"reason":value.user.reason},"privilege":privilege})
-        }
-        protocol::Reply::Logs(value) => {
-            let entries: Vec<_> = value.entries.into_iter().map(|value| json!({"at":value.at,"priority":value.priority,"pid":value.pid,"identifier":value.identifier,"message":value.message})).collect();
-            json!({"entries":entries,"cursor":value.cursor})
-        }
-        protocol::Reply::UnitFile(value) => json!({"text":value.text}),
-        protocol::Reply::Action(value) => {
-            json!({"ok":value.ok,"needsPassword":value.needs_password,"command":value.command})
-        }
     })
 }
 
@@ -892,30 +843,19 @@ mod tests {
         rc::Rc,
     };
 
-    fn observe_operation(operation: protocol::Operation) -> (&'static str, Value) {
+    /// A test label for each Services request.
+    fn method(operation: &protocol::Operation) -> &'static str {
         match operation {
-            protocol::Operation::Snapshot(value) => (
-                "services_snapshot",
-                json!({"id":value.server,"refresh":value.refresh}),
-            ),
-            protocol::Operation::Logs(value) => (
-                "service_logs",
-                json!({"id":value.server,"unit":value.request.unit,"scope":scope_name(value.request.scope),"priority":value.request.priority.map(|v| v.as_str()),"cursor":value.request.cursor,"lines":value.request.lines}),
-            ),
-            protocol::Operation::UnitFile(value) => (
-                "service_unit_file",
-                json!({"id":value.server,"unit":value.unit,"scope":scope_name(value.scope),"refresh":value.refresh}),
-            ),
-            protocol::Operation::Action(value) => (
-                "service_action",
-                json!({"id":value.server,"unit":value.unit,"scope":scope_name(value.scope),"verb":value.verb.as_str()}),
-            ),
+            protocol::Operation::Snapshot(_) => "services_snapshot",
+            protocol::Operation::Logs(_) => "service_logs",
+            protocol::Operation::UnitFile(_) => "service_unit_file",
+            protocol::Operation::Action(_) => "service_action",
         }
     }
 
     struct Request {
         method: &'static str,
-        args: Value,
+        operation: protocol::Operation,
         sender: Option<mpsc::SyncSender<Outcome>>,
     }
     struct Harness {
@@ -934,10 +874,9 @@ mod tests {
                     "11111111-1111-4111-8111-111111111111".into(),
                     Box::new(move |operation| {
                         let (sender, receiver) = mpsc::sync_channel(1);
-                        let (method, args) = observe_operation(operation);
                         outgoing.borrow_mut().push(Request {
-                            method,
-                            args,
+                            method: method(&operation),
+                            operation,
                             sender: Some(sender),
                         });
                         Ok(receiver)
@@ -951,7 +890,10 @@ mod tests {
         fn ready() -> Self {
             let mut h = Self::new();
             h.services.refresh();
-            h.reply("services_snapshot", Ok(snapshot("active", "root")));
+            h.reply(
+                "services_snapshot",
+                Ok(snapshot("active", monitor::Privilege::Root)),
+            );
             h.services.poll(true);
             h
         }
@@ -965,15 +907,22 @@ mod tests {
                 .filter(|r| r.method == method)
                 .count()
         }
-        fn args(&self, method: &str) -> Value {
+        fn operation(&self, method: &str) -> protocol::Operation {
             self.requests
                 .borrow()
                 .iter()
                 .rev()
                 .find(|r| r.method == method)
                 .unwrap()
-                .args
+                .operation
                 .clone()
+        }
+        /// The latest journal read.
+        fn logs_request(&self) -> monitor::LogsRequest {
+            match self.operation("service_logs") {
+                protocol::Operation::Logs(args) => args.request,
+                _ => unreachable!("labelled by kind"),
+            }
         }
         fn reply(&self, method: &str, result: Outcome) {
             self.requests
@@ -1001,9 +950,8 @@ mod tests {
                 .borrow_mut()
                 .iter_mut()
                 .find(|request| {
-                    request.method == "service_action"
-                        && request.args["unit"] == unit
-                        && request.args["scope"] == scope.as_str()
+                    matches!(&request.operation, protocol::Operation::Action(args)
+                        if args.unit == unit && args.scope == scope)
                         && request.sender.is_some()
                 })
                 .expect("pending scoped action")
@@ -1014,20 +962,45 @@ mod tests {
                 .unwrap();
         }
     }
-    fn snapshot(active: &str, privilege: &str) -> Value {
-        let unit = encode(newport_domain::services::ServiceUnit::default()).unwrap();
-        let mut units = [unit.clone(), unit];
-        for (unit, scope) in units.iter_mut().zip(["system", "user"]) {
-            unit["name"] = json!("web.service");
-            unit["scope"] = json!(scope);
-            unit["load"] = json!("loaded");
-            unit["active"] = json!(active);
-            unit["sub"] = json!("running");
-            unit["enabled"] = json!("enabled");
+    fn snapshot(active: &str, privilege: monitor::Privilege) -> protocol::Reply {
+        protocol::Reply::Snapshot(Box::new(snapshot_of(active, privilege)))
+    }
+    fn snapshot_of(active: &str, privilege: monitor::Privilege) -> Snapshot {
+        let unit = |scope| monitor::Service {
+            name: "web.service".into(),
+            scope,
+            load: "loaded".into(),
+            active: active.into(),
+            sub: "running".into(),
+            enabled: Some("enabled".into()),
+            ..Default::default()
+        };
+        Snapshot {
+            services: vec![unit(Scope::System), unit(Scope::User)],
+            timers: vec![],
+            user: monitor::UserManager {
+                available: true,
+                reason: None,
+            },
+            privilege,
         }
-        json!({"services":[
-            units[0], units[1]
-        ],"timers":[],"user":{"available":true,"reason":null},"privilege":privilege})
+    }
+    fn action(ok: bool) -> protocol::Reply {
+        protocol::Reply::Action(Box::new(ActionReply {
+            ok,
+            ..Default::default()
+        }))
+    }
+    /// An action that needs a password, handed over as `command`.
+    fn password(command: &str) -> protocol::Reply {
+        protocol::Reply::Action(Box::new(ActionReply {
+            ok: false,
+            needs_password: Some(true),
+            command: Some(command.into()),
+        }))
+    }
+    fn file(text: &str) -> protocol::Reply {
+        protocol::Reply::UnitFile(Box::new(UnitFile { text: text.into() }))
     }
     fn target(unit: Option<&str>, scope: Scope) -> LogTarget {
         LogTarget {
@@ -1035,8 +1008,19 @@ mod tests {
             scope,
         }
     }
-    fn logs(start: usize, count: usize, cursor: Option<&str>) -> Value {
-        json!({"entries":(start..start+count).map(|i| json!({"at":i,"priority":6,"pid":1,"identifier":"web","message":i.to_string()})).collect::<Vec<_>>(),"cursor":cursor})
+    fn logs(start: usize, count: usize, cursor: Option<&str>) -> protocol::Reply {
+        protocol::Reply::Logs(Box::new(Logs {
+            entries: (start..start + count)
+                .map(|i| monitor::Entry {
+                    at: Some(i as i64),
+                    priority: Some(6),
+                    pid: Some(1),
+                    identifier: Some("web".into()),
+                    message: i.to_string(),
+                })
+                .collect(),
+            cursor: cursor.map(Into::into),
+        }))
     }
 
     #[test]
@@ -1049,7 +1033,10 @@ mod tests {
         h.services.refresh();
         assert_eq!(h.count("services_snapshot"), 1);
         assert!(h.services.resource("snapshot").unwrap().manual_pending);
-        h.reply("services_snapshot", Ok(snapshot("active", "root")));
+        h.reply(
+            "services_snapshot",
+            Ok(snapshot("active", monitor::Privilege::Root)),
+        );
         h.services.poll(true);
         assert_eq!(h.count("services_snapshot"), 1);
         h.advance(5);
@@ -1077,7 +1064,10 @@ mod tests {
         assert!(!h.services.poll(true), "cached read admission is quiet");
         assert!(h.services.snapshot.resource.pending);
         assert!(!h.services.snapshot.resource.display_pending());
-        h.reply("services_snapshot", Ok(snapshot("active", "root")));
+        h.reply(
+            "services_snapshot",
+            Ok(snapshot("active", monitor::Privilege::Root)),
+        );
         assert!(!h.services.poll(true), "unchanged reading is quiet");
         assert!(h.services.snapshot.resource.revision > revision);
         assert_eq!(h.services.snapshot.resource.data_revision, data_revision);
@@ -1093,7 +1083,10 @@ mod tests {
         assert!(!h.services.poll(true), "same failure remains quiet");
         h.advance(5);
         assert!(!h.services.poll(true));
-        h.reply("services_snapshot", Ok(snapshot("active", "root")));
+        h.reply(
+            "services_snapshot",
+            Ok(snapshot("active", monitor::Privilege::Root)),
+        );
         assert!(h.services.poll(true), "recovery clears the error");
 
         h.advance(5);
@@ -1104,12 +1097,18 @@ mod tests {
             "manual refresh joins the pending read"
         );
         assert!(h.services.snapshot.resource.display_pending());
-        h.reply("services_snapshot", Ok(snapshot("active", "root")));
+        h.reply(
+            "services_snapshot",
+            Ok(snapshot("active", monitor::Privilege::Root)),
+        );
         assert!(h.services.poll(true), "manual completion clears activity");
         assert!(!h.services.snapshot.resource.display_pending());
         h.advance(5);
         assert!(!h.services.poll(true));
-        h.reply("services_snapshot", Ok(snapshot("inactive", "root")));
+        h.reply(
+            "services_snapshot",
+            Ok(snapshot("inactive", monitor::Privilege::Root)),
+        );
         assert!(h.services.poll(true), "changed service state is published");
     }
 
@@ -1118,17 +1117,20 @@ mod tests {
         let mut h = Harness::ready();
         assert!(
             h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Restart)
+                .action("web.service".into(), Scope::System, Verb::Restart)
         );
-        h.reply("service_action", Ok(json!({"ok":true})));
+        h.reply("service_action", Ok(action(true)));
         assert!(h.services.poll(true));
         assert_eq!(h.services.take_action_completions().len(), 1);
         assert!(
             !h.services
-                .can_action("web.service", Scope::System, ServiceVerb::Restart)
+                .can_action("web.service", Scope::System, Verb::Restart)
         );
         let data_revision = h.services.snapshot.resource.data_revision;
-        h.reply("services_snapshot", Ok(snapshot("active", "root")));
+        h.reply(
+            "services_snapshot",
+            Ok(snapshot("active", monitor::Privilege::Root)),
+        );
         assert!(
             h.services.poll(true),
             "capability restoration requires a redraw"
@@ -1136,7 +1138,7 @@ mod tests {
         assert_eq!(h.services.snapshot.resource.data_revision, data_revision);
         assert!(
             h.services
-                .can_action("web.service", Scope::System, ServiceVerb::Restart)
+                .can_action("web.service", Scope::System, Verb::Restart)
         );
         assert!(h.services.take_action_completions().is_empty());
     }
@@ -1148,11 +1150,11 @@ mod tests {
             h.services.refresh();
             assert!(
                 h.services
-                    .action("web.service".into(), Scope::System, ServiceVerb::Stop)
+                    .action("web.service".into(), Scope::System, Verb::Stop)
             );
             assert!(
                 !h.services
-                    .action("web.service".into(), Scope::System, ServiceVerb::Restart)
+                    .action("web.service".into(), Scope::System, Verb::Restart)
             );
             h.services.clear_selection();
             h.services.refresh();
@@ -1171,11 +1173,14 @@ mod tests {
                     .action_status("web.service", Scope::User)
                     .is_none()
             );
-            h.reply("services_snapshot", Ok(snapshot("inactive", "none")));
+            h.reply(
+                "services_snapshot",
+                Ok(snapshot("inactive", monitor::Privilege::None)),
+            );
             if read_first {
                 h.services.poll(false);
             }
-            h.reply("service_action", Ok(json!({"ok":true})));
+            h.reply("service_action", Ok(action(true)));
             h.services.poll(false);
             assert_eq!(h.count("services_snapshot"), 3);
             assert_eq!(h.services.snapshot().unwrap().services[0].active, "active");
@@ -1188,11 +1193,17 @@ mod tests {
             if read_first {
                 // A refresh started while the action ran is invalidated again
                 // when it settles. It must drain before the recovery read.
-                h.reply("services_snapshot", Ok(snapshot("active", "none")));
+                h.reply(
+                    "services_snapshot",
+                    Ok(snapshot("active", monitor::Privilege::None)),
+                );
                 h.services.poll(false);
                 assert_eq!(h.count("services_snapshot"), 4);
             }
-            h.reply("services_snapshot", Ok(snapshot("inactive", "root")));
+            h.reply(
+                "services_snapshot",
+                Ok(snapshot("inactive", monitor::Privilege::Root)),
+            );
             h.services.poll(true);
             assert_eq!(
                 h.services.snapshot().unwrap().services[0].active,
@@ -1208,9 +1219,9 @@ mod tests {
         h.services.refresh();
         assert!(
             h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Restart)
+                .action("web.service".into(), Scope::System, Verb::Restart)
         );
-        h.reply("service_action", Ok(json!({"ok":true})));
+        h.reply("service_action", Ok(action(true)));
         h.services.poll(false);
         for _ in 0..20 {
             h.advance(5);
@@ -1218,7 +1229,10 @@ mod tests {
             h.services.poll(true);
         }
         assert_eq!(h.count("services_snapshot"), 2);
-        h.reply("services_snapshot", Ok(snapshot("inactive", "none")));
+        h.reply(
+            "services_snapshot",
+            Ok(snapshot("inactive", monitor::Privilege::None)),
+        );
         h.services.poll(false);
         assert_eq!(h.services.snapshot().unwrap().services[0].active, "active");
         assert_eq!(h.count("services_snapshot"), 3);
@@ -1229,19 +1243,19 @@ mod tests {
         let mut h = Harness::ready();
         assert!(
             h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Restart)
+                .action("web.service".into(), Scope::System, Verb::Restart)
         );
         assert!(
             h.services
-                .action("web.service".into(), Scope::User, ServiceVerb::Stop)
+                .action("web.service".into(), Scope::User, Verb::Stop)
         );
         assert!(
             !h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Stop)
+                .action("web.service".into(), Scope::System, Verb::Stop)
         );
         assert!(
             !h.services
-                .action("web.service".into(), Scope::User, ServiceVerb::Restart)
+                .action("web.service".into(), Scope::User, Verb::Restart)
         );
         h.services.clear_selection();
         h.services.poll(false);
@@ -1258,7 +1272,7 @@ mod tests {
                 .unwrap()
                 .pending
         );
-        h.reply_action("web.service", Scope::User, Ok(json!({"ok":true})));
+        h.reply_action("web.service", Scope::User, Ok(action(true)));
         h.services.poll(false);
         assert!(h.services.resource("action").unwrap().pending);
         assert!(
@@ -1276,7 +1290,7 @@ mod tests {
         let outcomes = h.services.take_action_completions();
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].scope, Scope::User);
-        assert_eq!(outcomes[0].verb, ServiceVerb::Stop);
+        assert_eq!(outcomes[0].verb, Verb::Stop);
         assert!(outcomes[0].result.as_ref().unwrap().ok);
         assert!(h.services.take_action_completions().is_empty());
     }
@@ -1286,14 +1300,17 @@ mod tests {
         let mut h = Harness::ready();
         assert!(
             h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Restart)
+                .action("web.service".into(), Scope::System, Verb::Restart)
         );
         assert!(
             h.services
-                .action("web.service".into(), Scope::User, ServiceVerb::Stop)
+                .action("web.service".into(), Scope::User, Verb::Stop)
         );
         h.services.refresh();
-        h.reply("services_snapshot", Ok(snapshot("inactive", "none")));
+        h.reply(
+            "services_snapshot",
+            Ok(snapshot("inactive", monitor::Privilege::None)),
+        );
         h.reply_action(
             "web.service",
             Scope::User,
@@ -1304,7 +1321,7 @@ mod tests {
         assert_eq!(h.count("services_snapshot"), 3);
         assert!(
             !h.services
-                .can_action("web.service", Scope::User, ServiceVerb::Restart)
+                .can_action("web.service", Scope::User, Verb::Restart)
         );
         let failure = h.services.take_action_completions();
         assert_eq!(failure.len(), 1);
@@ -1315,22 +1332,29 @@ mod tests {
 
         // The user unit can be operated again after its recovery read even
         // though the unrelated system action is still running.
-        h.reply("services_snapshot", Ok(snapshot("active", "root")));
+        h.reply(
+            "services_snapshot",
+            Ok(snapshot("active", monitor::Privilege::Root)),
+        );
         h.services.poll(false);
         assert!(
             !h.services
-                .can_action("web.service", Scope::System, ServiceVerb::Restart)
+                .can_action("web.service", Scope::System, Verb::Restart)
         );
         assert!(
             h.services
-                .can_action("web.service", Scope::User, ServiceVerb::Restart)
+                .can_action("web.service", Scope::User, Verb::Restart)
         );
         assert!(
             h.services
-                .action("web.service".into(), Scope::User, ServiceVerb::Restart)
+                .action("web.service".into(), Scope::User, Verb::Restart)
         );
-        h.reply_action("web.service", Scope::System, Ok(json!({"ok":true})));
-        h.reply_action("web.service", Scope::User, Ok(json!({"ok":false,"needsPassword":true,"command":"systemctl --user restart web.service"})));
+        h.reply_action("web.service", Scope::System, Ok(action(true)));
+        h.reply_action(
+            "web.service",
+            Scope::User,
+            Ok(password("systemctl --user restart web.service")),
+        );
         h.services.poll(false);
         assert!(!h.services.resource("action").unwrap().pending);
         let outcomes = h.services.take_action_completions();
@@ -1358,38 +1382,38 @@ mod tests {
         );
         assert!(
             !h.services
-                .can_action("web.service", Scope::System, ServiceVerb::Restart)
+                .can_action("web.service", Scope::System, Verb::Restart)
         );
         assert!(
             !h.services
-                .can_action("web.service", Scope::User, ServiceVerb::Restart)
+                .can_action("web.service", Scope::User, Verb::Restart)
         );
-        h.reply("services_snapshot", Ok(snapshot("active", "root")));
+        h.reply(
+            "services_snapshot",
+            Ok(snapshot("active", monitor::Privilege::Root)),
+        );
         h.services.poll(false);
         assert!(
             h.services
-                .can_action("web.service", Scope::System, ServiceVerb::Restart)
+                .can_action("web.service", Scope::System, Verb::Restart)
         );
         assert!(
             h.services
-                .can_action("web.service", Scope::User, ServiceVerb::Restart)
+                .can_action("web.service", Scope::User, Verb::Restart)
         );
         assert!(h.services.take_action_completions().is_empty());
     }
 
-    fn many_units(count: usize) -> Value {
-        let mut snapshot = snapshot("active", "root");
-        let template = snapshot["services"][0].clone();
-        snapshot["services"] = Value::Array(
-            (0..count)
-                .map(|index| {
-                    let mut unit = template.clone();
-                    unit["name"] = json!(format!("app{index}.service"));
-                    unit
-                })
-                .collect(),
-        );
-        snapshot
+    fn many_units(count: usize) -> protocol::Reply {
+        let mut snapshot = snapshot_of("active", monitor::Privilege::Root);
+        let template = snapshot.services[0].clone();
+        snapshot.services = (0..count)
+            .map(|index| monitor::Service {
+                name: format!("app{index}.service"),
+                ..template.clone()
+            })
+            .collect();
+        protocol::Reply::Snapshot(Box::new(snapshot))
     }
 
     #[test]
@@ -1399,15 +1423,14 @@ mod tests {
         h.reply("services_snapshot", Ok(many_units(9)));
         h.services.poll(false);
         for index in 0..MAX_CONCURRENT_ACTIONS {
-            assert!(h.services.action(
-                format!("app{index}.service"),
-                Scope::System,
-                ServiceVerb::Restart
-            ));
+            assert!(
+                h.services
+                    .action(format!("app{index}.service"), Scope::System, Verb::Restart)
+            );
         }
         assert!(
             !h.services
-                .action("app8.service".into(), Scope::System, ServiceVerb::Restart)
+                .action("app8.service".into(), Scope::System, Verb::Restart)
         );
         h.services
             .select_logs(target(None, Scope::System), None, true);
@@ -1415,17 +1438,17 @@ mod tests {
             .select_unit_file("app0.service".into(), Scope::System);
         h.services.refresh();
         assert_eq!(h.services.pending.len(), MAX_CONCURRENT_ACTIONS + 3);
-        h.reply_action("app0.service", Scope::System, Ok(json!({"ok":true})));
+        h.reply_action("app0.service", Scope::System, Ok(action(true)));
         h.services.poll(false);
         assert_eq!(h.count("service_action"), MAX_CONCURRENT_ACTIONS);
         assert!(
             h.services
-                .action("app8.service".into(), Scope::System, ServiceVerb::Restart)
+                .action("app8.service".into(), Scope::System, Verb::Restart)
         );
         assert_eq!(h.services.pending_action_count(), MAX_CONCURRENT_ACTIONS);
         assert!(
             !h.services
-                .action("app0.service".into(), Scope::System, ServiceVerb::Restart)
+                .action("app0.service".into(), Scope::System, Verb::Restart)
         );
     }
 
@@ -1438,15 +1461,15 @@ mod tests {
         h.services.poll(false);
         assert!(
             h.services
-                .action("app0.service".into(), Scope::System, ServiceVerb::Restart)
+                .action("app0.service".into(), Scope::System, Verb::Restart)
         );
         for index in 1..81 {
             let unit = format!("app{index}.service");
             assert!(
                 h.services
-                    .action(unit.clone(), Scope::System, ServiceVerb::Restart)
+                    .action(unit.clone(), Scope::System, Verb::Restart)
             );
-            h.reply_action(&unit, Scope::System, Ok(json!({"ok":true})));
+            h.reply_action(&unit, Scope::System, Ok(action(true)));
             h.services.poll(false);
             h.reply("services_snapshot", Ok(snapshot.clone()));
             h.services.poll(false);
@@ -1471,11 +1494,11 @@ mod tests {
         let mut h = Harness::ready();
         assert!(
             h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Restart)
+                .action("web.service".into(), Scope::System, Verb::Restart)
         );
         assert!(
             h.services
-                .action("web.service".into(), Scope::User, ServiceVerb::Stop)
+                .action("web.service".into(), Scope::User, Verb::Stop)
         );
         h.services.retire();
         let count = h.requests.borrow().len();
@@ -1485,9 +1508,9 @@ mod tests {
         assert!(h.services.resource("action").unwrap().pending);
         assert!(
             !h.services
-                .action("web.service".into(), Scope::User, ServiceVerb::Stop)
+                .action("web.service".into(), Scope::User, Verb::Stop)
         );
-        h.reply_action("web.service", Scope::System, Ok(json!({"ok":true})));
+        h.reply_action("web.service", Scope::System, Ok(action(true)));
         h.services.poll(false);
         assert!(!h.services.has_pending());
         assert!(!h.services.resource("action").unwrap().pending);
@@ -1503,7 +1526,7 @@ mod tests {
         let mut h = Harness::ready();
         assert!(
             h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Stop)
+                .action("web.service".into(), Scope::System, Verb::Stop)
         );
         h.reply("service_action", Err("remote disconnected".into()));
         h.services.poll(false);
@@ -1521,14 +1544,20 @@ mod tests {
                 .action_status("web.service", Scope::User)
                 .is_none()
         );
-        h.reply("services_snapshot", Ok(snapshot("active", "password")));
+        h.reply(
+            "services_snapshot",
+            Ok(snapshot("active", monitor::Privilege::Password)),
+        );
         h.services.poll(false);
         assert_eq!(h.count("service_action"), 1);
         assert!(
             h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Stop)
+                .action("web.service".into(), Scope::System, Verb::Stop)
         );
-        h.reply("service_action", Ok(json!({"ok":false,"needsPassword":true,"command":"sudo systemctl stop web.service"})));
+        h.reply(
+            "service_action",
+            Ok(password("sudo systemctl stop web.service")),
+        );
         h.services.poll(false);
         let status = h
             .services
@@ -1560,47 +1589,53 @@ mod tests {
             "-x.service",
             "x;shutdown.service",
         ] {
-            assert!(
-                !h.services
-                    .action(unit.into(), Scope::System, ServiceVerb::Restart)
-            );
+            assert!(!h.services.action(unit.into(), Scope::System, Verb::Restart));
         }
         assert!(
             !h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Start)
+                .action("web.service".into(), Scope::System, Verb::Start)
         );
         assert!(
             !h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Enable)
+                .action("web.service".into(), Scope::System, Verb::Enable)
         );
         h.services.refresh();
-        h.reply("services_snapshot", Ok(snapshot("active", "none")));
+        h.reply(
+            "services_snapshot",
+            Ok(snapshot("active", monitor::Privilege::None)),
+        );
         h.services.poll(false);
         assert!(
             !h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Restart)
+                .action("web.service".into(), Scope::System, Verb::Restart)
         );
         assert!(
             h.services
-                .action("web.service".into(), Scope::User, ServiceVerb::Restart)
+                .action("web.service".into(), Scope::User, Verb::Restart)
         );
-        assert_eq!(h.args("service_action")["scope"], "user");
-        h.reply("service_action", Ok(json!({"ok":true})));
+        assert!(matches!(
+            h.operation("service_action"),
+            protocol::Operation::Action(args) if args.scope == Scope::User
+        ));
+        h.reply("service_action", Ok(action(true)));
         h.services.poll(false);
-        let mut unavailable = snapshot("active", "root");
-        unavailable["user"]["available"] = json!(false);
-        h.reply("services_snapshot", Ok(unavailable));
+        let mut unavailable = snapshot_of("active", monitor::Privilege::Root);
+        unavailable.user.available = false;
+        h.reply(
+            "services_snapshot",
+            Ok(protocol::Reply::Snapshot(Box::new(unavailable))),
+        );
         h.services.poll(false);
         assert!(
             !h.services
-                .action("web.service".into(), Scope::User, ServiceVerb::Restart)
+                .action("web.service".into(), Scope::User, Verb::Restart)
         );
         h.services.refresh();
         h.reply("services_snapshot", Err("offline".into()));
         h.services.poll(false);
         assert!(
             !h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Restart)
+                .action("web.service".into(), Scope::System, Verb::Restart)
         );
         assert_eq!(h.count("service_action"), 1);
     }
@@ -1610,18 +1645,27 @@ mod tests {
         let mut h = Harness::ready();
         h.services
             .select_logs(target(Some("web.service"), Scope::System), None, true);
-        assert_eq!(
-            h.args("service_logs"),
-            json!({"id":"11111111-1111-4111-8111-111111111111","unit":"web.service","scope":"system","priority":null,"cursor":null,"lines":200})
-        );
+        assert!(matches!(
+            h.operation("service_logs"),
+            protocol::Operation::Logs(args)
+                if args.server.to_string() == "11111111-1111-4111-8111-111111111111"
+                    && args.request
+                        == monitor::LogsRequest {
+                            unit: Some("web.service".into()),
+                            scope: Scope::System,
+                            priority: None,
+                            cursor: None,
+                            lines: Some(200),
+                        }
+        ));
         h.reply("service_logs", Ok(logs(0, 200, Some("c1"))));
         h.services.poll(true);
         h.advance(2);
         h.services.poll(false);
         assert_eq!(h.count("service_logs"), 1);
         h.services.poll(true);
-        assert_eq!(h.args("service_logs")["cursor"], "c1");
-        assert!(h.args("service_logs")["lines"].is_null());
+        assert_eq!(h.logs_request().cursor.as_deref(), Some("c1"));
+        assert!(h.logs_request().lines.is_none());
         h.reply("service_logs", Ok(logs(200, 1900, Some("c2"))));
         h.services.poll(true);
         let page = h.services.logs().unwrap();
@@ -1655,9 +1699,9 @@ mod tests {
             false,
         );
         assert_eq!(h.services.logs().unwrap().entries.len(), 2);
-        assert!(h.services.resource("logs").unwrap().value.is_null());
-        assert!(h.args("service_logs")["cursor"].is_null());
-        assert_eq!(h.args("service_logs")["priority"], "err");
+        assert!(!h.services.resource("logs").unwrap().has_value());
+        assert!(h.logs_request().cursor.is_none());
+        assert_eq!(h.logs_request().priority, Some(monitor::Priority::Err));
         h.reply("service_logs", Ok(logs(10, 1, Some("err"))));
         h.services.poll(false);
         assert_eq!(h.services.logs().unwrap().entries[0].message, "10");
@@ -1668,7 +1712,7 @@ mod tests {
         h.services
             .select_logs(target(Some("web.service"), Scope::User), None, false);
         assert!(h.services.logs().is_none());
-        assert_eq!(h.args("service_logs")["scope"], "user");
+        assert_eq!(h.logs_request().scope, Scope::User);
         h.reply("service_logs", Err("user journal denied".into()));
         h.services.poll(false);
         assert_eq!(
@@ -1701,7 +1745,7 @@ mod tests {
         h.services.poll(false);
         assert!(h.services.logs().is_none());
         assert_eq!(h.count("service_logs"), 2);
-        assert_eq!(h.args("service_logs")["unit"], "unit49.service");
+        assert_eq!(h.logs_request().unit.as_deref(), Some("unit49.service"));
         h.services.reset_logs();
         h.services.reset_logs();
         assert_eq!(h.count("service_logs"), 2);
@@ -1709,8 +1753,8 @@ mod tests {
         h.services.poll(false);
         assert!(h.services.logs().is_none());
         assert_eq!(h.count("service_logs"), 3);
-        assert!(h.args("service_logs")["cursor"].is_null());
-        assert_eq!(h.args("service_logs")["lines"], 200);
+        assert!(h.logs_request().cursor.is_none());
+        assert_eq!(h.logs_request().lines, Some(200));
         h.reply("service_logs", Ok(logs(200, 1, Some("new"))));
         h.services.poll(false);
         assert_eq!(h.services.logs().unwrap().entries[0].message, "200");
@@ -1727,7 +1771,7 @@ mod tests {
             assert_eq!(h.services.logs().unwrap().entries.len(), 2);
             h.advance(2);
             h.services.poll(true);
-            assert_eq!(h.args("service_logs")["lines"], 200);
+            assert_eq!(h.logs_request().lines, Some(200));
         }
     }
 
@@ -1735,13 +1779,16 @@ mod tests {
     fn another_action_requires_successful_post_write_snapshot() {
         let mut h = Harness::new();
         h.services.refresh();
-        h.reply("services_snapshot", Ok(snapshot("inactive", "root")));
+        h.reply(
+            "services_snapshot",
+            Ok(snapshot("inactive", monitor::Privilege::Root)),
+        );
         h.services.poll(true);
         assert!(
             h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Start)
+                .action("web.service".into(), Scope::System, Verb::Start)
         );
-        h.reply("service_action", Ok(json!({"ok":true})));
+        h.reply("service_action", Ok(action(true)));
         h.services.poll(false);
         // The retained typed snapshot still says stopped, but is no longer an
         // authorization source for the next write.
@@ -1751,33 +1798,36 @@ mod tests {
         );
         assert!(
             !h.services
-                .can_action("web.service", Scope::System, ServiceVerb::Start)
+                .can_action("web.service", Scope::System, Verb::Start)
         );
         assert!(
             !h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Start)
+                .action("web.service".into(), Scope::System, Verb::Start)
         );
         h.reply("services_snapshot", Err("connection closed".into()));
         h.services.poll(false);
         assert!(
             !h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Start)
+                .action("web.service".into(), Scope::System, Verb::Start)
         );
         h.services.refresh();
-        h.reply("services_snapshot", Ok(snapshot("active", "root")));
+        h.reply(
+            "services_snapshot",
+            Ok(snapshot("active", monitor::Privilege::Root)),
+        );
         h.services.poll(false);
         assert!(
             !h.services
-                .can_action("web.service", Scope::System, ServiceVerb::Start)
+                .can_action("web.service", Scope::System, Verb::Start)
         );
         assert!(
             h.services
-                .can_action("web.service", Scope::System, ServiceVerb::Stop)
+                .can_action("web.service", Scope::System, Verb::Stop)
         );
         h.services.refresh();
         assert!(
             h.services
-                .can_action("web.service", Scope::System, ServiceVerb::Stop)
+                .can_action("web.service", Scope::System, Verb::Stop)
         );
         assert_eq!(h.count("service_action"), 1);
     }
@@ -1790,23 +1840,24 @@ mod tests {
         h.reply("service_logs", Ok(logs(0, 2, Some("c1"))));
         h.services.poll(false);
         h.services.retry_logs();
-        h.reply("service_logs", Ok(json!({})));
+        // A reply of another kind is no journal page.
+        h.reply("service_logs", Ok(action(true)));
         h.services.poll(false);
         assert!(h.services.resource("logs").unwrap().error.is_some());
         assert_eq!(h.services.logs().unwrap().entries.len(), 2);
         assert!(
             h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Restart)
+                .action("web.service".into(), Scope::System, Verb::Restart)
         );
-        h.reply("service_action", Ok(json!({"ok":true})));
+        h.reply("service_action", Ok(action(true)));
         h.services.poll(false);
-        h.reply("services_snapshot", Ok(json!({})));
+        h.reply("services_snapshot", Ok(file("not a snapshot")));
         h.services.poll(false);
         assert!(h.services.resource("snapshot").unwrap().error.is_some());
         assert_eq!(h.services.snapshot().unwrap().services.len(), 2);
         assert!(
             !h.services
-                .can_action("web.service", Scope::System, ServiceVerb::Restart)
+                .can_action("web.service", Scope::System, Verb::Restart)
         );
     }
 
@@ -1819,13 +1870,13 @@ mod tests {
                 .select_unit_file("web.service".into(), Scope::System)
         );
         h.services.retry_unit_file();
-        h.reply("service_unit_file", Ok(json!({"text":"system file"})));
+        h.reply("service_unit_file", Ok(file("system file")));
         h.services.poll(false);
         assert_eq!(h.count("service_unit_file"), 1);
         h.services
             .select_unit_file("web.service".into(), Scope::User);
         assert!(h.services.unit_file().is_none());
-        h.reply("service_unit_file", Ok(json!({"text":"user file"})));
+        h.reply("service_unit_file", Ok(file("user file")));
         h.services.poll(false);
         h.services
             .select_unit_file("web.service".into(), Scope::System);
@@ -1837,12 +1888,15 @@ mod tests {
         }
         assert_eq!(h.count("service_unit_file"), 3);
         assert_eq!(h.services.files.len(), MAX_FILES);
-        h.reply("service_unit_file", Ok(json!({"text":"old timer"})));
+        h.reply("service_unit_file", Ok(file("old timer")));
         h.services.poll(false);
         assert!(h.services.unit_file().is_none());
-        assert_eq!(h.args("service_unit_file")["unit"], "unit99.timer");
+        assert!(matches!(
+            h.operation("service_unit_file"),
+            protocol::Operation::UnitFile(args) if args.unit == "unit99.timer"
+        ));
         h.services.clear_selection();
-        h.reply("service_unit_file", Ok(json!({"text":"latest timer"})));
+        h.reply("service_unit_file", Ok(file("latest timer")));
         h.services.poll(false);
         assert!(h.services.unit_file().is_none());
         assert_eq!(h.count("service_unit_file"), 4);
@@ -1853,7 +1907,7 @@ mod tests {
         let mut h = Harness::ready();
         h.services
             .select_unit_file("web.service".into(), Scope::System);
-        h.reply("service_unit_file", Ok(json!({"text":"original file"})));
+        h.reply("service_unit_file", Ok(file("original file")));
         h.services.poll(true);
         let updated = h.services.resource("unit-file").unwrap().updated_at;
 
@@ -1909,7 +1963,7 @@ mod tests {
         h.services.poll(false);
         h.services.poll(true);
         assert_eq!(h.count("service_unit_file"), 3, "in-flight reads coalesce");
-        h.reply("service_unit_file", Ok(json!({"text":"edited file"})));
+        h.reply("service_unit_file", Ok(file("edited file")));
         h.services.poll(true);
         assert_eq!(h.services.unit_file().unwrap().text, "edited file");
         assert!(h.services.resource("unit-file").unwrap().error.is_none());
@@ -1939,12 +1993,15 @@ mod tests {
         h.advance(1);
         h.services.poll(true);
         assert_eq!(h.count("services_snapshot"), 3);
-        h.reply("services_snapshot", Ok(snapshot("active", "root")));
+        h.reply(
+            "services_snapshot",
+            Ok(snapshot("active", monitor::Privilege::Root)),
+        );
         h.services.poll(true);
         assert!(h.services.resource("snapshot").unwrap().error.is_none());
         assert!(
             h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Restart)
+                .action("web.service".into(), Scope::System, Verb::Restart)
         );
         h.disconnect("service_action");
         h.services.poll(false);
@@ -1975,7 +2032,7 @@ mod tests {
             .select_unit_file("web.service".into(), Scope::System);
         assert!(
             h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Stop)
+                .action("web.service".into(), Scope::System, Verb::Stop)
         );
         assert_eq!(h.services.pending.len(), 4);
         h.services.retire();
@@ -1998,12 +2055,15 @@ mod tests {
         );
         assert!(
             !h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Restart)
+                .action("web.service".into(), Scope::System, Verb::Restart)
         );
-        h.reply("service_action", Ok(json!({"ok":true})));
-        h.reply("services_snapshot", Ok(snapshot("inactive", "root")));
+        h.reply("service_action", Ok(action(true)));
+        h.reply(
+            "services_snapshot",
+            Ok(snapshot("inactive", monitor::Privilege::Root)),
+        );
         h.reply("service_logs", Ok(logs(0, 200, Some("old"))));
-        h.reply("service_unit_file", Ok(json!({"text":"old"})));
+        h.reply("service_unit_file", Ok(file("old")));
         h.advance(100);
         h.services.poll(true);
         assert_eq!(h.requests.borrow().len(), count);
@@ -2040,9 +2100,9 @@ mod tests {
         assert_eq!(h.count("service_logs"), 0);
         assert!(
             h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Stop)
+                .action("web.service".into(), Scope::System, Verb::Stop)
         );
-        h.reply("service_action", Ok(json!({"ok":false})));
+        h.reply("service_action", Ok(action(false)));
         h.services.poll(false);
         let status = h
             .services
@@ -2064,7 +2124,7 @@ mod tests {
         });
         assert!(
             !h.services
-                .action("web.service".into(), Scope::System, ServiceVerb::Stop)
+                .action("web.service".into(), Scope::System, Verb::Stop)
         );
         assert!(!h.services.has_pending());
         assert!(

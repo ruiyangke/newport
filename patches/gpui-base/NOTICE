@@ -1,0 +1,10 @@
+gpui-base 0.8.1
+Upstream: https://github.com/longbridge/gpui-kit
+License: Apache-2.0; the upstream LICENSE-APACHE is distributed with gpui-base.
+
+Newport modifies gpui-base for key event constructors for GPUI's added key
+fields, and exact text selection copies with fractional line heights. The
+changed files are src/button.rs, src/checkbox.rs, src/dialog.rs,
+src/input/base/element.rs, src/input/base/state.rs, src/link.rs, src/radio.rs,
+src/root.rs, src/selectable_text.rs, src/switch.rs, src/text_selection.rs and
+src/toggle.rs. All other published package files remain unchanged.

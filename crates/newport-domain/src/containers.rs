@@ -1,6 +1,9 @@
-//! Container contracts and domain rules, with no UI, transport, or runtime
-//! dependencies.
-use serde::{Deserialize, Serialize};
+//! Container rules over the protocol's container types, with no UI,
+//! transport, or runtime dependencies.
+use newport_protocol::monitor::containers::{
+    Container, ContainerHealth, ContainerPort, ContainerState, ContainerVerb, DockerDisk,
+    PortProtocol,
+};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashSet},
@@ -8,448 +11,50 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ContainerVerb {
-    Start,
-    Stop,
-    Restart,
-    Pause,
-    Unpause,
-}
-impl ContainerVerb {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Start => "start",
-            Self::Stop => "stop",
-            Self::Restart => "restart",
-            Self::Pause => "pause",
-            Self::Unpause => "unpause",
+/// Fill a quick reading's volumes from a separate volume measurement. The
+/// quick reading stays the source of truth for which volumes exist; the
+/// measurement only lends sizes by name, so a volume removed since is
+/// dropped and one created since stays unmeasured.
+pub fn with_volumes(mut disk: DockerDisk, measured: &DockerDisk) -> DockerDisk {
+    if disk.volumes_measured || !measured.volumes_measured {
+        return disk;
+    }
+    let sizes: BTreeMap<&str, Option<u64>> = measured
+        .volumes
+        .iter()
+        .map(|volume| (volume.name.as_str(), volume.size))
+        .collect();
+    // A truncated measurement lists only the largest volumes; the rest
+    // were measured too, just too small to list.
+    let truncated = (measured.volumes.len() as u64) < measured.totals.volumes.count;
+    let mut complete = true;
+    for volume in &mut disk.volumes {
+        match sizes.get(volume.name.as_str()) {
+            Some(size) => volume.size = *size,
+            None => complete &= truncated,
         }
     }
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Start => "Start",
-            Self::Stop => "Stop",
-            Self::Restart => "Restart",
-            Self::Pause => "Pause",
-            Self::Unpause => "Resume",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ProjectVerb {
-    Start,
-    Stop,
-    Restart,
-}
-impl ProjectVerb {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Start => "start",
-            Self::Stop => "stop",
-            Self::Restart => "restart",
-        }
-    }
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Start => "Start",
-            Self::Stop => "Stop",
-            Self::Restart => "Restart",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PruneTarget {
-    Containers,
-    DanglingImages,
-    UnusedImages,
-    BuildCache,
-    Volumes,
-}
-impl PruneTarget {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Containers => "containers",
-            Self::DanglingImages => "dangling-images",
-            Self::UnusedImages => "unused-images",
-            Self::BuildCache => "build-cache",
-            Self::Volumes => "volumes",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ContainerState {
-    #[default]
-    Created,
-    Running,
-    Paused,
-    Restarting,
-    Removing,
-    Exited,
-    Dead,
-}
-impl ContainerState {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Created => "created",
-            Self::Running => "running",
-            Self::Paused => "paused",
-            Self::Restarting => "restarting",
-            Self::Removing => "removing",
-            Self::Exited => "exited",
-            Self::Dead => "dead",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ContainerHealth {
-    #[default]
-    Healthy,
-    Unhealthy,
-    Starting,
-}
-impl ContainerHealth {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Healthy => "healthy",
-            Self::Unhealthy => "unhealthy",
-            Self::Starting => "starting",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PortProtocol {
-    #[default]
-    Tcp,
-    Udp,
-    Sctp,
-}
-impl PortProtocol {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Tcp => "tcp",
-            Self::Udp => "udp",
-            Self::Sctp => "sctp",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LogStream {
-    #[default]
-    Stdout,
-    Stderr,
-}
-impl LogStream {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Stdout => "stdout",
-            Self::Stderr => "stderr",
-        }
-    }
-}
-
-macro_rules! display_as_str {
-    ($($kind:ty),+ $(,)?) => {$(
-        impl fmt::Display for $kind {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str(self.as_str())
-            }
-        }
-    )+};
-}
-display_as_str!(
-    ContainerVerb,
-    ProjectVerb,
-    PruneTarget,
-    ContainerState,
-    ContainerHealth,
-    PortProtocol,
-    LogStream
-);
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EngineInfo {
-    pub version: String,
-    pub api_version: String,
-    pub os: String,
-    pub rootless: bool,
-    pub podman: bool,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ContainerPort {
-    pub ip: Option<String>,
-    pub host_port: Option<u16>,
-    pub container_port: u16,
-    pub protocol: PortProtocol,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ComposeLabels {
-    pub project: String,
-    pub service: String,
-    pub oneoff: bool,
-    pub number: Option<u64>,
-    pub working_dir: Option<String>,
-    pub config_files: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Container {
-    pub id: String,
-    pub name: String,
-    pub image: String,
-    pub image_id: String,
-    pub command: String,
-    pub state: ContainerState,
-    pub status: String,
-    pub health: Option<ContainerHealth>,
-    pub exit_code: Option<i64>,
-    pub oom_killed: bool,
-    pub error: Option<String>,
-    pub restart_count: u64,
-    pub restart_policy: Option<String>,
-    /// Epoch milliseconds.
-    pub created: i64,
-    pub started_at: Option<i64>,
-    pub finished_at: Option<i64>,
-    pub ports: Vec<ContainerPort>,
-    pub compose: Option<ComposeLabels>,
-    /// Percent of one core since the agent's previous reading.
-    pub cpu: Option<f64>,
-    pub memory: Option<u64>,
-    pub memory_limit: Option<u64>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
-pub struct ContainersSnapshot {
-    pub engine: EngineInfo,
-    pub containers: Vec<Container>,
-    pub truncated: bool,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct EnvVar {
-    pub name: String,
-    pub value: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct Mount {
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub source: Option<String>,
-    pub destination: String,
-    pub mode: Option<String>,
-    pub rw: bool,
-    pub name: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Network {
-    pub name: String,
-    pub ip_address: Option<String>,
-    pub aliases: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct Healthcheck {
-    pub test: Vec<String>,
-    pub interval: Option<u64>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HealthResult {
-    pub at: i64,
-    pub exit_code: i64,
-    pub output: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ContainerInspect {
-    pub id: String,
-    pub name: String,
-    pub image: String,
-    pub created: i64,
-    pub entrypoint: Option<Vec<String>>,
-    pub cmd: Option<Vec<String>>,
-    pub working_dir: Option<String>,
-    pub user: Option<String>,
-    pub hostname: Option<String>,
-    pub env: Vec<EnvVar>,
-    pub mounts: Vec<Mount>,
-    pub networks: Vec<Network>,
-    pub restart_policy: Option<String>,
-    pub labels: BTreeMap<String, String>,
-    pub healthcheck: Option<Healthcheck>,
-    pub last_health: Vec<HealthResult>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct ContainerLogEntry {
-    pub at: Option<i64>,
-    pub stream: LogStream,
-    pub message: String,
-    pub container: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct ContainerLogPage {
-    pub entries: Vec<ContainerLogEntry>,
-    pub cursor: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DockerImage {
-    pub id: String,
-    pub tags: Vec<String>,
-    pub size: u64,
-    pub shared_size: Option<u64>,
-    /// Epoch milliseconds.
-    pub created: i64,
-    pub containers: u64,
-    pub dangling: bool,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DockerVolume {
-    pub name: String,
-    pub driver: String,
-    /// Missing when the engine cannot report this volume's usage.
-    pub size: Option<u64>,
-    pub ref_count: Option<u64>,
-    pub anonymous: bool,
-    pub compose: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct DiskTotals {
-    pub count: u64,
-    pub size: u64,
-    pub reclaimable: u64,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DockerTotals {
-    pub images: DiskTotals,
-    pub containers: DiskTotals,
-    pub volumes: DiskTotals,
-    pub build_cache: DiskTotals,
-}
-impl DockerTotals {
-    pub fn size(&self) -> u64 {
-        [self.images, self.containers, self.volumes, self.build_cache]
-            .iter()
-            .fold(0_u64, |total, category| total.saturating_add(category.size))
-    }
-    pub fn reclaimable(&self) -> u64 {
-        [self.images, self.containers, self.volumes, self.build_cache]
-            .iter()
-            .fold(0_u64, |total, category| {
-                total.saturating_add(category.reclaimable)
-            })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DockerDisk {
-    pub images: Vec<DockerImage>,
-    pub volumes: Vec<DockerVolume>,
-    pub totals: DockerTotals,
-    /// False for the quick reading, whose volumes are listed but not yet
-    /// sized. Full readings omit the field and measure them.
-    #[serde(default = "measured")]
-    pub volumes_measured: bool,
-}
-fn measured() -> bool {
-    true
-}
-impl Default for DockerDisk {
-    fn default() -> Self {
-        Self {
-            images: Vec::new(),
-            volumes: Vec::new(),
-            totals: DockerTotals::default(),
-            volumes_measured: true,
-        }
-    }
-}
-impl DockerDisk {
-    /// Fill a quick reading's volumes from a separate volume measurement. The
-    /// quick reading stays the source of truth for which volumes exist; the
-    /// measurement only lends sizes by name, so a volume removed since is
-    /// dropped and one created since stays unmeasured.
-    pub fn with_volumes(mut self, measured: &DockerDisk) -> Self {
-        if self.volumes_measured || !measured.volumes_measured {
-            return self;
-        }
-        let sizes: BTreeMap<&str, Option<u64>> = measured
+    if (disk.volumes.len() as u64) < disk.totals.volumes.count {
+        // Totals cover volumes the truncated list omits.
+        disk.totals.volumes.size = measured.totals.volumes.size;
+        disk.totals.volumes.reclaimable = measured.totals.volumes.reclaimable;
+    } else {
+        let size = disk
             .volumes
             .iter()
-            .map(|volume| (volume.name.as_str(), volume.size))
-            .collect();
-        // A truncated measurement lists only the largest volumes; the rest
-        // were measured too, just too small to list.
-        let truncated = (measured.volumes.len() as u64) < measured.totals.volumes.count;
-        let mut complete = true;
-        for volume in &mut self.volumes {
-            match sizes.get(volume.name.as_str()) {
-                Some(size) => volume.size = *size,
-                None => complete &= truncated,
-            }
-        }
-        if (self.volumes.len() as u64) < self.totals.volumes.count {
-            // Totals cover volumes the truncated list omits.
-            self.totals.volumes.size = measured.totals.volumes.size;
-            self.totals.volumes.reclaimable = measured.totals.volumes.reclaimable;
-        } else {
-            let size = self
-                .volumes
-                .iter()
-                .filter_map(|volume| volume.size)
-                .fold(0_u64, u64::saturating_add);
-            let unused = self
-                .volumes
-                .iter()
-                .filter(|volume| volume.ref_count == Some(0))
-                .filter_map(|volume| volume.size)
-                .fold(0_u64, u64::saturating_add);
-            self.totals.volumes.size = size;
-            self.totals.volumes.reclaimable = unused.min(size);
-        }
-        self.volumes_measured = complete;
-        self
+            .filter_map(|volume| volume.size)
+            .fold(0_u64, u64::saturating_add);
+        let unused = disk
+            .volumes
+            .iter()
+            .filter(|volume| volume.ref_count == Some(0))
+            .filter_map(|volume| volume.size)
+            .fold(0_u64, u64::saturating_add);
+        disk.totals.volumes.size = size;
+        disk.totals.volumes.reclaimable = unused.min(size);
     }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct Pruned {
-    pub removed: u64,
-    pub reclaimed: u64,
+    disk.volumes_measured = complete;
+    disk
 }
 
 /// A container id (12 to 64 hex digits) or a container name.
@@ -637,7 +242,7 @@ pub fn port_label(port: &ContainerPort) -> String {
     if port.protocol == PortProtocol::Tcp {
         mapping
     } else {
-        format!("{mapping}/{}", port.protocol)
+        format!("{mapping}/{}", port.protocol.as_str())
     }
 }
 
@@ -802,7 +407,7 @@ fn matches_needle(container: &Container, needle: &str) -> bool {
         "{} {} {project} {service} {} {}",
         container.name,
         container.image,
-        container.state,
+        container.state.as_str(),
         container
             .health
             .map(|health| health.as_str())
@@ -985,18 +590,10 @@ impl fmt::Display for Summary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use newport_protocol::monitor::containers::{ComposeLabels, DiskTotals, DockerVolume};
 
     #[test]
-    fn disk_readings_default_to_measured_and_merge_only_unmeasured_volumes() {
-        let old: DockerDisk = serde_json::from_value(json!({"images":[],"volumes":[],
-            "totals":{"images":{"count":0,"size":0,"reclaimable":0},"containers":{"count":0,"size":0,"reclaimable":0},
-            "volumes":{"count":0,"size":0,"reclaimable":0},"buildCache":{"count":0,"size":0,"reclaimable":0}}}))
-        .unwrap();
-        assert!(
-            old.volumes_measured,
-            "agents before the split measure everything"
-        );
+    fn only_an_unmeasured_quick_reading_takes_measured_volumes() {
         let volume = |size| DockerVolume {
             name: "data".into(),
             size,
@@ -1009,21 +606,22 @@ mod tests {
         };
         let mut measured = DockerDisk {
             volumes: vec![volume(Some(9))],
+            volumes_measured: true,
             ..Default::default()
         };
         measured.totals.volumes.size = 9;
-        let merged = quick.clone().with_volumes(&measured);
+        let merged = with_volumes(quick.clone(), &measured);
         assert!(merged.volumes_measured);
         assert_eq!(merged.volumes[0].size, Some(9));
         assert_eq!(merged.totals.volumes.size, 9);
         // A measured reading is never overwritten by another one.
-        let full = DockerDisk::default();
-        assert_eq!(full.clone().with_volumes(&measured), full);
-        let pending = DockerDisk {
-            volumes_measured: false,
+        let full = DockerDisk {
+            volumes_measured: true,
             ..Default::default()
         };
-        assert!(!quick.with_volumes(&pending).volumes_measured);
+        assert_eq!(with_volumes(full.clone(), &measured), full);
+        let pending = DockerDisk::default();
+        assert!(!with_volumes(quick, &pending).volumes_measured);
     }
 
     #[test]
@@ -1046,6 +644,7 @@ mod tests {
                 volume("cache", Some(50), 0),
                 volume("removed", Some(4000), 0),
             ],
+            volumes_measured: true,
             ..Default::default()
         };
         measured.totals.volumes = DiskTotals {
@@ -1053,7 +652,7 @@ mod tests {
             size: 4750,
             reclaimable: 4050,
         };
-        let merged = quick.clone().with_volumes(&measured);
+        let merged = with_volumes(quick.clone(), &measured);
         assert!(merged.volumes_measured);
         assert_eq!(
             merged
@@ -1075,14 +674,14 @@ mod tests {
         // A volume created since the measurement stays unmeasured.
         quick.volumes.push(volume("new", None, 0));
         quick.totals.volumes.count = 3;
-        let merged = quick.clone().with_volumes(&measured);
+        let merged = with_volumes(quick.clone(), &measured);
         assert!(!merged.volumes_measured);
         assert_eq!(merged.volumes[2].size, None);
         assert_eq!(merged.totals.volumes.size, 750);
         // Unless the measurement was truncated: unlisted volumes were measured
         // too, just smaller than every listed one.
         measured.totals.volumes.count = 10;
-        assert!(quick.with_volumes(&measured).volumes_measured);
+        assert!(with_volumes(quick, &measured).volumes_measured);
     }
 
     fn container(name: &str) -> Container {
@@ -1119,151 +718,6 @@ mod tests {
         container.compose.as_mut().unwrap().oneoff = true;
         container.created = created;
         container
-    }
-
-    #[test]
-    fn render_projection_preserves_names_and_required_fields() {
-        let value = json!({
-            "engine": {"version":"29.4", "apiVersion":"1.47", "os":"Linux", "rootless":true, "podman":false},
-            "containers": [{
-                "id":"a".repeat(64), "name":"web", "image":"nginx", "imageId":"sha256:1", "command":"nginx",
-                "state":"running", "status":"Up", "health":"healthy", "exitCode":null,
-                "oomKilled":false, "error":null, "restartCount":2, "restartPolicy":"always",
-                "created":11, "startedAt":12, "finishedAt":null,
-                "ports":[{"ip":"0.0.0.0", "hostPort":8080, "containerPort":80, "protocol":"tcp"}],
-                "compose":{"project":"app", "service":"web", "oneoff":false, "number":1, "workingDir":"/srv/app", "configFiles":null},
-                "cpu":1.5, "memory":9000, "memoryLimit":null
-            }],
-            "truncated":false
-        });
-        let snapshot: ContainersSnapshot = serde_json::from_value(value.clone()).unwrap();
-        assert_eq!(serde_json::to_value(&snapshot).unwrap(), value);
-        for (field, invalid) in [
-            ("state", json!("zombie")),
-            ("health", json!("none")),
-            ("created", json!("yesterday")),
-        ] {
-            let mut invalid_value = value.clone();
-            invalid_value["containers"][0][field] = invalid;
-            assert!(serde_json::from_value::<ContainersSnapshot>(invalid_value).is_err());
-        }
-        let mut missing = value;
-        missing["containers"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("oomKilled");
-        assert!(serde_json::from_value::<ContainersSnapshot>(missing).is_err());
-    }
-
-    #[test]
-    fn inspect_and_logs_keep_the_backend_contract() {
-        let inspect = json!({
-            "id":"id", "name":"web", "image":"nginx", "created":11,
-            "entrypoint":["nginx"], "cmd":null, "workingDir":"/srv", "user":"1000", "hostname":"web",
-            "env":[{"name":"TOKEN", "value":"secret"}],
-            "mounts":[{"type":"volume", "source":null, "destination":"/data", "mode":"rw", "rw":true, "name":"data"}],
-            "networks":[{"name":"app", "ipAddress":"172.17.0.2", "aliases":["web"]}],
-            "restartPolicy":"always", "labels":{"owner":"newport"},
-            "healthcheck":{"test":["CMD", "true"], "interval":10},
-            "lastHealth":[{"at":12, "exitCode":0, "output":"ok"}]
-        });
-        let typed: ContainerInspect = serde_json::from_value(inspect.clone()).unwrap();
-        assert_eq!(serde_json::to_value(&typed).unwrap(), inspect);
-        let logs = json!({"entries":[{"at":12, "stream":"stderr", "message":"failed", "container":"web"}], "cursor":"12.0"});
-        let typed: ContainerLogPage = serde_json::from_value(logs.clone()).unwrap();
-        assert_eq!(serde_json::to_value(&typed).unwrap(), logs);
-        let mut invalid = logs;
-        invalid["entries"][0]["stream"] = json!("stdin");
-        assert!(serde_json::from_value::<ContainerLogPage>(invalid).is_err());
-    }
-
-    #[test]
-    fn disk_projection_preserves_json_names_and_nullable_readings() {
-        let total = json!({"count":1,"size":20,"reclaimable":10});
-        let value = json!({
-            "images":[{"id":"sha256:1","tags":["web:latest"],"size":20,"sharedSize":3,"created":11,"containers":2,"dangling":false}],
-            "volumes":[{"name":"app_data","driver":"local","size":null,"refCount":null,"anonymous":false,"compose":"app"}],
-            "totals":{"images":total,"containers":total,"volumes":total,"buildCache":total}
-        });
-        let disk: DockerDisk = serde_json::from_value(value.clone()).unwrap();
-        // Readings without the flag come from full scans: volumes are measured.
-        let mut measured = value.clone();
-        measured["volumesMeasured"] = json!(true);
-        assert_eq!(serde_json::to_value(&disk).unwrap(), measured);
-        assert_eq!(disk.volumes[0].size, None);
-        assert_eq!(disk.volumes[0].ref_count, None);
-        for pointer in [
-            "/images/0/size",
-            "/images/0/containers",
-            "/volumes/0/refCount",
-            "/totals/images/reclaimable",
-        ] {
-            let mut invalid = value.clone();
-            *invalid.pointer_mut(pointer).unwrap() = json!(-1);
-            assert!(
-                serde_json::from_value::<DockerDisk>(invalid).is_err(),
-                "{pointer}"
-            );
-        }
-        let mut missing = value.clone();
-        missing["totals"]
-            .as_object_mut()
-            .unwrap()
-            .remove("buildCache");
-        assert!(serde_json::from_value::<DockerDisk>(missing).is_err());
-        let mut missing = value;
-        missing["images"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("dangling");
-        assert!(serde_json::from_value::<DockerDisk>(missing).is_err());
-    }
-
-    #[test]
-    fn cleanup_result_and_disk_totals_preserve_unsigned_byte_counts() {
-        let pruned = Pruned {
-            removed: 2,
-            reclaimed: 4096,
-        };
-        assert_eq!(
-            serde_json::to_value(pruned).unwrap(),
-            json!({"removed":2,"reclaimed":4096})
-        );
-        for invalid in [
-            json!({"removed":-1,"reclaimed":0}),
-            json!({"removed":0}),
-            json!({"removed":0,"reclaimed":"4096"}),
-        ] {
-            assert!(serde_json::from_value::<Pruned>(invalid).is_err());
-        }
-        let mut totals = DockerTotals {
-            images: DiskTotals {
-                count: 1,
-                size: 100,
-                reclaimable: 80,
-            },
-            containers: DiskTotals {
-                count: 2,
-                size: 10,
-                reclaimable: 1,
-            },
-            volumes: DiskTotals {
-                count: 3,
-                size: 50,
-                reclaimable: 20,
-            },
-            build_cache: DiskTotals {
-                count: 4,
-                size: 30,
-                reclaimable: 30,
-            },
-        };
-        assert_eq!(totals.size(), 190);
-        assert_eq!(totals.reclaimable(), 131);
-        totals.images.size = u64::MAX;
-        totals.images.reclaimable = u64::MAX;
-        assert_eq!(totals.size(), u64::MAX);
-        assert_eq!(totals.reclaimable(), u64::MAX);
     }
 
     #[test]
@@ -1641,12 +1095,6 @@ mod tests {
             row.state = state;
             assert_eq!(available_container_verbs(&row), expected);
         }
-        assert_eq!(Unpause.label(), "Resume");
-        assert_eq!(serde_json::to_value(Unpause).unwrap(), json!("unpause"));
-        assert_eq!(
-            serde_json::to_value(PruneTarget::DanglingImages).unwrap(),
-            json!("dangling-images")
-        );
     }
 
     #[test]

@@ -16,6 +16,10 @@ pub use secrets::MasterKey;
 use std::path::{Path, PathBuf};
 pub use store::Store;
 
+/// The profile folder holding the Mac launchers for each server's Linux apps.
+/// Newport writes them again at every start.
+pub const LAUNCHERS: &str = "Remote Apps";
+
 /// An explicit profile directory for scripts, tests and development builds,
 /// as [`canonical`] gives it.
 pub fn data_directory_override() -> Option<PathBuf> {

@@ -49,7 +49,7 @@ Back up your server files and SSH keys separately; the data folder doesn't inclu
 
 ### Snapshots before an update
 
-When a new version of Newport first starts, it copies your data to `upgrade-backups/native-<version>/data` in the data folder. It keeps the snapshots for the current and previous versions. Snapshots include your saved passwords, still encrypted, but leave out your account sign-in, so after restoring one you sign in again.
+When a new version of Newport first starts, it copies your data to `upgrade-backups/native-<version>/data` in the data folder. It keeps the snapshots for the current and previous versions. Snapshots include your saved passwords, still encrypted, but leave out your account sign-in, so after restoring one you sign in again. They also leave out the server metrics history, so the charts start empty after a restore.
 
 If Newport can't make or check a snapshot, it stops with an error instead of opening your data.
 

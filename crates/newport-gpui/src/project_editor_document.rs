@@ -1,13 +1,9 @@
 //! Large files retain just the displayed section, without highlighting or undo history.
 use super::*;
-#[derive(Clone, serde::Deserialize)]
+#[derive(Clone)]
 pub(super) struct Page {
-    pub offset: u64,
-    pub next: Option<u64>,
-    pub size: u64,
-    #[serde(default)]
-    reason: Option<String>,
-    #[serde(skip)]
+    pub section: files::Page,
+    /// Offsets of the sections shown before this one, for Previous.
     previous: Vec<u64>,
 }
 pub(super) struct Loaded {
@@ -18,23 +14,17 @@ pub(super) struct Loaded {
     pub(super) page: Option<Page>,
 }
 impl Loaded {
-    pub(super) fn parse(value: Value) -> Result<Self, String> {
-        let raw = value["content"]
-            .as_str()
-            .ok_or("The server returned no file content.")?;
-        let page: Option<Page> = value
-            .get("page")
-            .filter(|v| !v.is_null())
-            .map(|v| {
-                serde_json::from_value(v.clone()).map_err(|_| "Invalid file section.".to_owned())
-            })
-            .transpose()?;
-        let revision = value["revision"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or("The server returned no file revision.")?
-            .to_owned();
-        let (content, crlf, bom) = if let Some(page) = &page {
+    pub(super) fn parse(document: files::Document) -> Result<Self, String> {
+        let raw = document.content.as_str();
+        let page = document.page.map(|section| Page {
+            section,
+            previous: Vec::new(),
+        });
+        if document.revision.is_empty() {
+            return Err("The server returned no file revision.".into());
+        }
+        let revision = document.revision;
+        let (content, crlf, bom) = if let Some(Page { section: page, .. }) = &page {
             let end = page
                 .offset
                 .checked_add(raw.len() as u64)
@@ -78,11 +68,11 @@ impl Loaded {
 impl CodeWorkspace {
     pub(super) fn document_buffer(
         path: String,
-        value: Value,
+        document: files::Document,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Buffer, String> {
-        let loaded = Loaded::parse(value)?;
+        let loaded = Loaded::parse(document)?;
         let paged = loaded.page.is_some();
         let editor = cx.new(|cx| {
             let mut editor = crate::controls::code_editor(window, cx)
@@ -137,10 +127,24 @@ impl CodeWorkspace {
             conflict: None,
             page: loaded.page,
             failure: None,
+            unread: false,
             lsp: None,
             lsp_sync: None,
             _subscription: subscription,
         })
+    }
+
+    /// A tab restored from the last run, whose file is read when the tab is
+    /// first shown. Until then it holds no text, as a failed tab doesn't.
+    pub(super) fn unread_buffer(
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Buffer {
+        Buffer {
+            unread: true,
+            ..Self::failed_buffer(path, String::new(), window, cx)
+        }
     }
 
     /// A tab for a file that could not be opened. It selects, closes and
@@ -170,6 +174,7 @@ impl CodeWorkspace {
             conflict: None,
             page: None,
             failure: Some(failure),
+            unread: false,
             lsp: None,
             lsp_sync: None,
             _subscription: subscription,
@@ -184,10 +189,10 @@ impl CodeWorkspace {
         };
         let mut previous = page.previous.clone();
         let offset = if forward {
-            let Some(next) = page.next else {
+            let Some(next) = page.section.next else {
                 return;
             };
-            previous.push(page.offset);
+            previous.push(page.section.offset);
             next
         } else {
             let Some(offset) = previous.pop() else {
@@ -227,11 +232,11 @@ impl CodeWorkspace {
                 buffer.error = Some("You edited the file while it was reloading. Your edits were kept; reload again when ready.".into());
                 return;
             }
-            match result.and_then(|value| Self::document_buffer(path.clone(), value, window, cx)) {
+            match result.and_then(document_reply).and_then(|document| Self::document_buffer(path.clone(), document, window, cx)) {
                 Ok(mut loaded) => {
                     if let Some((offset, previous)) = section {
                         let Some(page) = &mut loaded.page else { this.buffers[index].error = Some("The file changed. Reload it.".into()); return; };
-                        if page.offset != offset || loaded.revision != this.buffers[index].revision {
+                        if page.section.offset != offset || loaded.revision != this.buffers[index].revision {
                             this.buffers[index].error = Some("The file changed. Reload it.".into()); return;
                         }
                         page.previous = previous;
@@ -254,6 +259,8 @@ impl CodeWorkspace {
         cx: &mut Context<Self>,
     ) -> Div {
         let busy = self.opening.contains(&buffer.path) || !self.available;
+        let previous = &page.previous;
+        let page = &page.section;
         let end = page.next.unwrap_or(page.size);
         div()
             .flex()
@@ -268,10 +275,9 @@ impl CodeWorkspace {
             .text_color(cx.theme().muted_foreground)
             .child(div().flex_1().min_w_0().truncate().child(format!(
                 "{} · Bytes {}–{} of {} · Search this section",
-                match page.reason.as_deref() {
-                    Some("long_lines") => "Read-only · Very long lines",
-                    Some("size") => "Read-only · Over 16 MiB",
-                    _ => "Read-only",
+                match page.reason {
+                    files::PageReason::LongLines => "Read-only · Very long lines",
+                    files::PageReason::Size => "Read-only · Over 16 MiB",
                 },
                 page.offset + 1,
                 end,
@@ -281,7 +287,7 @@ impl CodeWorkspace {
                 crate::controls::compact_button("file-previous-section")
                     .label("Previous")
                     .ghost()
-                    .disabled(busy || page.previous.is_empty())
+                    .disabled(busy || previous.is_empty())
                     .on_click(
                         cx.listener(|this, _, window, cx| this.turn_section(false, window, cx)),
                     ),
@@ -299,28 +305,25 @@ impl CodeWorkspace {
 }
 #[cfg(test)]
 mod tests {
+    use super::super::rpc_fixture::{document, section};
     use super::Loaded;
-    use serde_json::json;
     #[test]
     fn reject_binary_and_malformed_or_unbounded_documents() {
         for content in ["%PDF-1.7", "hello\0world", "GIF89a"] {
-            assert!(Loaded::parse(json!({"content":content,"revision":"r"})).is_err());
+            assert!(Loaded::parse(document(content, "r")).is_err());
         }
+        assert!(Loaded::parse(document("text", "")).is_err());
         // Separate the size guard from the pathological long-line guard.
         let oversized = "x\n".repeat(newport_domain::text_file::EDIT_LIMIT / 2) + "x";
-        assert!(Loaded::parse(json!({"content":oversized,"revision":"r"})).is_err());
-        assert!(Loaded::parse(json!({"content":"x".repeat(newport_domain::text_file::MAX_EDIT_LINE + 1),"revision":"r"})).is_err());
-        assert!(
-            Loaded::parse(
-                json!({"content":"text","revision":"r","page":{"offset":0,"next":5,"size":10}})
-            )
-            .is_err()
-        );
-        assert!(Loaded::parse(json!({"content":"text","revision":"r","page":{"offset":u64::MAX,"next":null,"size":u64::MAX}})).is_err());
+        assert!(Loaded::parse(document(&oversized, "r")).is_err());
+        let long = "x".repeat(newport_domain::text_file::MAX_EDIT_LINE + 1);
+        assert!(Loaded::parse(document(&long, "r")).is_err());
+        assert!(Loaded::parse(section("text", "r", 0, Some(5), 10)).is_err());
+        assert!(Loaded::parse(section("text", "r", u64::MAX, None, u64::MAX)).is_err());
     }
     #[test]
     fn large_sections_can_display_mixed_endings_without_becoming_editable() {
-        let loaded = Loaded::parse(json!({"content":"a\r\nb\nc\r","revision":"page:r","page":{"offset":0,"next":null,"size":7}})).unwrap();
+        let loaded = Loaded::parse(section("a\r\nb\nc\r", "page:r", 0, None, 7)).unwrap();
         assert!(loaded.page.is_some());
         assert_eq!(loaded.content, "a\nb\nc\n");
     }

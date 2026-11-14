@@ -3,10 +3,7 @@ use newport_client::{
     backend::Backend,
     terminal_transport::{Event, Session},
 };
-use newport_protocol::{
-    common::Present,
-    desktop::{self, configuration, stream},
-};
+use newport_protocol::desktop::stream;
 use std::{
     io::{BufRead, Write},
     process::{Child, Command, Stdio},
@@ -59,20 +56,19 @@ fn crashed_native_clients_release_ptys_without_closing_other_sessions() -> Resul
         .map_err(|_| "Invalid fixture port")?;
     let backend = Backend::discover();
     let snapshot = backend
-        .execute_rendered(desktop::Operation::Configuration(Box::new(
-            configuration::Operation::Snapshot(Box::new(Present {})),
-        )))
+        .configuration_snapshot()
         .map_err(|error| error.message)?;
-    let matching: Vec<_> = snapshot["config"]["servers"]
-        .as_array()
-        .ok_or("Missing servers")?
+    let matching: Vec<_> = snapshot
+        .config
+        .servers
         .iter()
-        .filter(|s| s["sshHost"] == "127.0.0.1" && s["sshUser"] == user && s["sshPort"] == port)
+        .filter(|s| s.ssh_host == "127.0.0.1" && s.ssh_user == user && s.ssh_port == port)
         .collect();
     if matching.len() != 1 {
         return Err("Expected one exact disposable loopback SSH fixture".into());
     }
-    let server = matching[0]["id"].as_str().ok_or("Missing server ID")?;
+    let server = matching[0].id.to_string();
+    let server = server.as_str();
     let survivor = Session::open(server, 80, 24)?;
     ready(&survivor)?;
     // Exceeds the backend's eight-session cap without touching existing PTYs.

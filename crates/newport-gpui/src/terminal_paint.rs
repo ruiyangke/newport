@@ -64,6 +64,16 @@ fn device_cell_size(measured: Size<Pixels>, scale: f32) -> Size<Pixels> {
     )
 }
 
+/// The colour of the dots beyond a grid that has another computer's size:
+/// `background` a third of the way to `foreground`.
+fn dot_color(background: u32, foreground: u32) -> u32 {
+    let mix = |shift: u32| -> u32 {
+        let (b, f) = ((background >> shift) & 0xff, (foreground >> shift) & 0xff);
+        ((b * 2 + f) / 3) << shift
+    };
+    mix(16) | mix(8) | mix(0)
+}
+
 /// Backgrounds of the cells along each edge of the grid.
 struct Edges {
     left: Vec<u32>,
@@ -166,9 +176,73 @@ struct PaintCell {
     cursor: Option<CursorVisualStyle>,
 }
 
+/// Paints the margin beyond a grid at `origin` that has another computer's
+/// size: a line along the grid's right and bottom edges where cells follow,
+/// and a dot in the middle of every whole cell of `view` outside the grid,
+/// continuing the grid's cells to the right and below it.
+fn paint_margin(
+    view: Bounds<Pixels>,
+    origin: Point<Pixels>,
+    grid: Size<Pixels>,
+    cell: Size<Pixels>,
+    color: Rgba,
+    window: &mut Window,
+) {
+    let columns = (f32::from(view.right() - origin.x) / f32::from(cell.width)).floor() as i32;
+    let rows = (f32::from(view.bottom() - origin.y) / f32::from(cell.height)).floor() as i32;
+    let (grid_columns, grid_rows) = (
+        (f32::from(grid.width) / f32::from(cell.width)).round() as i32,
+        (f32::from(grid.height) / f32::from(cell.height)).round() as i32,
+    );
+    // The lines run from the view's top and left edges, so the padding
+    // there reads as the grid's.
+    let corner = origin + point(grid.width, grid.height);
+    if columns > grid_columns {
+        let bottom = if rows > grid_rows {
+            corner.y + px(1.)
+        } else {
+            view.bottom()
+        };
+        window.paint_quad(fill(
+            Bounds::from_corners(
+                point(corner.x, view.top()),
+                point(corner.x + px(1.), bottom),
+            ),
+            color,
+        ));
+    }
+    if rows > grid_rows {
+        let right = if columns > grid_columns {
+            corner.x
+        } else {
+            view.right()
+        };
+        window.paint_quad(fill(
+            Bounds::from_corners(
+                point(view.left(), corner.y),
+                point(right, corner.y + px(1.)),
+            ),
+            color,
+        ));
+    }
+    let side = (cell.width * 0.16).max(px(1.)).round();
+    let inset = point((cell.width - side) / 2., (cell.height - side) / 2.);
+    for row in 0..rows.max(0) {
+        let from = if row < grid_rows { grid_columns } else { 0 };
+        for column in from..columns.max(0) {
+            let corner =
+                origin + point(cell.width * column as f32, cell.height * row as f32) + inset;
+            window.paint_quad(fill(Bounds::new(corner, size(side, side)), color));
+        }
+    }
+}
+
 /// Paints the grid at `offset` inside the element. The padding around it shows
 /// the default background, or with `extend_edges` the background of the
-/// nearest edge cell, so a full-screen program fills the whole view.
+/// nearest edge cell, so a full-screen program fills the whole view. With
+/// `margin` the shell has another computer's size: a line marks the grid's
+/// right and bottom edges, and every whole cell of the view outside the grid
+/// shows a dot, as tmux dots the part of a client beyond a smaller window.
 #[allow(clippy::too_many_arguments)]
 pub fn render_grid(
     frame: &Frame,
@@ -176,12 +250,14 @@ pub fn render_grid(
     cell_size: Size<Pixels>,
     offset: Point<Pixels>,
     extend_edges: bool,
+    margin: bool,
     matches: &[std::ops::RangeInclusive<Position>],
     active: Option<&std::ops::RangeInclusive<Position>>,
     hovered_link: Option<&str>,
     focused: bool,
 ) -> AnyElement {
     let background = hex(frame.background);
+    let dot = dot_color(background, hex(frame.foreground));
     let (cursor_foreground, cursor_background) = crate::terminal_color::cursor_colors(frame);
     let cursor_color = hex(cursor_background);
     let search_borders = crate::terminal_search_paint::segments(
@@ -266,6 +342,9 @@ pub fn render_grid(
             let bounds = Bounds::new(view.origin + offset, view.size);
             window.with_content_mask(Some(ContentMask { bounds: view }), |window| {
                 window.paint_quad(fill(view, rgb(background)));
+                if margin {
+                    paint_margin(view, bounds.origin, grid_size, cell_size, rgb(dot), window);
+                }
                 if let Some(edges) = &edges {
                     edges.paint(
                         view,

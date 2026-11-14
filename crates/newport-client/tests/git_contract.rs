@@ -1,5 +1,6 @@
 //! Replay captured agent responses through the validators used by GPUI.
-use newport_client::{git_blob, git_diff_page, git_operation::Operation, git_page};
+use newport_client::{git_blob, git_diff_page, git_operation, git_page};
+use newport_protocol::git as protocol;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -17,41 +18,55 @@ fn real_agent_responses_satisfy_native_contracts() {
         };
         let method = row["request"]["method"].as_str().expect("request method");
         let params = &row["request"]["params"];
-        let result = match method {
-            "repo.diff_page" | "repo.commit_diff_page" => git_diff_page::decode(
-                &mut response.clone(),
-                method == "repo.diff_page",
-                params["cursor"].is_null(),
-            ),
-            "repo.status" | "repo.history" | "repo.commit_files" | "repo.branches"
-            | "repo.remote_names" | "repo.remote_refs" | "repo.stashes" | "repo.tags"
-            | "repo.worktrees" => git_page::validate(response),
-            "repo.blob_page" => {
-                git_page::validate(response).expect("blob page envelope");
-                if params["cursor"].is_null() {
+        let request: protocol::Request =
+            serde_json::from_value(row["request"].clone()).expect("request");
+        // A whole diff arrives as a stream, so the trace holds the diff it
+        // carried rather than the reply that ends the stream.
+        if matches!(
+            request,
+            protocol::Request::Diff { .. } | protocol::Request::CommitDiff { .. }
+        ) {
+            serde_json::from_value::<protocol::Diff>(response["diff"].clone())
+                .map_err(|error| error.to_string())
+                .and_then(|diff| diff.validate().map_err(|error| error.to_string()))
+                .unwrap_or_else(|error| panic!("line {} ({method}): {error}", line + 1));
+            methods.insert(method.to_owned());
+            continue;
+        }
+        let reply = request
+            .reply_kind()
+            .deserialize_result(response.clone())
+            .unwrap_or_else(|error| panic!("line {} ({method}): {error}", line + 1));
+        let result = match (&request, &reply) {
+            (protocol::Request::DiffPage { cursor, .. }, protocol::Reply::DiffPage(page))
+            | (
+                protocol::Request::CommitDiffPage { cursor, .. },
+                protocol::Reply::CommitDiffPage(page),
+            ) => git_diff_page::validate(page, method == "repo.diff_page", cursor.is_none()),
+            (_, protocol::Reply::Status(page)) => git_page::validate_page(page),
+            (_, protocol::Reply::History(page)) => git_page::validate_page(page),
+            (_, protocol::Reply::CommitFiles(page)) => git_page::validate_page(page),
+            (_, protocol::Reply::Branches(page)) => git_page::validate_page(page),
+            (_, protocol::Reply::RemoteNames(page)) => git_page::validate_page(page),
+            (_, protocol::Reply::RemoteRefs(page)) => git_page::validate_page(page),
+            (_, protocol::Reply::Stashes(page)) => git_page::validate_page(page),
+            (_, protocol::Reply::Tags(page)) => git_page::validate_page(page),
+            (_, protocol::Reply::Worktrees(page)) => git_page::validate_page(page),
+            (protocol::Request::BlobPage { oid, cursor, .. }, protocol::Reply::BlobPage(page)) => {
+                git_page::validate_page(page).expect("blob page envelope");
+                if cursor.is_none() {
                     let mut content = git_blob::Content::default();
-                    content.oid = params["oid"].as_str().unwrap().into();
-                    content.append(response)
+                    content.oid = oid.clone();
+                    content.append(page)
                 } else {
                     Ok(())
                 }
             }
-            "operation.start" | "operation.get" | "operation.review" | "repo.init"
-            | "repo.clone" => {
-                Operation::decode(response.clone(), params["operationId"].as_str().unwrap())
+            (_, protocol::Reply::Operation(_)) => {
+                git_operation::confirmed(reply.clone(), params["operationId"].as_str().unwrap())
                     .map(|_| ())
             }
-            "repo.open"
-            | "repo.close"
-            | "repo.status_summary"
-            | "repo.commit"
-            | "repo.remotes"
-            | "repo.remote"
-            | "repo.tag"
-            | "repo.blob"
-            | "repo.diff"
-            | "repo.commit_diff" => Ok(()),
-            _ => panic!("unhandled method: {method}"),
+            _ => Ok(()),
         };
         result.unwrap_or_else(|error| panic!("line {} ({method}): {error}", line + 1));
         methods.insert(method.to_owned());

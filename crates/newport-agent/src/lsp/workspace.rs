@@ -1,5 +1,6 @@
 //! Debounced recursive worktree notifications.
 use super::*;
+use newport_protocol::lsp::{FileChange, FileChangeKind, FilesChanged, WatchError};
 use notify::{
     EventKind, RecommendedWatcher, RecursiveMode, Watcher,
     event::{ModifyKind, RenameMode},
@@ -8,7 +9,7 @@ use std::collections::BTreeMap;
 
 #[derive(Default)]
 struct Pending {
-    events: BTreeMap<PathBuf, u32>,
+    events: BTreeMap<PathBuf, FileChangeKind>,
     error: Option<String>,
 }
 impl Pending {
@@ -33,19 +34,20 @@ impl Pending {
             if relative.components().any(|c| c.as_os_str() == ".git") {
                 continue;
             }
+            use FileChangeKind::{Changed, Created, Deleted};
             let kind = match event.kind {
-                EventKind::Create(_) => 1,
-                EventKind::Remove(_) => 3,
-                EventKind::Modify(ModifyKind::Name(RenameMode::From)) => 3,
-                EventKind::Modify(ModifyKind::Name(RenameMode::To)) => 1,
+                EventKind::Create(_) => Created,
+                EventKind::Remove(_) => Deleted,
+                EventKind::Modify(ModifyKind::Name(RenameMode::From)) => Deleted,
+                EventKind::Modify(ModifyKind::Name(RenameMode::To)) => Created,
                 EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
                     if index == 0 {
-                        3
+                        Deleted
                     } else {
-                        1
+                        Created
                     }
                 }
-                EventKind::Modify(_) => 2,
+                EventKind::Modify(_) => Changed,
                 _ => continue,
             };
             if self.events.len() >= 4096 && !self.events.contains_key(&path) {
@@ -56,8 +58,8 @@ impl Pending {
             }
             // Preserve creates through writes; delete/recreate means changed.
             let kind = match (self.events.get(&path), kind) {
-                (Some(1), 2) => 1,
-                (Some(3), 1) => 2,
+                (Some(Created), Changed) => Created,
+                (Some(Deleted), Created) => Changed,
                 _ => kind,
             };
             self.events.insert(path, kind);
@@ -96,24 +98,20 @@ pub(super) fn watch(
                     .unwrap_or_else(std::sync::PoisonError::into_inner),
             );
             if let Some(error) = pending.error {
-                let _ = notify(&output, "$/newport/watchError", json!({"error":error}));
+                let _ = send(&output, &WatchError { error });
             }
             let changes: Vec<_> = pending
                 .events
                 .into_iter()
                 .filter_map(|(path, kind)| {
                     let uri = url::Url::from_file_path(path).ok()?;
-                    Some(json!({"uri":uri.as_str(),"type":kind}))
+                    Some(FileChange {
+                        uri: uri.into(),
+                        kind,
+                    })
                 })
                 .collect();
-            if !changes.is_empty()
-                && notify(
-                    &output,
-                    "$/newport/filesChanged",
-                    json!({"changes":changes}),
-                )
-                .is_err()
-            {
+            if !changes.is_empty() && send(&output, &FilesChanged { changes }).is_err() {
                 break;
             }
         }
@@ -137,7 +135,10 @@ mod tests {
             ),
         );
         pending.receive(root, event(EventKind::Modify(ModifyKind::Any), "/repo/a"));
-        assert_eq!(pending.events[Path::new("/repo/a")], 1);
+        assert_eq!(
+            pending.events[Path::new("/repo/a")],
+            FileChangeKind::Created
+        );
         pending.receive(
             root,
             Ok(
@@ -146,8 +147,14 @@ mod tests {
                     .add_path("/repo/b".into()),
             ),
         );
-        assert_eq!(pending.events[Path::new("/repo/a")], 3);
-        assert_eq!(pending.events[Path::new("/repo/b")], 1);
+        assert_eq!(
+            pending.events[Path::new("/repo/a")],
+            FileChangeKind::Deleted
+        );
+        assert_eq!(
+            pending.events[Path::new("/repo/b")],
+            FileChangeKind::Created
+        );
         pending.receive(
             root,
             event(EventKind::Modify(ModifyKind::Any), "/repo/.git/index"),

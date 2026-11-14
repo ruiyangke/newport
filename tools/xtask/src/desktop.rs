@@ -1,5 +1,5 @@
 //! The desktop app's persistence and executable checks, using only disposable profiles.
-use crate::{command, grammars, pdfium, process};
+use crate::{command, grammars, process};
 use anyhow::{Context, Result};
 
 pub fn run(headless: bool) -> Result<()> {
@@ -19,12 +19,9 @@ pub fn run(headless: bool) -> Result<()> {
         .with_context(|| format!("Persistence checks failed: {filter}"))?;
     }
 
-    // Grammar libraries and Windows PDFium are loaded beside the executable.
-    // These staging helpers honor Cargo's target and target-directory settings.
+    // Grammar libraries are loaded beside the executable. Staging honors
+    // Cargo's target and target-directory settings.
     grammars::build(false, None).context("Staging grammar resources")?;
-    if cfg!(target_os = "windows") {
-        pdfium::stage(false, None).context("Staging Windows PDFium")?;
-    }
 
     let mut lifecycle = command("cargo");
     lifecycle.args([

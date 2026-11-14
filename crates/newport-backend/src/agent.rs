@@ -13,6 +13,7 @@ use newport_protocol::integration::{
     self, BrowserReply, BrowserRequest, Call, ClientMessage, Reply, Request, Response,
     ServerMessage, wire::Message,
 };
+use newport_protocol::runtime::service;
 #[path = "agent_events.rs"]
 mod incoming;
 
@@ -57,12 +58,12 @@ impl Service {
     }
     pub(crate) fn capability(&self) -> (&'static str, u32) {
         match self {
-            Self::Git => ("git", newport_protocol::git::VERSION),
-            Self::Monitor => ("monitor", newport_protocol::monitor::VERSION),
-            Self::Integration { .. } => ("integration", integration::VERSION),
-            Self::Lsp { .. } => ("lsp", 1),
-            Self::RemoteApps { .. } => ("remote-apps", 1),
-            Self::Terminal => ("terminal", 1),
+            Self::Git => (service::GIT, newport_protocol::git::VERSION),
+            Self::Monitor => (service::MONITOR, newport_protocol::monitor::VERSION),
+            Self::Integration { .. } => (service::INTEGRATION, integration::VERSION),
+            Self::Lsp { .. } => (service::LSP, 1),
+            Self::RemoteApps { .. } => (service::REMOTE_APPS, 1),
+            Self::Terminal => (service::TERMINAL, newport_protocol::terminal::VERSION),
         }
     }
     #[cfg(test)]

@@ -1,5 +1,5 @@
 //! A server's operating system, and install commands for its package manager.
-use serde::{Deserialize, Serialize};
+use newport_protocol::desktop::applications::{Elevation, Updater};
 
 /// A server's distribution, from `/etc/os-release`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -127,40 +127,14 @@ impl PackageNames {
     }
 }
 
-/// How the server's account runs a command as root.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Elevation {
-    /// The account is root.
-    Root,
-    #[default]
-    Sudo,
-    Doas,
-    /// Neither `sudo` nor `doas` is installed.
-    Unavailable,
-}
-
-impl Elevation {
-    /// What goes before a command run as root, if the account can.
-    fn prefix(self) -> Option<&'static str> {
-        match self {
-            Self::Root => Some(""),
-            Self::Sudo => Some("sudo "),
-            Self::Doas => Some("doas "),
-            Self::Unavailable => None,
-        }
+/// What goes before a command run as root, if the account can.
+fn root_prefix(elevation: Elevation) -> Option<&'static str> {
+    match elevation {
+        Elevation::Root => Some(""),
+        Elevation::Sudo => Some("sudo "),
+        Elevation::Doas => Some("doas "),
+        Elevation::Unavailable => None,
     }
-}
-
-/// An image-based system's own way to add packages, in place of its package
-/// manager. Both take effect after a restart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Updater {
-    /// Fedora Atomic desktops and CoreOS.
-    RpmOstree,
-    /// openSUSE MicroOS, Aeon and Kalpa.
-    TransactionalUpdate,
 }
 
 impl PackageManager {
@@ -184,7 +158,7 @@ impl PackageManager {
         updater: Option<Updater>,
         recommends: bool,
     ) -> Option<String> {
-        let s = elevation.prefix()?;
+        let s = root_prefix(elevation)?;
         let list = packages
             .iter()
             .map(|p| quote(p))

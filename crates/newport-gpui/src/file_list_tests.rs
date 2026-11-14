@@ -7,6 +7,7 @@ use gpui_kit::{
     AppContext, Context, Entity, IntoElement, Render, TestAppContext, VisualTestContext, Window,
     div, prelude::*, px, size,
 };
+use newport_protocol::desktop;
 use serde_json::{Value, json};
 use std::{thread, time::Duration};
 
@@ -34,19 +35,9 @@ fn fixture(cx: &mut TestAppContext, width: f32) -> (Entity<Newport>, &mut Visual
     let (_, visual) = cx.add_window_view(|window, cx| {
         let view = cx.new(|cx| {
             let mut view = crate::page_perf_tests::owner(window, cx);
-            let selected = view.server.clone();
-            let profile = view.snapshot["config"]["servers"]
-                .as_array_mut()
-                .unwrap()
-                .iter_mut()
-                .find(|profile| profile["id"] == selected)
-                .unwrap();
-            profile["id"] = json!(SERVER);
-            profile["sshPort"] = json!(22);
-            profile["authMethod"] = json!("publicKey");
-            view.server = SERVER.into();
-            view.snapshot["instanceId"] = json!("00000000-0000-4000-8000-000000000002");
-            view.snapshot["runtime"]["connectionRevisions"][SERVER] = json!(1);
+            assert_eq!(view.server, SERVER);
+            view.snapshot_mut().instance_id =
+                uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000002").unwrap();
             view.page = Page::Files;
             view.prepare_file_browser(window, cx);
             let browser = view.file_browsers.get_mut(SERVER).unwrap();
@@ -242,15 +233,26 @@ fn breadcrumb_collapses_long_paths_navigates_and_turns_into_a_field(cx: &mut Tes
 fn places_offer_home_root_and_this_servers_projects(cx: &mut TestAppContext) {
     let (view, cx, host) = fixture(cx, 1100.);
     view.update(cx, |view, _| {
+        let project = |server: &str, name: &str, path: &str| desktop::preferences::Project {
+            id: uuid::Uuid::new_v4(),
+            server: server.parse().unwrap(),
+            name: name.into(),
+            path: newport_protocol::git::Path::new(path.as_bytes()),
+        };
         let generation = view.resources.begin_refresh("file-places", false).unwrap();
-        view.resources.complete(
-            "file-places",
+        assert!(view.complete_file_places(
             generation,
-            Ok(json!([
-                {"serverId":SERVER,"name":"api","path":{"display":"/srv/api"}},
-                {"serverId":"other","name":"elsewhere","path":{"display":"/srv/other"}}
-            ])),
-        );
+            Ok(desktop::Reply::Preferences(Box::new(
+                desktop::preferences::Reply::ProjectsList(Box::new(
+                    desktop::preferences::Projects {
+                        projects: vec![
+                            project(SERVER, "api", "/srv/api"),
+                            project(&uuid::Uuid::new_v4().to_string(), "elsewhere", "/srv/other"),
+                        ],
+                    }
+                ))
+            ))),
+        ));
     });
     open(&view, cx, &host, json!({"path":"/srv/api","entries":[]}));
     let mut places: Vec<_> = nodes(cx)
@@ -283,7 +285,7 @@ fn column_headers_sort_and_announce_their_order(cx: &mut TestAppContext) {
     open(&view, cx, &host, files(5));
     let first = |view: &Entity<Newport>, cx: &mut VisualTestContext| {
         view.read_with(cx, |view, cx| {
-            crate::text(&view.file_browsers[SERVER].entries(cx)[0], "name")
+            view.file_browsers[SERVER].entries(cx)[0].name.clone()
         })
     };
     assert_eq!(first(&view, cx), "file-000.txt");

@@ -114,10 +114,7 @@ async fn prepare(
     destination: &Destination,
 ) -> Result<String, String> {
     let server = owner.server();
-    let scope = newport_domain::connection_scope::connection(
-        &serde_json::to_value(server).map_err(|e| e.to_string())?,
-        &serde_json::json!({"instanceId":state.instance_id,"runtime":{"connectionRevisions":{server.id.to_string():owner.revision()}}}),
-    );
+    let scope = server.connection_scope(owner.revision(), state.instance_id);
     let snapshot = state.snapshot();
     if owner.is_revoked() || snapshot.load_error.is_some() {
         return Err("The terminal's server connection is no longer available.".into());

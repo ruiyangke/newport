@@ -1,12 +1,11 @@
 //! Read-only saved-forward projection for a container port chip.
 //! Request dispatch, connection ownership, and browser opening live elsewhere.
 use newport_domain::{
-    containers::{ContainerPort, forwardable},
+    containers::forwardable,
     forwarding::{host, local_endpoint},
-    model::{Direction, Status, Tunnel},
+    model::{Status, Tunnel},
 };
-use serde::Deserialize;
-use serde_json::Value;
+use newport_protocol::{desktop::configuration, monitor::containers::ContainerPort};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -31,29 +30,29 @@ pub struct PortForwards {
 struct Source {
     available: bool,
     server: String,
-    tunnels: Option<Value>,
-    runtime: Option<Value>,
-    load_error: Option<Value>,
+    tunnels: Vec<configuration::Tunnel>,
+    runtime: Vec<configuration::ConnectionRow>,
+    load_error: Option<String>,
 }
 
 struct CachedForward {
     tunnel: Tunnel,
     address: String,
-    state: Option<(Status, Option<String>)>,
+    state: (Status, Option<String>),
 }
 
 impl PortForwards {
     /// Compare borrowed inputs first. Changes outside these fields, including
     /// server statistics and unrelated configuration, do not rebuild the cache.
-    pub fn update(&mut self, snapshot: Option<&Value>, server: &str) {
-        let tunnels = snapshot.and_then(|value| value.get("config")?.get("tunnels"));
-        let runtime = snapshot.and_then(|value| value.get("runtime")?.get("tunnels"));
-        let load_error = snapshot.and_then(|value| value.get("loadError"));
+    pub fn update(&mut self, snapshot: Option<&configuration::Snapshot>, server: &str) {
+        let tunnels = snapshot.map_or(&[][..], |value| &value.config.tunnels);
+        let runtime = snapshot.map_or(&[][..], |value| &value.runtime.tunnels);
+        let load_error = snapshot.and_then(|value| value.load_error.as_ref());
         if self.source.as_ref().is_some_and(|source| {
             source.available == snapshot.is_some()
                 && source.server == server
-                && source.tunnels.as_ref() == tunnels
-                && source.runtime.as_ref() == runtime
+                && source.tunnels == tunnels
+                && source.runtime == runtime
                 && source.load_error.as_ref() == load_error
         }) {
             return;
@@ -61,8 +60,8 @@ impl PortForwards {
         self.source = Some(Source {
             available: snapshot.is_some(),
             server: server.to_owned(),
-            tunnels: tunnels.cloned(),
-            runtime: runtime.cloned(),
+            tunnels: tunnels.to_vec(),
+            runtime: runtime.to_vec(),
             load_error: load_error.cloned(),
         });
         self.forwards = self
@@ -104,7 +103,7 @@ impl PortForwards {
         let local_port = local_endpoint(&saved.tunnel, Some(remote_port))
             .ok()?
             .port();
-        let (status, error) = saved.state.as_ref()?;
+        let (status, error) = &saved.state;
         Some(ForwardedPort {
             tunnel: saved.tunnel.clone(),
             local_port,
@@ -116,30 +115,30 @@ impl PortForwards {
 
 impl Source {
     fn parse(&self) -> Option<Vec<CachedForward>> {
-        if !self.available
-            || self
-                .load_error
-                .as_ref()
-                .is_some_and(|value| !value.is_null())
-        {
+        if !self.available || self.load_error.is_some() {
             return None;
         }
         let server = Uuid::parse_str(&self.server)
             .ok()
             .filter(|id| !id.is_nil())?;
-        let tunnels = Vec::<Tunnel>::deserialize(self.tunnels.as_ref()?).ok()?;
-        let runtime = self.runtime.as_ref()?.as_object()?;
         Some(
-            tunnels
-                .into_iter()
-                .filter(|tunnel| tunnel.server_id == server && tunnel.direction == Direction::Local)
+            self.tunnels
+                .iter()
+                .filter(|tunnel| {
+                    tunnel.server_id == server
+                        && tunnel.direction == configuration::Direction::Local
+                })
                 .map(|tunnel| {
-                    let address = host(&tunnel.remote_host);
-                    let state =
-                        runtime_state(runtime.get(&tunnel.id.to_string()).unwrap_or(&Value::Null));
+                    let state = runtime_state(
+                        self.runtime
+                            .iter()
+                            .find(|row| row.id == tunnel.id)
+                            .map(|row| &row.value),
+                    );
+                    let tunnel = Tunnel::from(tunnel);
                     CachedForward {
+                        address: host(&tunnel.remote_host),
                         tunnel,
-                        address,
                         state,
                     }
                 })
@@ -148,27 +147,27 @@ impl Source {
     }
 }
 
-fn runtime_state(runtime: &Value) -> Option<(Status, Option<String>)> {
-    let status = match runtime.get("status").and_then(Value::as_str) {
-        None if runtime.is_null() => Status::Disconnected,
-        Some("disconnected") => Status::Disconnected,
-        Some("connecting") => Status::Connecting,
-        Some("connected") => Status::Connected,
-        Some("reconnecting") => Status::Reconnecting,
-        Some("error") => Status::Error,
-        _ => return None,
+fn runtime_state(runtime: Option<&configuration::ConnectionState>) -> (Status, Option<String>) {
+    let Some(runtime) = runtime else {
+        return (Status::Disconnected, None);
     };
-    let error = match runtime.get("errorMessage") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(message)) => Some(message.clone()),
-        _ => return None,
+    let status = match runtime.status {
+        configuration::ConnectionStatus::Disconnected => Status::Disconnected,
+        configuration::ConnectionStatus::Connecting => Status::Connecting,
+        configuration::ConnectionStatus::Connected => Status::Connected,
+        configuration::ConnectionStatus::Reconnecting => Status::Reconnecting,
+        configuration::ConnectionStatus::Error => Status::Error,
     };
-    Some((status, error))
+    (status, runtime.error_message.clone())
 }
 
 /// Convenience projection for one-off callers. Retain `PortForwards` when
 /// projecting multiple chips or updating from a recurring host tick.
-pub fn port_forward(snapshot: &Value, server: &str, port: &ContainerPort) -> Option<ForwardedPort> {
+pub fn port_forward(
+    snapshot: &configuration::Snapshot,
+    server: &str,
+    port: &ContainerPort,
+) -> Option<ForwardedPort> {
     let mut forwards = PortForwards::default();
     forwards.update(Some(snapshot), server);
     forwards.get(port)
@@ -177,8 +176,8 @@ pub fn port_forward(snapshot: &Value, server: &str, port: &ContainerPort) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use newport_domain::{containers::PortProtocol, forwarding::discovered_tunnel};
-    use serde_json::json;
+    use newport_domain::{forwarding::discovered_tunnel, model::Direction};
+    use newport_protocol::monitor::containers::PortProtocol;
 
     fn port(ip: &str, host: u16) -> ContainerPort {
         ContainerPort {
@@ -188,13 +187,48 @@ mod tests {
             protocol: PortProtocol::Tcp,
         }
     }
-    fn snapshot(tunnels: &[Tunnel]) -> Value {
-        json!({"config":{"tunnels":tunnels},"runtime":{"tunnels":{}}})
+    fn snapshot(tunnels: &[Tunnel]) -> configuration::Snapshot {
+        configuration::Snapshot {
+            instance_id: Uuid::new_v4(),
+            revision: 1,
+            config: configuration::Config {
+                servers: Vec::new(),
+                tunnels: tunnels.iter().map(configuration::Tunnel::from).collect(),
+            },
+            runtime: configuration::Runtime {
+                agent_transport: Vec::new(),
+                agent_runtime: Vec::new(),
+                agent_permissions: Vec::new(),
+                agent_status: Vec::new(),
+                agent_installation: Vec::new(),
+                tunnels: Vec::new(),
+                tunnel_health: Vec::new(),
+                clipboard: Vec::new(),
+                clipboard_messages: Vec::new(),
+                connection_revisions: Vec::new(),
+                awaiting_agent: Vec::new(),
+            },
+            load_error: None,
+        }
     }
-    fn runtime(snapshot: &mut Value, id: Uuid, status: &str, error: Option<&str>) {
-        snapshot["runtime"]["tunnels"][id.to_string()] =
-            json!({"status":status,"errorMessage":error,"reconnectAttempt":0});
+    fn runtime(
+        snapshot: &mut configuration::Snapshot,
+        id: Uuid,
+        status: configuration::ConnectionStatus,
+        error: Option<&str>,
+    ) {
+        let rows = &mut snapshot.runtime.tunnels;
+        rows.retain(|row| row.id != id);
+        rows.push(configuration::ConnectionRow {
+            id,
+            value: configuration::ConnectionState {
+                status,
+                error_message: error.map(Into::into),
+                reconnect_attempt: 0,
+            },
+        });
     }
+    use configuration::ConnectionStatus as Connection;
 
     #[test]
     fn saved_forward_projects_exact_range_member_and_runtime_without_mutating_snapshot() {
@@ -204,7 +238,7 @@ mod tests {
         tunnel.local_port_end = Some(9005);
         tunnel.remote_port_end = Some(8005);
         let mut value = snapshot(std::slice::from_ref(&tunnel));
-        runtime(&mut value, tunnel.id, "connected", None);
+        runtime(&mut value, tunnel.id, Connection::Connected, None);
         let before = value.clone();
         let projection = port_forward(&value, &server.to_string(), &port("0.0.0.0", 8003)).unwrap();
         assert_eq!(projection.tunnel, tunnel);
@@ -216,7 +250,7 @@ mod tests {
         runtime(
             &mut value,
             tunnel.id,
-            "error",
+            Connection::Error,
             Some("destination unavailable"),
         );
         let projection =
@@ -253,7 +287,7 @@ mod tests {
         let server = Uuid::new_v4();
         let tunnel = discovered_tunnel(&[], server, "0.0.0.0", 8080).unwrap();
         let mut value = snapshot(std::slice::from_ref(&tunnel));
-        runtime(&mut value, tunnel.id, "connected", None);
+        runtime(&mut value, tunnel.id, Connection::Connected, None);
         let mut udp = port("0.0.0.0", 8080);
         udp.protocol = PortProtocol::Udp;
         let mut internal = port("0.0.0.0", 8080);
@@ -264,24 +298,18 @@ mod tests {
     }
 
     #[test]
-    fn projection_fails_closed_for_malformed_ranges_configurations_and_runtime() {
+    fn projection_fails_closed_for_invalid_ranges_and_unreadable_configurations() {
         let server = Uuid::new_v4();
         let tunnel = discovered_tunnel(&[], server, "127.0.0.1", 8080).unwrap();
         let binding = port("127.0.0.1", 8080);
         let mut invalid = tunnel.clone();
         invalid.local_port_end = Some(8081);
         assert!(port_forward(&snapshot(&[invalid]), &server.to_string(), &binding).is_none());
+        let mut nil = tunnel.clone();
+        nil.id = Uuid::nil();
+        assert!(port_forward(&snapshot(&[nil]), &server.to_string(), &binding).is_none());
         let mut value = snapshot(std::slice::from_ref(&tunnel));
-        value["config"]["tunnels"][0]["id"] = json!("bad-id");
-        assert!(port_forward(&value, &server.to_string(), &binding).is_none());
-        let mut value = snapshot(std::slice::from_ref(&tunnel));
-        value["loadError"] = json!("configuration could not be read");
-        assert!(port_forward(&value, &server.to_string(), &binding).is_none());
-        let mut value = snapshot(std::slice::from_ref(&tunnel));
-        runtime(&mut value, tunnel.id, "unknown", None);
-        assert!(port_forward(&value, &server.to_string(), &binding).is_none());
-        runtime(&mut value, tunnel.id, "connected", None);
-        value["runtime"]["tunnels"][tunnel.id.to_string()]["errorMessage"] = json!(42);
+        value.load_error = Some("configuration could not be read".into());
         assert!(port_forward(&value, &server.to_string(), &binding).is_none());
     }
 
@@ -293,7 +321,7 @@ mod tests {
         tunnel.local_port_end = Some(9005);
         tunnel.remote_port_end = Some(8005);
         let mut value = snapshot(std::slice::from_ref(&tunnel));
-        runtime(&mut value, tunnel.id, "connected", None);
+        runtime(&mut value, tunnel.id, Connection::Connected, None);
         let mut forwards = PortForwards::default();
         assert!(forwards.get(&port("127.0.0.1", 8003)).is_none());
         forwards.update(Some(&value), &server.to_string());
@@ -306,10 +334,30 @@ mod tests {
                 assert_eq!(projected.status, Status::Connected);
             }
         }
-        value["runtime"]["servers"] = json!({"new-server": {"status":"connected"}});
-        value["config"]["servers"] = json!([{"name":"Renamed server"}]);
-        value["config"]["preferences"] = json!({"theme":"dark"});
-        value["statistics"] = json!({"bytes":9000});
+        value.revision += 1;
+        value
+            .runtime
+            .connection_revisions
+            .push(configuration::RevisionRow {
+                id: Uuid::new_v4(),
+                value: 3,
+            });
+        value.config.servers.push(configuration::Server {
+            id: Uuid::new_v4(),
+            name: "Renamed server".into(),
+            ssh_user: "user".into(),
+            ssh_host: "host".into(),
+            ssh_port: 22,
+            identity_file: None,
+            agent_source: None,
+            agent_key_fingerprint: None,
+            auth_method: configuration::AuthMethod::PublicKey,
+            clipboard_enabled: false,
+            browser_enabled: false,
+            agent_install_approved: false,
+            setup_complete: false,
+            proxy: None,
+        });
         forwards.update(Some(&value), &server.to_string());
         assert_eq!(forwards.revision, 1);
         assert_eq!(
@@ -327,13 +375,18 @@ mod tests {
         let mut forwards = PortForwards::default();
         forwards.update(Some(&value), &server.to_string());
         assert_eq!(forwards.get(&binding).unwrap().status, Status::Disconnected);
-        runtime(&mut value, tunnel.id, "error", Some("connection refused"));
+        runtime(
+            &mut value,
+            tunnel.id,
+            Connection::Error,
+            Some("connection refused"),
+        );
         forwards.update(Some(&value), &server.to_string());
         assert_eq!(forwards.revision, 2);
         let projected = forwards.get(&binding).unwrap();
         assert_eq!(projected.status, Status::Error);
         assert_eq!(projected.error.as_deref(), Some("connection refused"));
-        value["config"]["tunnels"][0]["localPort"] = json!(9090);
+        value.config.tunnels[0].local_port = 9090;
         forwards.update(Some(&value), &server.to_string());
         assert_eq!(forwards.revision, 3);
         assert_eq!(forwards.get(&binding).unwrap().local_port, 9090);
@@ -346,31 +399,16 @@ mod tests {
     }
 
     #[test]
-    fn cache_drops_projections_on_outage_or_malformed_inputs_and_recovers() {
+    fn cache_drops_projections_on_outage_and_recovers() {
         let server = Uuid::new_v4();
         let tunnel = discovered_tunnel(&[], server, "localhost", 8080).unwrap();
         let mut valid = snapshot(std::slice::from_ref(&tunnel));
-        runtime(&mut valid, tunnel.id, "connected", None);
+        runtime(&mut valid, tunnel.id, Connection::Connected, None);
         let binding = port("127.0.0.1", 8080);
         let mut outage = valid.clone();
-        outage["loadError"] = json!("configuration unavailable");
-        let mut malformed_config = valid.clone();
-        malformed_config["config"]["tunnels"][0]["id"] = json!("malformed");
-        let mut malformed_runtime = valid.clone();
-        malformed_runtime["runtime"]["tunnels"] = json!([]);
-        let mut malformed_status = valid.clone();
-        runtime(&mut malformed_status, tunnel.id, "unknown", None);
-        let mut missing_runtime = valid.clone();
-        missing_runtime.as_object_mut().unwrap().remove("runtime");
+        outage.load_error = Some("configuration unavailable".into());
         let mut forwards = PortForwards::default();
-        for invalid in [
-            None,
-            Some(outage),
-            Some(malformed_config),
-            Some(malformed_runtime),
-            Some(malformed_status),
-            Some(missing_runtime),
-        ] {
+        for invalid in [None, Some(outage)] {
             forwards.update(Some(&valid), &server.to_string());
             assert_eq!(forwards.get(&binding).unwrap().status, Status::Connected);
             forwards.update(invalid.as_ref(), &server.to_string());

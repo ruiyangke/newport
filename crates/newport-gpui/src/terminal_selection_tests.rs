@@ -626,3 +626,16 @@ fn the_grid_is_centered_inside_the_padding(cx: &mut TestAppContext) {
     click(corner, 2, Modifiers::default(), cx);
     assert_eq!(selected(&view, cx), "text");
 }
+
+#[gpui::test]
+fn scrolling_a_tab_uses_it(cx: &mut TestAppContext) {
+    let (view, cx) = fixture(cx, "text");
+    let position = at(&view, 1., 1., cx);
+    // As tmux counts the wheel, a scroll fits the shell to this tab.
+    cx.simulate_event(gpui::ScrollEvent {
+        position,
+        delta: gpui::ScrollDelta::Lines(point(0., 3.)),
+        ..Default::default()
+    });
+    assert!(view.read_with(cx, |view, _| view.activate_pending));
+}

@@ -36,7 +36,7 @@ impl Agent {
                 result: Ok(value),
             }) => {
                 assert_eq!(reply, id);
-                serde_json::to_value(value.projection(&request)).unwrap()
+                serde_json::to_value(&value).unwrap()
             }
             other => panic!("Unexpected reply: {other:?}"),
         }

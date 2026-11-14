@@ -20,6 +20,37 @@ mod stable_display;
 #[cfg(test)]
 mod tests;
 
+/// The enum maps the monitor protocol's `Record` impls hold.
+#[cfg(test)]
+pub(crate) fn enum_maps() -> Vec<crate::desktop::wire::wire_tables::EnumMap> {
+    fn record<T: Record<Wire = i32> + std::fmt::Debug + 'static>(
+        proto: &'static str,
+    ) -> crate::desktop::wire::wire_tables::EnumMap {
+        crate::desktop::wire::wire_tables::enum_map(
+            proto,
+            |value| T::from_wire(value).ok(),
+            T::to_wire,
+        )
+    }
+    vec![
+        record::<super::compose::CliKind>("newport.monitor.ComposeCliKind"),
+        record::<super::compose::State>("newport.monitor.ComposeState"),
+        record::<super::containers::ContainerVerb>("newport.monitor.ContainersContainerVerb"),
+        record::<super::containers::ProjectVerb>("newport.monitor.ContainersProjectVerb"),
+        record::<super::containers::PruneTarget>("newport.monitor.ContainersPruneTarget"),
+        record::<super::containers::ContainerState>("newport.monitor.ContainersContainerState"),
+        record::<super::containers::ContainerHealth>("newport.monitor.ContainersContainerHealth"),
+        record::<super::containers::PortProtocol>("newport.monitor.ContainersPortProtocol"),
+        record::<super::containers::LogStream>("newport.monitor.ContainersLogStream"),
+        record::<super::containers::DiskPart>("newport.monitor.ContainersDiskPart"),
+        record::<super::services::Scope>("newport.monitor.ServicesScope"),
+        record::<super::services::Privilege>("newport.monitor.ServicesPrivilege"),
+        record::<super::services::Verb>("newport.monitor.ServicesVerb"),
+        record::<super::services::Priority>("newport.monitor.ServicesPriority"),
+        record::<super::services::ExitKind>("newport.monitor.ServicesExitKind"),
+    ]
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]

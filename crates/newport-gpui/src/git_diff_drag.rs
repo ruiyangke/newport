@@ -226,7 +226,6 @@ mod tests {
     use gpui_kit as gpui;
     use gpui_kit::base::test_support::snapshots;
     use gpui_kit::{Context, Entity, FocusHandle, Render, TestAppContext, VisualTestContext, div};
-    use serde_json::json;
     use std::{cell::OnceCell, collections::BTreeSet, time::Duration};
 
     struct View {
@@ -280,7 +279,10 @@ mod tests {
                 git_diff_split::render(p.clone(), &self.scroll, Some(actions), None, cx)
             } else {
                 let documents = self.cache.prepare(
-                    json!(["snapshot"]),
+                    crate::git_diff_text::Key {
+                        snapshot: Some("snapshot".into()),
+                        ..Default::default()
+                    },
                     p,
                     || {
                         vec![
@@ -325,10 +327,32 @@ mod tests {
                 })
             })
             .collect();
-        let review = newport_client::git_selection::Review::from_page(&json!({
-            "nextCursor":null,"metadata":{"readOnly":false,"totalFiles":1,"sourceSnapshot":"status","entryId":"entry","side":"index_to_worktree","contextLines":3},
-            "entries":[{"fileIndex":0,"status":"Modified","oldMode":33188,"newMode":33188,"oldPath":{"bytesB64":"Zg=="},"newPath":{"bytesB64":"Zg=="},"hunks":[{"id":"h","lines":lines.iter().map(|row| json!({"id":row.selection.as_ref().unwrap().1,"origin":row.origin,"lineComplete":true})).collect::<Vec<_>>()}]}]
-        })).unwrap();
+        let page = crate::git_fixture::diff_page(
+            "diff",
+            crate::git_fixture::working_metadata("status", "entry"),
+            vec![crate::git_fixture::file(
+                0,
+                "f",
+                vec![crate::git_fixture::hunk(
+                    0,
+                    Some("h"),
+                    lines
+                        .iter()
+                        .enumerate()
+                        .map(|(index, row)| {
+                            crate::git_fixture::line(
+                                index as u64,
+                                &row.origin,
+                                Some(&row.selection.as_ref().unwrap().1),
+                                &row.bytes,
+                            )
+                        })
+                        .collect(),
+                )],
+            )],
+            None,
+        );
+        let review = newport_client::git_selection::Review::from_page(&page).unwrap();
         let p = Rc::new(Presentation {
             lines,
             review: Ok(Rc::new(review)),

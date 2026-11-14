@@ -9,14 +9,14 @@ use gpui_kit::component::{
 #[derive(Clone, PartialEq, Eq)]
 struct Scope {
     server: String,
-    repo: Value,
+    repo: Option<String>,
     tab: usize,
 }
 impl Scope {
     fn current(app: &Newport) -> Self {
         Self {
             server: app.server.clone(),
-            repo: app.git.repo["repoId"].clone(),
+            repo: app.git.repo_id().map(str::to_owned),
             tab: app.git.tab,
         }
     }
@@ -248,7 +248,9 @@ impl RenderOnce for Settings {
         let scope = Scope::current(app);
         let id = SharedString::from(format!(
             "diff-settings-{}-{}-{}",
-            scope.server, scope.repo, scope.tab
+            scope.server,
+            scope.repo.as_deref().unwrap_or_default(),
+            scope.tab
         ));
         let panel = window.use_keyed_state(id.clone(), cx, |window, cx| {
             Panel::new(self.owner, window, cx)

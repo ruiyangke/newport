@@ -1,6 +1,7 @@
 //! Guard ambiguity and repeated-field counts before generated decoding.
 use super::*;
 #[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug))]
 enum Shape {
     Empty,
     Access,
@@ -35,9 +36,10 @@ enum Kind {
     Message(Shape),
 }
 use Kind::{Boolean as B, Bytes as S, Integer as I, Integer32 as U, Message as M};
-fn scan(mut body: &[u8], shape: Shape) -> Result<(), Error> {
+/// The fields `shape` knows: number, most occurrences, and how it reads them.
+fn known(shape: Shape) -> &'static [(u32, u16, Kind)] {
     use Shape::*;
-    let fields: &[(u32, u16, Kind)] = match shape {
+    match shape {
         Empty => &[],
         Access => &[(1, 1, S), (2, 1, S), (3, 1, S), (4, 1, M(Secret))],
         Secret => &[(1, 1, S)],
@@ -88,7 +90,15 @@ fn scan(mut body: &[u8], shape: Shape) -> Result<(), Error> {
         Copy => &[(1, 1, M(CopyLease))],
         Hello => &[(1, 1, U), (2, 1, S)],
         Error => &[(1, 1, S), (2, 1, S), (3, 1, U)],
-    };
+    }
+}
+/// Whether field `number` is one of `shape`'s exclusive cases.
+fn exclusive(shape: Shape, number: u32) -> bool {
+    use Shape::*;
+    matches!((shape, number), (Offer, 3..=5) | (Read, 6..=7))
+}
+fn scan(mut body: &[u8], shape: Shape) -> Result<(), Error> {
+    let fields = known(shape);
     let mut counts = [0u16; 7];
     let mut oneof = false;
     while !body.is_empty() {
@@ -104,7 +114,7 @@ fn scan(mut body: &[u8], shape: Shape) -> Result<(), Error> {
         if counts[index] > *max {
             return Err(Invalid("duplicate field or repeated-field limit").into());
         }
-        if matches!((shape, field.number), (Offer, 3..=5) | (Read, 6..=7)) {
+        if exclusive(shape, field.number) {
             if oneof {
                 return Err(Invalid("ambiguous field").into());
             }
@@ -130,10 +140,9 @@ fn scan(mut body: &[u8], shape: Shape) -> Result<(), Error> {
     }
     Ok(())
 }
-pub(super) fn request(body: &[u8]) -> Result<(), Error> {
+fn request_shape(number: u32) -> Option<Shape> {
     use Shape::*;
-    let field = fields::single(body)?;
-    let shape = match field.number {
+    Some(match number {
         1 => Access,
         2 | 4 | 7 | 9 | 12 | 14 => Empty,
         3 => Read,
@@ -144,14 +153,12 @@ pub(super) fn request(body: &[u8]) -> Result<(), Error> {
         11 => NativeReply,
         13 => ExportOffer,
         15 => CopyLease,
-        _ => return Err(Invalid("request operation").into()),
-    };
-    scan(field.bytes()?, shape)
+        _ => return None,
+    })
 }
-pub(super) fn response(body: &[u8]) -> Result<(), Error> {
+fn response_shape(number: u32) -> Option<Shape> {
     use Shape::*;
-    let field = fields::single(body)?;
-    let shape = match field.number {
+    Some(match number {
         1 => Hello,
         2 => Empty,
         3 => Offer,
@@ -162,7 +169,52 @@ pub(super) fn response(body: &[u8]) -> Result<(), Error> {
         8 => Export,
         9 => Copy,
         10 => Error,
-        _ => return Err(Invalid("response operation").into()),
-    };
+        _ => return None,
+    })
+}
+pub(super) fn request(body: &[u8]) -> Result<(), Error> {
+    let field = fields::single(body)?;
+    let shape = request_shape(field.number).ok_or(Invalid("request operation"))?;
     scan(field.bytes()?, shape)
+}
+pub(super) fn response(body: &[u8]) -> Result<(), Error> {
+    let field = fields::single(body)?;
+    let shape = response_shape(field.number).ok_or(Invalid("response operation"))?;
+    scan(field.bytes()?, shape)
+}
+
+#[cfg(test)]
+pub(crate) fn tables() -> Vec<(Table, &'static str)> {
+    let shape = |number| request_shape(number).map(table);
+    let request = Table::dispatch("clipboard service request", shape);
+    let shape = |number| response_shape(number).map(table);
+    let response = Table::dispatch("clipboard service response", shape);
+    vec![
+        (request, "newport.clipboard.service.ClientFrame"),
+        (response, "newport.clipboard.service.ServerFrame"),
+    ]
+}
+
+#[cfg(test)]
+use crate::desktop::wire::wire_tables::{Row, Table, Wire};
+
+#[cfg(test)]
+fn table(shape: Shape) -> Table {
+    Table::new(format!("clipboard service {shape:?}"), move || {
+        known(shape)
+            .iter()
+            .map(|&(number, most, kind)| {
+                let wire = match kind {
+                    I => Wire::Varint,
+                    U => Wire::Varint32,
+                    B => Wire::Bool,
+                    S => Wire::Len,
+                    M(child) => Wire::Message(table(child)),
+                };
+                Row::new(number, wire)
+                    .repeated(most > 1)
+                    .oneof(exclusive(shape, number))
+            })
+            .collect()
+    })
 }

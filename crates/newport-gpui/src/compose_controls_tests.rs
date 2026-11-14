@@ -1,6 +1,6 @@
 use super::{ComposeReview, ContainersPanel};
 use crate::containers::tests::{
-    FakeBackend, click, compose_project, draw, element, fixture, select, settle, snapshot,
+    FakeBackend, click, compose_project, draw, element, fixture, removed, select, settle, snapshot,
 };
 use gpui::base::test_support::snapshots;
 use gpui::{
@@ -8,8 +8,9 @@ use gpui::{
 };
 use gpui_kit as gpui;
 use gpui_kit::component::WindowExt;
-use newport_domain::containers::ContainerState;
-use serde_json::{Value, json};
+use newport_protocol::monitor::compose;
+use newport_protocol::monitor::containers::ContainerState;
+use serde_json::json;
 use std::{thread, time::Duration};
 
 fn has(cx: &mut VisualTestContext, label: &str) -> bool {
@@ -40,7 +41,7 @@ fn detail(
     panel: &Entity<ContainersPanel>,
     cx: &mut VisualTestContext,
     backend: &FakeBackend,
-    data: Value,
+    data: compose::Project,
 ) {
     backend.set_compose_project(Ok(data));
     panel.update(cx, |p, _| p.client.retry_compose());
@@ -70,8 +71,8 @@ fn compose_direct_commands_match_reference_and_inspection_errors_do_not_block(
     let (panel, cx, backend) = fixture(cx);
     select(&panel, cx, "p:stack");
     let mut data = compose_project();
-    data["configError"] = json!("Cannot decode optional inspection output");
-    data["services"] = Value::Null;
+    data.config_error = Some("Cannot decode optional inspection output".into());
+    data.services = None;
     detail(&panel, cx, &backend, data);
     backend.hold_actions();
     click(cx, "Stop all");
@@ -127,7 +128,7 @@ fn compose_direct_commands_match_reference_and_inspection_errors_do_not_block(
         assert!(has(cx, "Up"));
     }
     let mut data = compose_project();
-    data["services"][1]["build"] = json!(false);
+    data.services.as_mut().unwrap()[1].build = false;
     detail(&panel, cx, &backend, data);
     click(cx, "More actions for stack");
     assert!(!has(cx, "Build images only"));
@@ -314,8 +315,8 @@ fn no_cli_offers_existing_container_actions_with_the_complete_membership(cx: &mu
     let (panel, cx, backend) = fixture(cx);
     select(&panel, cx, "p:stack");
     let mut data = compose_project();
-    data["cli"] = Value::Null;
-    data["cliError"] = json!("Compose is not installed");
+    data.cli = None;
+    data.cli_error = Some("Compose is not installed".into());
     detail(&panel, cx, &backend, data);
     assert!(!has(cx, "Up"));
     assert!(!has(cx, "More actions for stack"));
@@ -376,7 +377,7 @@ fn finished_job_cleanup_rechecks_immutable_ids_and_excludes_services(cx: &mut Te
     wait_action(&panel, cx, &backend);
     let requests = backend.requests("containers_remove");
     assert_eq!(requests[0]["containers"], json!(["c".repeat(64)]));
-    backend.release_action(json!({"removed":1}));
+    backend.release_action(removed(1));
     settle(&panel, cx);
     assert_eq!(backend.writes(), 1);
 }

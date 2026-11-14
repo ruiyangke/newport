@@ -1,6 +1,7 @@
 use super::ContainersPanel;
 use crate::containers::tests::{
-    FakeBackend, click, compose_project, draw, element, fixture, select, settle, snapshot,
+    FakeBackend, click, compose_project, compose_service, draw, element, fixture, select, settle,
+    snapshot,
 };
 use gpui::{
     Entity, KeyDownEvent, KeyUpEvent, Keystroke, TestAppContext, VisualTestContext, px, size,
@@ -8,7 +9,8 @@ use gpui::{
 use gpui_kit as gpui;
 use gpui_kit::base::test_support::{ElementSnapshot, snapshots};
 use gpui_kit::component::WindowExt;
-use newport_domain::containers::{ContainerPort, ContainerState, PortProtocol};
+use newport_protocol::monitor::compose;
+use newport_protocol::monitor::containers::{ContainerPort, ContainerState, PortProtocol};
 use serde_json::{Value, json};
 use std::{thread, time::Duration};
 
@@ -49,10 +51,10 @@ fn configure_table(
     source.containers.extend([replica, orphan, other]);
     backend.set_snapshot(source);
     let mut detail = compose_project();
-    detail["services"] = json!([
-        {"name":"worker","image":"fixture/worker:1","build":true,"profiles":[]},
-        {"name":"queue","image":"fixture/queue:1","build":false,"profiles":["background","dev"]},
-        {"name":"web","image":"fixture/web:1","build":false,"profiles":[]}
+    detail.services = Some(vec![
+        compose_service("worker", true, &[]),
+        compose_service("queue", false, &["background", "dev"]),
+        compose_service("web", false, &[]),
     ]);
     backend.set_compose_project(Ok(detail));
     select(panel, cx, "p:stack");
@@ -268,10 +270,16 @@ fn natural_columns_preserve_long_names_replicas_alignment_and_narrow_actions(
     source.containers.push(replica);
     backend.set_snapshot(source);
     let mut detail = compose_project();
-    detail["services"] = json!([
-        {"name":service,"image":"fixture/web:1","build":false,"profiles":[]},
-        {"name":"worker","image":"fixture/worker:1","build":true,"profiles":[]},
-        {"name":missing,"image":"fixture/background:1","build":false,"profiles":["background","development"]}
+    detail.services = Some(vec![
+        compose::Service {
+            image: Some("fixture/web:1".into()),
+            ..compose_service(service, false, &[])
+        },
+        compose_service("worker", true, &[]),
+        compose::Service {
+            image: Some("fixture/background:1".into()),
+            ..compose_service(missing, false, &["background", "development"])
+        },
     ]);
     backend.set_compose_project(Ok(detail));
     panel.update(cx, |p, _| {
@@ -535,7 +543,7 @@ fn service_pages_share_detail_scroll_and_bound_rendering_across_refreshes(cx: &m
         })
         .collect();
     let mut detail = compose_project();
-    detail["services"] = json!([]);
+    detail.services = Some(vec![]);
     backend.set_compose_project(Ok(detail));
     backend.set_snapshot(source.clone());
     select(&panel, cx, "p:stack");

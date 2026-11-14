@@ -1,0 +1,113 @@
+Initialize the key event fields gpui-pre's patches add
+
+gpui-pre's patch 001 adds optional physical key and native layout metadata
+(original key text, raw modifiers, lock states) to KeyDownEvent and
+KeyUpEvent. GPUI Kit builds those events itself in its controls and tests,
+so each constructor here sets the new fields to their empty defaults, as a
+synthetic event does; shortcut dispatch is unchanged.
+
+Remove with gpui-pre's patch 001, when GPUI exposes physical keys and layout
+metadata on key events.
+
+diff --git a/src/test.rs b/src/test.rs
+index 2e5cb0e..7ae58fb 100644
+--- a/src/test.rs
++++ b/src/test.rs
+@@ -535,6 +535,10 @@ fn press_key(window: &mut Window, key: Keystroke, cx: &mut App) {
+     let key = if matches!(key.key.as_str(), "enter" | "tab") {
+         window.dispatch_event(
+             KeyDownEvent {
++                #[cfg(not(feature = "gpui-fast"))]
++                physical_key: None,
++                #[cfg(not(feature = "gpui-fast"))]
++                key_metadata: None,
+                 keystroke: key.clone(),
+                 is_held: false,
+                 prefer_character_input: false,
+@@ -550,7 +554,17 @@ fn press_key(window: &mut Window, key: Keystroke, cx: &mut App) {
+     };
+     // Buttons activate on key-up, so every press must complete the pair even
+     // if its key-down handler consumed the event or changed focus.
+-    window.dispatch_event(KeyUpEvent { keystroke: key }.to_platform_input(), cx);
++    window.dispatch_event(
++        KeyUpEvent {
++            #[cfg(not(feature = "gpui-fast"))]
++            physical_key: None,
++            #[cfg(not(feature = "gpui-fast"))]
++            key_metadata: None,
++            keystroke: key,
++        }
++        .to_platform_input(),
++        cx,
++    );
+ }
+ 
+ fn input_text(window: &mut Window, text: &str, scope: Option<&[ElementId]>, cx: &mut App) {
+diff --git a/src/test/events.rs b/src/test/events.rs
+index 211a187..4ac138a 100644
+--- a/src/test/events.rs
++++ b/src/test/events.rs
+@@ -100,6 +100,10 @@ impl TestEventExt for Window {
+         keystroke.modifiers |= self.modifiers();
+         self.dispatch_event(
+             KeyDownEvent {
++                #[cfg(not(feature = "gpui-fast"))]
++                physical_key: None,
++                #[cfg(not(feature = "gpui-fast"))]
++                key_metadata: None,
+                 keystroke,
+                 is_held,
+                 prefer_character_input: false,
+@@ -113,7 +117,17 @@ impl TestEventExt for Window {
+         let mut keystroke = parse_key(key, cx);
+         self.render_frame(cx);
+         keystroke.modifiers |= self.modifiers();
+-        self.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
++        self.dispatch_event(
++            KeyUpEvent {
++                #[cfg(not(feature = "gpui-fast"))]
++                physical_key: None,
++                #[cfg(not(feature = "gpui-fast"))]
++                key_metadata: None,
++                keystroke,
++            }
++            .to_platform_input(),
++            cx,
++        );
+         self.render_frame(cx);
+     }
+ }
+diff --git a/tests/integration/menu.rs b/tests/integration/menu.rs
+index 3bf8850..9605cca 100644
+--- a/tests/integration/menu.rs
++++ b/tests/integration/menu.rs
+@@ -281,6 +281,10 @@ fn press_context_menu_key(handle: AnyWindowHandle, key: &str, cx: &mut TestAppCo
+     cx.update_window(handle, |_, window, cx| {
+         window.dispatch_event(
+             KeyDownEvent {
++                #[cfg(not(feature = "gpui-fast"))]
++                physical_key: None,
++                #[cfg(not(feature = "gpui-fast"))]
++                key_metadata: None,
+                 keystroke: keystroke.clone(),
+                 is_held: false,
+                 prefer_character_input: false,
+@@ -294,7 +298,17 @@ fn press_context_menu_key(handle: AnyWindowHandle, key: &str, cx: &mut TestAppCo
+     // dismissal subscription before key-up can redraw and refocus the menu.
+     cx.run_until_parked();
+     cx.update_window(handle, |_, window, cx| {
+-        window.dispatch_event(KeyUpEvent { keystroke }.to_platform_input(), cx);
++        window.dispatch_event(
++            KeyUpEvent {
++                #[cfg(not(feature = "gpui-fast"))]
++                physical_key: None,
++                #[cfg(not(feature = "gpui-fast"))]
++                key_metadata: None,
++                keystroke,
++            }
++            .to_platform_input(),
++            cx,
++        );
+     })
+     .unwrap();
+     cx.run_until_parked();

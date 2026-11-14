@@ -5,7 +5,6 @@ use crate::{
     server_session::ServerSession,
 };
 use newport_protocol::monitor::services::Scope;
-use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 
 /// Which part of Docker's disk usage to read. Volume sizes take seconds to
@@ -16,17 +15,6 @@ pub(crate) enum DiskPart {
     Quick,
     Volumes,
 }
-impl DiskPart {
-    pub fn parse(part: Option<&str>) -> Result<Self, String> {
-        match part {
-            None => Ok(Self::Full),
-            Some("quick") => Ok(Self::Quick),
-            Some("volumes") => Ok(Self::Volumes),
-            Some(other) => Err(format!("Unknown disk part: {other}")),
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Read {
     Services,
@@ -114,38 +102,24 @@ impl Read {
                 )
                 .await?,
             ),
-            Self::RemoteAppsStatus => Cached::Projection(crate::remote_apps::status(owner).await?),
+            Self::RemoteAppsStatus => {
+                Cached::RemoteAppsStatus(Box::new(crate::remote_apps::status(owner).await?))
+            }
             Self::RemoteAppsCatalogue => {
-                Cached::Projection(crate::remote_apps::catalogue(owner).await?)
+                Cached::Catalogue(crate::remote_apps::catalogue(owner).await?)
             }
         })
     }
 }
 
-/// Typed cache entries retain service ownership without a JSON round trip.
+/// A read's typed reply, as the service or the probe produced it.
 #[derive(Clone)]
 pub(crate) enum Cached {
     Services(newport_protocol::monitor::services::Reply),
     Containers(newport_protocol::monitor::containers::Reply),
     Compose(newport_protocol::monitor::compose::Reply),
-    Projection(Value),
-}
-impl Cached {
-    fn into_value(self) -> Result<Value, String> {
-        use newport_protocol::monitor::services::Reply;
-        match self {
-            Self::Services(value) => match value {
-                Reply::Snapshot(value) => serde_json::to_value(value),
-                Reply::Logs(value) => serde_json::to_value(value),
-                Reply::Unit(value) => serde_json::to_value(value),
-                Reply::Action(value) => serde_json::to_value(value),
-            },
-            Self::Containers(value) => serde_json::to_value(value),
-            Self::Compose(value) => serde_json::to_value(value),
-            Self::Projection(value) => return Ok(value),
-        }
-        .map_err(|error| error.to_string())
-    }
+    RemoteAppsStatus(Box<newport_protocol::desktop::applications::Availability>),
+    Catalogue(newport_protocol::remote_apps::apps::Catalogue),
 }
 
 pub(crate) struct Queries {
@@ -176,7 +150,7 @@ impl Queries {
     }
 }
 
-pub(crate) async fn read_typed(
+pub(crate) async fn read(
     owner: &Arc<ServerSession>,
     key: Read,
     force: bool,
@@ -220,37 +194,50 @@ pub(crate) async fn read_typed(
     }
 }
 
-/// Existing internal UI projections keep their established JSON shape.
-pub(crate) async fn read(
-    owner: &Arc<ServerSession>,
-    key: Read,
-    force: bool,
-) -> Result<Value, String> {
-    read_typed(owner, key, force).await?.into_value()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        commands,
         manager::{Manager, share},
         model::Server,
         profile::Store,
     };
+    use newport_protocol::remote_apps::apps::{Application, Catalogue};
     use serde_json::json;
     use uuid::Uuid;
 
     #[test]
-    fn disk_parts_parse_and_volume_sizes_stay_fresh_longer() {
-        assert_eq!(DiskPart::parse(None), Ok(DiskPart::Full));
-        assert_eq!(DiskPart::parse(Some("quick")), Ok(DiskPart::Quick));
-        assert_eq!(DiskPart::parse(Some("volumes")), Ok(DiskPart::Volumes));
-        assert!(DiskPart::parse(Some("images")).is_err());
+    fn volume_sizes_stay_fresh_longer() {
         assert!(
             Read::Disk(DiskPart::Volumes).policy().stale_after
                 > Read::Disk(DiskPart::Quick).policy().stale_after
         );
+    }
+
+    /// A cache entry that names the server and feature it was loaded for.
+    fn marker(name: &str) -> Cached {
+        Cached::Catalogue(Catalogue {
+            apps: vec![Application {
+                id: format!("{name}.desktop"),
+                name: name.into(),
+                description: String::new(),
+                keywords: vec![],
+                icon: None,
+                actions: vec![],
+            }],
+        })
+    }
+
+    async fn read_marker(
+        state: &crate::manager::Shared,
+        server: Uuid,
+        key: Read,
+    ) -> Result<String, String> {
+        let owner = crate::server_session::resolve(state, server).await?;
+        match read(&owner, key, false).await? {
+            Cached::Catalogue(catalogue) => Ok(catalogue.apps[0].name.clone()),
+            _ => Err("not a marker".into()),
+        }
     }
 
     #[tokio::test]
@@ -286,39 +273,35 @@ mod tests {
             .queries
             .containers
             .get_or_insert(Read::Containers, Read::Containers.policy(), || async {
-                Ok(Cached::Projection(
-                    json!({"owner":"A", "feature":"containers"}),
-                ))
+                Ok(marker("A containers"))
             })
             .unwrap();
         owner_b
             .queries
             .services
             .get_or_insert(Read::Services, Read::Services.policy(), || async {
-                Ok(Cached::Projection(
-                    json!({"owner":"B", "feature":"services"}),
-                ))
+                Ok(marker("B services"))
             })
             .unwrap();
         let mut writer = state.lock().await;
         let work_state = state.clone();
         let pending =
-            tokio::spawn(async move { commands::services_snapshot(&work_state, a.id).await });
+            tokio::spawn(async move { read_marker(&work_state, a.id, Read::Services).await });
         tokio::time::timeout(Duration::from_secs(1), entered.notified())
             .await
             .expect("a query must start while the profile writer is occupied");
         let (containers, services) = tokio::time::timeout(Duration::from_secs(1), async {
             tokio::join!(
-                commands::containers_snapshot(&state, a.id),
-                commands::services_snapshot(&state, b.id)
+                read_marker(&state, a.id, Read::Containers),
+                read_marker(&state, b.id, Read::Services)
             )
         })
         .await
         .expect(
             "another server and another feature must not queue behind the slow query or writer",
         );
-        assert_eq!(containers.unwrap()["owner"], "A");
-        assert_eq!(services.unwrap()["owner"], "B");
+        assert_eq!(containers.unwrap(), "A containers");
+        assert_eq!(services.unwrap(), "B services");
         assert!(!pending.is_finished());
         writer.advance_connection_revision(a.id);
         drop(writer);
@@ -326,8 +309,8 @@ mod tests {
         assert!(slow.snapshot().data.is_none());
         assert!(Arc::ptr_eq(&owner_b, &state.owner(b.id).unwrap()));
         assert_eq!(
-            commands::services_snapshot(&state, b.id).await.unwrap()["owner"],
-            "B"
+            read_marker(&state, b.id, Read::Services).await.unwrap(),
+            "B services"
         );
         crate::manager::shutdown(&state).await;
     }

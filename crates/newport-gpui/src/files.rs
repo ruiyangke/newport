@@ -4,6 +4,7 @@ use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::Selectable;
 use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use newport_client::file_transfer::Direction;
+use newport_protocol::desktop::files;
 use std::{cell::RefCell, rc::Rc};
 #[path = "file_list.rs"]
 mod list;
@@ -30,29 +31,28 @@ fn preview_width(content_width: f32) -> f32 {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct FileTarget {
     pub server: String,
-    pub connection: Value,
+    pub connection: Option<configuration::ConnectionScope>,
     directory: String,
     pub path: String,
-    kind: Option<String>,
+    kind: Option<files::EntryKind>,
 }
 impl FileTarget {
     pub(super) fn from_listing(
         server: String,
-        connection: Value,
-        listing: &Value,
+        connection: Option<configuration::ConnectionScope>,
+        listing: &files::Listing,
         path: &str,
     ) -> Option<Self> {
-        let directory = listing["path"].as_str().filter(|path| !path.is_empty())?;
+        let directory = Some(listing.path.as_str()).filter(|path| !path.is_empty())?;
         let kind = if path == directory {
             None
         } else {
             Some(
-                listing["entries"]
-                    .as_array()?
+                listing
+                    .entries
                     .iter()
-                    .find(|entry| entry["path"] == path)?["kind"]
-                    .as_str()?
-                    .to_owned(),
+                    .find(|entry| entry.path == path)?
+                    .kind,
             )
         };
         Some(Self {
@@ -67,16 +67,12 @@ impl FileTarget {
     /// Derive painted row identities from the current query projection. The
     /// directory target is validated once per render; callbacks still call
     /// `file_target_current`, which checks membership in the latest listing.
-    fn for_entry(&self, entry: &Value) -> Option<Self> {
+    fn for_entry(&self, entry: &files::Entry) -> Option<Self> {
         if self.kind.is_some() || self.path != self.directory {
             return None;
         }
-        let path = entry["path"].as_str()?;
-        let kind = if path == self.directory {
-            None
-        } else {
-            Some(entry["kind"].as_str()?.to_owned())
-        };
+        let path = entry.path.as_str();
+        let kind = (path != self.directory).then_some(entry.kind);
         Some(Self {
             server: self.server.clone(),
             connection: self.connection.clone(),
@@ -89,14 +85,17 @@ impl FileTarget {
     pub(super) fn supports_transfer(&self, direction: Direction) -> bool {
         match direction {
             Direction::Upload => self.kind.is_none(),
-            Direction::Download => matches!(self.kind.as_deref(), Some("file" | "symlink")),
+            Direction::Download => matches!(
+                self.kind,
+                Some(files::EntryKind::File | files::EntryKind::Symlink)
+            ),
         }
     }
 }
 
 pub struct Browser {
-    pub connection: Value,
-    controls_connection: Value,
+    pub connection: Option<configuration::ConnectionScope>,
+    controls_connection: Option<configuration::ConnectionScope>,
     pub(super) reads: newport_client::file_browser::Browser,
     pub(super) active: bool,
     path: Entity<InputState>,
@@ -124,7 +123,7 @@ struct Projection {
     query: String,
     hidden: bool,
     sort: list::Sort,
-    entries: Rc<Vec<Value>>,
+    entries: Rc<Vec<files::Entry>>,
 }
 impl Browser {
     /// The filter as matched; surrounding whitespace never narrows a folder.
@@ -132,7 +131,7 @@ impl Browser {
         self.filter.read(cx).value().trim().to_owned()
     }
 
-    fn entries(&self, cx: &App) -> Rc<Vec<Value>> {
+    fn entries(&self, cx: &App) -> Rc<Vec<files::Entry>> {
         let revision = self.reads.listing_data_revision();
         let query = self.query(cx);
         let mut cached = self.projection.borrow_mut();
@@ -163,7 +162,7 @@ impl Browser {
 #[derive(Clone, PartialEq)]
 pub(super) struct PreviewTarget {
     server: String,
-    connection: Value,
+    connection: Option<configuration::ConnectionScope>,
     token: u64,
     path: String,
     render_revision: u64,
@@ -177,27 +176,32 @@ fn parent(path: &str) -> &str {
         .unwrap_or("/")
 }
 
-fn visible_entries(listing: &Value, query: &str, hidden: bool) -> Vec<Value> {
+fn visible_entries(listing: &files::Listing, query: &str, hidden: bool) -> Vec<files::Entry> {
     let query = query.to_lowercase();
-    let mut entries: Vec<_> = listing["entries"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    let mut entries: Vec<_> = listing
+        .entries
+        .iter()
         .filter(|entry| {
-            let name = text(entry, "name");
-            (hidden || !name.starts_with('.')) && name.to_lowercase().contains(&query)
+            (hidden || !entry.name.starts_with('.')) && entry.name.to_lowercase().contains(&query)
         })
         .cloned()
         .collect();
     entries.sort_by_cached_key(|entry| {
-        let name = text(entry, "name");
-        (entry["kind"] != "directory", name.to_lowercase(), name)
+        (
+            entry.kind != files::EntryKind::Directory,
+            entry.name.to_lowercase(),
+            entry.name.clone(),
+        )
     });
     entries
 }
 
 impl Newport {
-    fn file_browser_current(&self, server: &str, connection: &Value) -> bool {
+    fn file_browser_current(
+        &self,
+        server: &str,
+        connection: &Option<configuration::ConnectionScope>,
+    ) -> bool {
         self.page == Page::Files
             && self.server == server
             && self.configuration_available()
@@ -205,11 +209,15 @@ impl Newport {
                 .file_browsers
                 .get(server)
                 .is_some_and(|browser| browser.active && &browser.connection == connection)
-            && self.selected_server().is_some_and(|profile| {
-                terminal_scope::connection(profile, &self.snapshot) == *connection
-            })
+            && self
+                .selected_server()
+                .is_some_and(|profile| self.connection(profile) == *connection)
     }
-    pub(super) fn file_connection_changed(&mut self, id: &str, connection: Value) {
+    pub(super) fn file_connection_changed(
+        &mut self,
+        id: &str,
+        connection: Option<configuration::ConnectionScope>,
+    ) {
         if let Some(browser) = self.file_browsers.get_mut(id) {
             browser.reads.retire();
             browser.reads = newport_client::file_browser::Browser::new(
@@ -232,10 +240,7 @@ impl Newport {
             return None;
         }
         let browser = self.file_browsers.get(&self.server)?;
-        if !browser.active
-            || browser.connection
-                != terminal_scope::connection(self.selected_server()?, &self.snapshot)
-        {
+        if !browser.active || browser.connection != Some(self.selected_connection()?) {
             return None;
         }
         let preview = browser.reads.preview()?;
@@ -263,9 +268,7 @@ impl Newport {
         }
         self.resources.invalidate("preview");
         self.file_preview_path = None;
-        self.file_preview_image = None;
-        self.file_preview_pdf = None;
-        self.file_preview_pdf_text = None;
+        self.file_preview = None;
         self.file_preview_viewport = file_preview::Viewport::default();
     }
 
@@ -298,17 +301,39 @@ impl Newport {
                 payload = browser.reads.take_preview_data(preview.token);
             }
         }
-        if let Some(data) = payload {
+        if let Some(preview) = payload {
             self.request_work(
                 "preview",
                 request_dispatch::Request::PreparePreview {
                     server: uuid::Uuid::parse_str(&self.server).ok(),
-                    data,
+                    preview: Box::new(preview),
                 },
             );
             changed = true;
         }
         changed
+    }
+
+    /// The selected file's prepared preview, while its read is shown.
+    pub(super) fn file_preview_data(&self) -> Option<&file_image::Prepared> {
+        self.owned("preview", &self.file_preview)
+    }
+
+    /// Settles the places panel's read of this server's saved projects.
+    pub(super) fn complete_file_places(
+        &mut self,
+        generation: u64,
+        result: Result<desktop::Reply, newport_client::request_error::RequestError>,
+    ) -> bool {
+        let result = result
+            .and_then(project_library_state::projects_reply)
+            .map(|projects| {
+                let changed = self.file_places.as_ref() != Some(&projects);
+                (projects, changed)
+            });
+        self.complete_owned("file-places", generation, result, |this| {
+            &mut this.file_places
+        })
     }
 
     pub(super) fn file_preview_error(&self) -> Option<&str> {
@@ -326,13 +351,10 @@ impl Newport {
     pub(super) fn file_project_completed(
         &mut self,
         server: &str,
-        expected: Option<Value>,
-        result: Result<Value, String>,
+        expected: Option<configuration::ConnectionScope>,
+        result: Result<desktop::preferences::Project, String>,
     ) {
-        let connection = self.snapshot["config"]["servers"]
-            .as_array()
-            .and_then(|servers| servers.iter().find(|row| row["id"] == server))
-            .map(|server| terminal_scope::connection(server, &self.snapshot));
+        let connection = self.connection_of(server);
         if !self.configuration_available() || expected.is_none() || connection != expected {
             return;
         }
@@ -345,8 +367,9 @@ impl Newport {
                 self.reset();
                 self.page = Page::Projects;
                 self.workspace_page = Page::Projects;
-                self.selection = Some(project.clone());
-                self.git_request_open(project["path"].clone());
+                let path = project.path.clone();
+                self.selection = Some(project);
+                self.git_request_open(path);
             }
             Ok(_) => self.notification = Some(Notification::success("Project saved.")),
         }
@@ -362,7 +385,7 @@ impl Newport {
             return None;
         }
         let server = self.selected_server()?;
-        let connection = terminal_scope::connection(server, &self.snapshot);
+        let connection = self.connection(server);
         if self.file_browsers.get(&self.server)?.connection != connection {
             return None;
         }
@@ -378,7 +401,7 @@ impl Newport {
     }
     fn file_open_project(&mut self, target: &FileTarget, cx: &mut Context<Self>) {
         if !self.file_target_current(target)
-            || !matches!(target.kind.as_deref(), None | Some("directory"))
+            || !matches!(target.kind, None | Some(files::EntryKind::Directory))
             || self
                 .resources
                 .get("file-project")
@@ -390,7 +413,7 @@ impl Newport {
         if let Some(browser) = self.file_browsers.get_mut(&target.server) {
             browser.project_path = Some(path.clone());
         }
-        self.file_project_connection = Some(target.connection.clone());
+        self.file_project_connection = target.connection.clone();
         let name = path
             .trim_end_matches('/')
             .rsplit('/')
@@ -406,7 +429,7 @@ impl Newport {
                     path: newport_protocol::git::Path::new(path.as_bytes()),
                 },
             ),
-            Err(error) => self.request_result("file-project", Err(error)),
+            Err(error) => self.request_failed("file-project", error),
         }
         cx.notify();
     }
@@ -428,7 +451,7 @@ impl Newport {
             self.files_refresh_requested = false;
             // Saved projects become shortcuts in the places panel.
             let server = self.server.clone();
-            self.request_refresh_result(
+            self.request_typed_refresh(
                 "file-places",
                 desktop_server(&server).map(|server| {
                     desktop::Operation::Preferences(Box::new(
@@ -455,7 +478,7 @@ impl Newport {
             let Some(profile) = self.selected_server() else {
                 return;
             };
-            let connection = terminal_scope::connection(profile, &self.snapshot);
+            let connection = self.connection(profile);
             let (directory, path_text, query, hidden, places_visible, sort) = self
                 .file_browsers
                 .get(&self.server)
@@ -614,8 +637,7 @@ impl Newport {
             .file_browsers
             .get(&self.server)
             .and_then(|browser| browser.reads.listing())
-            .and_then(|listing| listing["entries"].as_array())
-            .and_then(|entries| entries.iter().find(|entry| entry["path"] == path))
+            .and_then(|listing| listing.entries.iter().find(|entry| entry.path == path))
             .cloned()
         else {
             return;
@@ -641,7 +663,7 @@ impl Newport {
             return;
         };
         let entries = browser.entries(cx);
-        let Some(index) = entries.iter().position(|entry| entry["path"] == path) else {
+        let Some(index) = entries.iter().position(|entry| entry.path == path) else {
             return;
         };
         browser.selected = Some(path.clone());
@@ -649,7 +671,7 @@ impl Newport {
             .scroll
             .scroll_to_item(index, ScrollStrategy::Nearest);
         if self.file_preview_path.is_some() {
-            if entries[index]["kind"] == "directory" {
+            if entries[index].kind == files::EntryKind::Directory {
                 self.close_file_preview();
             } else {
                 self.files_preview(path, window, cx);
@@ -671,8 +693,8 @@ impl Newport {
         let directory = browser
             .entries(cx)
             .iter()
-            .find(|entry| entry["path"] == path)
-            .map(|entry| entry["kind"] == "directory");
+            .find(|entry| entry.path == path)
+            .map(|entry| entry.kind == files::EntryKind::Directory);
         match directory {
             Some(true) => self.files_navigate(path, window, cx),
             Some(false) => {
@@ -707,8 +729,8 @@ impl Newport {
         let current = browser
             .selected
             .as_ref()
-            .and_then(|path| entries.iter().position(|entry| entry["path"] == *path));
-        let path_at = |index: usize| entries.get(index).map(|entry| text(entry, "path"));
+            .and_then(|path| entries.iter().position(|entry| entry.path == *path));
+        let path_at = |index: usize| entries.get(index).map(|entry| entry.path.clone());
         let parent_key =
             keystroke.key == "backspace" || (keystroke.key == "up" && keystroke.modifiers.platform);
         if parent_key {
@@ -1109,20 +1131,17 @@ impl Newport {
         let scope = (self.server.clone(), browser.connection.clone());
         let home = browser.home.clone().unwrap_or_else(|| ".".into());
         let projects: Vec<(String, String)> = self
-            .resources
-            .get("file-places")
-            .and_then(|row| row.value.as_array())
+            .owned("file-places", &self.file_places)
             .into_iter()
-            .flatten()
-            .filter(|project| project["serverId"] == self.server.as_str())
-            .filter_map(|project| {
-                let path = project["path"]["display"].as_str()?.to_owned();
-                let name = project["name"]
-                    .as_str()
+            .flat_map(|places| &places.projects)
+            .filter(|project| project.server.to_string() == self.server)
+            .map(|project| {
+                let path = project.path.display.clone();
+                let name = Some(project.name.as_str())
                     .filter(|name| !name.is_empty())
                     .map(str::to_owned)
                     .unwrap_or_else(|| path.rsplit('/').next().unwrap_or(&path).to_owned());
-                Some((name, path))
+                (name, path)
             })
             .collect();
         let place = |id: SharedString, icon: IconName, label: String, destination: String| {
@@ -1389,7 +1408,7 @@ fn file_menu(
     };
     let disabled =
         entity.read(cx).file_transfer_busy() || !entity.read(cx).file_target_current(&target);
-    let directory = target.kind.as_deref() == Some("directory");
+    let directory = target.kind == Some(files::EntryKind::Directory);
     let open_view = view.clone();
     let open_target = target.clone();
     let copy_target = target.clone();
@@ -1479,15 +1498,41 @@ mod tests {
     }
 
     use super::list::{Sort, SortColumn, folder_summary, sort_entries};
-    use super::{Direction, FileTarget, PreviewTarget, parent, visible_entries};
-    use crate::text;
-    use serde_json::json;
+    use super::{Direction, FileTarget, PreviewTarget, files, parent, visible_entries};
+    use files::EntryKind::{Directory, File, Other, Symlink};
+
+    fn entry(name: &str, kind: files::EntryKind) -> files::Entry {
+        files::Entry {
+            name: name.into(),
+            path: format!("/work/{name}"),
+            kind,
+            size: None,
+            modified: None,
+            permissions: None,
+        }
+    }
+    fn sized(name: &str, kind: files::EntryKind, size: Option<u64>, modified: u32) -> files::Entry {
+        files::Entry {
+            size,
+            modified: Some(modified),
+            ..entry(name, kind)
+        }
+    }
+    fn listing(path: &str, entries: Vec<files::Entry>) -> files::Listing {
+        files::Listing {
+            path: path.into(),
+            entries,
+        }
+    }
+    fn names(entries: &[files::Entry]) -> Vec<&str> {
+        entries.iter().map(|entry| entry.name.as_str()).collect()
+    }
 
     #[test]
     fn preview_controls_reject_a_replaced_render_or_selection() {
         let opening = PreviewTarget {
             server: "a".into(),
-            connection: json!(["connection-a"]),
+            connection: Some(crate::snapshot_fixture::scope("connection-a")),
             token: 1,
             path: "/work/readme".into(),
             render_revision: 0,
@@ -1500,7 +1545,9 @@ mod tests {
         for change in [
             |t: &mut PreviewTarget| t.token = 2,
             |t: &mut PreviewTarget| t.server = "b".into(),
-            |t: &mut PreviewTarget| t.connection = json!(["connection-b"]),
+            |t: &mut PreviewTarget| {
+                t.connection = Some(crate::snapshot_fixture::scope("connection-b"))
+            },
             |t: &mut PreviewTarget| t.path = "/work/other".into(),
         ] {
             let mut replacement = loaded.clone();
@@ -1512,15 +1559,12 @@ mod tests {
     #[test]
     fn sorting_keeps_folders_first_and_flips_the_active_column() {
         let mut entries = vec![
-            json!({"name":"b.log","kind":"file","size":10,"modified":3}),
-            json!({"name":"src","kind":"directory","modified":1}),
-            json!({"name":"A.txt","kind":"file","size":300,"modified":1}),
-            json!({"name":".env","kind":"file","size":2,"modified":2}),
-            json!({"name":"docs","kind":"directory","modified":9}),
+            sized("b.log", File, Some(10), 3),
+            sized("src", Directory, None, 1),
+            sized("A.txt", File, Some(300), 1),
+            sized(".env", File, Some(2), 2),
+            sized("docs", Directory, None, 9),
         ];
-        let names = |entries: &[serde_json::Value]| {
-            entries.iter().map(|e| text(e, "name")).collect::<Vec<_>>()
-        };
         sort_entries(&mut entries, Sort::default());
         assert_eq!(names(&entries), ["docs", "src", ".env", "A.txt", "b.log"]);
         let newest = Sort::default().choose(SortColumn::Modified);
@@ -1539,15 +1583,12 @@ mod tests {
     #[test]
     fn size_order_ignores_folder_attribute_sizes() {
         let mut entries = vec![
-            json!({"name":"zeta","kind":"directory","size":4096}),
-            json!({"name":"big.bin","kind":"file","size":900}),
-            json!({"name":"Alpha","kind":"directory","size":12288}),
-            json!({"name":"beta","kind":"directory","size":8192}),
-            json!({"name":"tiny","kind":"file","size":1}),
+            sized("zeta", Directory, Some(4096), 0),
+            sized("big.bin", File, Some(900), 0),
+            sized("Alpha", Directory, Some(12288), 0),
+            sized("beta", Directory, Some(8192), 0),
+            sized("tiny", File, Some(1), 0),
         ];
-        let names = |entries: &[serde_json::Value]| {
-            entries.iter().map(|e| text(e, "name")).collect::<Vec<_>>()
-        };
         let smallest = Sort {
             column: SortColumn::Size,
             descending: false,
@@ -1566,12 +1607,15 @@ mod tests {
 
     #[test]
     fn summary_counts_folders_files_hidden_and_filtered_share() {
-        let listing = json!({"entries":[
-            {"name":"src","kind":"directory"},
-            {"name":"a.txt","kind":"file"},
-            {"name":"b.txt","kind":"file"},
-            {"name":".git","kind":"directory"}
-        ]});
+        let listing = listing(
+            "/work",
+            vec![
+                entry("src", Directory),
+                entry("a.txt", File),
+                entry("b.txt", File),
+                entry(".git", Directory),
+            ],
+        );
         let shown = visible_entries(&listing, "", false);
         assert_eq!(
             folder_summary(&listing, &shown, "", false),
@@ -1587,7 +1631,7 @@ mod tests {
             folder_summary(&listing, &matches, "a", false),
             "1 of 3 items match"
         );
-        let empty = json!({"entries":[]});
+        let empty = super::tests::listing("/work", Vec::new());
         assert_eq!(folder_summary(&empty, &[], "", false), "0 items");
     }
 
@@ -1595,15 +1639,18 @@ mod tests {
     #[ignore = "manual Files action-target preparation benchmark; excludes GPUI and I/O"]
     fn benchmark_visible_file_targets() {
         for count in [40, 400, 5000] {
-            let listing = json!({"path":"/work", "entries": (0..count).map(|i| json!({
-                "name":format!("file-{i:05}"),"path":format!("/work/{i}"),"kind":"file"
-            })).collect::<Vec<_>>()});
-            let visible = &listing["entries"].as_array().unwrap()[count - 40..];
+            let listing = listing(
+                "/work",
+                (0..count)
+                    .map(|i| entry(&format!("file-{i:05}"), File))
+                    .collect(),
+            );
+            let visible = &listing.entries[count - 40..];
             let start = std::time::Instant::now();
             for _ in 0..100 {
                 let directory = FileTarget::from_listing(
                     "fixture".into(),
-                    json!(["connection"]),
+                    Some(crate::snapshot_fixture::scope("connection")),
                     &listing,
                     "/work",
                 )
@@ -1621,27 +1668,27 @@ mod tests {
 
     #[test]
     fn projected_row_targets_match_validated_listing_targets() {
-        let listing = json!({"path":"/work", "entries":[
-            {"path":"/work/folder", "kind":"directory"},
-            {"path":"/work/file", "kind":"file"},
-            {"path":"/work/link", "kind":"symlink"},
-            {"path":"/work/socket", "kind":"other"},
-            {"path":"/work/missing-kind"},
-            {"kind":"file"}
-        ]});
-        let connection = json!(["server-a", "host-a", 1]);
+        let listing = listing(
+            "/work",
+            vec![
+                entry("folder", Directory),
+                entry("file", File),
+                entry("link", Symlink),
+                entry("socket", Other),
+            ],
+        );
+        let connection = Some(crate::snapshot_fixture::scope("host-a"));
         let directory =
             FileTarget::from_listing("a".into(), connection.clone(), &listing, "/work").unwrap();
-        for entry in listing["entries"].as_array().unwrap() {
-            let expected = entry["path"].as_str().and_then(|path| {
-                FileTarget::from_listing("a".into(), connection.clone(), &listing, path)
-            });
+        for entry in &listing.entries {
+            let expected =
+                FileTarget::from_listing("a".into(), connection.clone(), &listing, &entry.path);
             assert_eq!(directory.for_entry(entry), expected);
         }
-        let file = directory.for_entry(&listing["entries"][1]).unwrap();
-        assert!(file.for_entry(&listing["entries"][0]).is_none());
+        let file = directory.for_entry(&listing.entries[1]).unwrap();
+        assert!(file.for_entry(&listing.entries[0]).is_none());
         let mut changed = listing.clone();
-        changed["entries"][1]["kind"] = json!("directory");
+        changed.entries[1].kind = Directory;
         assert_ne!(
             Some(&file),
             FileTarget::from_listing("a".into(), connection, &changed, &file.path).as_ref()
@@ -1650,12 +1697,12 @@ mod tests {
 
     #[test]
     fn file_controls_remain_bound_to_connection_directory_and_entry_type() {
-        let listing = json!({"path":"/work", "entries":[
-            {"path":"/work/app", "kind":"directory"},
-            {"path":"/work/log.txt", "kind":"file"}
-        ]});
-        let scope = json!(["server-a", "host-a", 1]);
-        let capture = |server: &str, connection, data: &serde_json::Value| {
+        let listing = listing(
+            "/work",
+            vec![entry("app", Directory), entry("log.txt", File)],
+        );
+        let scope = Some(crate::snapshot_fixture::scope("host-a"));
+        let capture = |server: &str, connection, data: &files::Listing| {
             FileTarget::from_listing(server.into(), connection, data, "/work/log.txt")
         };
         let original = capture("a", scope.clone(), &listing).unwrap();
@@ -1668,28 +1715,36 @@ mod tests {
             Some(&original)
         );
         assert_ne!(
-            capture("a", json!(["server-a", "host-b", 2]), &listing).as_ref(),
+            capture(
+                "a",
+                Some(crate::snapshot_fixture::scope("host-b")),
+                &listing
+            )
+            .as_ref(),
             Some(&original)
         );
         let mut replacement = listing.clone();
-        replacement["entries"][1]["kind"] = json!("directory");
+        replacement.entries[1].kind = Directory;
         assert_ne!(
             capture("a", scope.clone(), &replacement).as_ref(),
             Some(&original)
         );
-        replacement["entries"] = json!([]);
+        replacement.entries.clear();
         assert!(capture("a", scope.clone(), &replacement).is_none());
-        assert!(capture("a", scope, &json!({"path":"/elsewhere", "entries":[]})).is_none());
+        assert!(capture("a", scope, &super::tests::listing("/elsewhere", Vec::new())).is_none());
     }
 
     #[test]
     fn transfer_targets_follow_listing_capabilities() {
-        let listing = json!({"path":"/work", "entries":[
-            {"path":"/work/app", "kind":"directory"},
-            {"path":"/work/file", "kind":"file"},
-            {"path":"/work/link", "kind":"symlink"},
-            {"path":"/work/socket", "kind":"other"}
-        ]});
+        let listing = listing(
+            "/work",
+            vec![
+                entry("app", Directory),
+                entry("file", File),
+                entry("link", Symlink),
+                entry("socket", Other),
+            ],
+        );
         for (path, upload, download) in [
             ("/work", true, false),
             ("/work/app", false, false),
@@ -1697,8 +1752,13 @@ mod tests {
             ("/work/link", false, true),
             ("/work/socket", false, false),
         ] {
-            let target =
-                FileTarget::from_listing("a".into(), json!(["scope"]), &listing, path).unwrap();
+            let target = FileTarget::from_listing(
+                "a".into(),
+                Some(crate::snapshot_fixture::scope("scope")),
+                &listing,
+                path,
+            )
+            .unwrap();
             assert_eq!(
                 target.supports_transfer(Direction::Upload),
                 upload,
@@ -1710,7 +1770,15 @@ mod tests {
                 "{path}"
             );
         }
-        assert!(FileTarget::from_listing("a".into(), json!(["scope"]), &json!({}), "").is_none());
+        assert!(
+            FileTarget::from_listing(
+                "a".into(),
+                Some(crate::snapshot_fixture::scope("scope")),
+                &super::tests::listing("", Vec::new()),
+                ""
+            )
+            .is_none()
+        );
     }
     #[test]
     fn parent_handles_root_trailing_slashes_and_unicode() {
@@ -1721,20 +1789,23 @@ mod tests {
     }
     #[test]
     fn filtering_preserves_paths_and_sorts_folders_first() {
-        let listing = json!({"entries":[
-            {"name":"Zoo", "kind":"file", "path":"/Zoo"},
-            {"name":"a", "kind":"file", "path":"/a"},
-            {"name":".config", "kind":"directory", "path":"/.config"},
-            {"name":"bin", "kind":"directory", "path":"/bin"}
-        ]});
+        let listing = listing(
+            "/work",
+            vec![
+                entry("Zoo", File),
+                entry("a", File),
+                entry(".config", Directory),
+                entry("bin", Directory),
+            ],
+        );
         let entries = visible_entries(&listing, "", false);
         assert_eq!(
-            entries.iter().map(|v| text(v, "path")).collect::<Vec<_>>(),
-            ["/bin", "/a", "/Zoo"]
+            entries.iter().map(|v| v.path.as_str()).collect::<Vec<_>>(),
+            ["/work/bin", "/work/a", "/work/Zoo"]
         );
         assert_eq!(
-            visible_entries(&listing, "CONFIG", true)[0]["path"],
-            "/.config"
+            visible_entries(&listing, "CONFIG", true)[0].path,
+            "/work/.config"
         );
         assert!(visible_entries(&listing, "CONFIG", false).is_empty());
     }

@@ -20,17 +20,17 @@ cargo xtask dev
 ```
 
 On macOS, this builds missing or stale Linux agents in Docker. It stages the
-grammar libraries when their sources change (and PDFium on Windows), and runs
-the app with the disposable profile `target/dev-profile`. Set
-`NEWPORT_DATA_DIR`, or pass `--data-dir <path>`, to use another isolated profile.
+grammar libraries when their sources change, and runs the app with the
+disposable profile `target/dev-profile`. Set `NEWPORT_DATA_DIR`, or pass
+`--data-dir <path>`, to use another isolated profile.
 
 Debug builds require an explicit isolated profile. Release builds use the
 default profile and preserve a recovery copy before opening it. Never run two
 owners against the same profile. See [storage and recovery](../../docs/storage.md).
 
-On Windows, run `cargo xtask pdfium` before preview checks. When cross-compiling
-on Windows ARM64, use the same `CARGO_BUILD_TARGET` for resource staging, build,
-and packaging; running x64 under emulation is not native x64 acceptance.
+When cross-compiling on Windows ARM64, use the same `CARGO_BUILD_TARGET` for
+resource staging, build, and packaging; running x64 under emulation is not
+native x64 acceptance.
 
 Needle binaries live in `resources/agents`. On macOS or Linux, use
 `cargo xtask agents` to rebuild them intentionally with Docker; this replaces
@@ -53,7 +53,6 @@ The executable provides these checks:
 | `--check-needle` | Bundled agent resources |
 | `--agent-identity` | JSON identity of the embedded agent payloads and verified release metadata |
 | `--check-grammars` | Bundled grammar libraries |
-| `--check-pdf` | Native PDF renderer |
 | `--check-backend` | Backend startup and profile access |
 | `--check-update-health` | Resources, real profile RPC, and graceful backend shutdown |
 
@@ -65,8 +64,7 @@ provisioning setup; see [testing](../../tools/xtask/testing.md).
 ## Resources and packaging
 
 Each language grammar is a separate shared library, loaded on demand and kept
-alive while its parser is used. PDF previews use PDFKit on macOS and staged
-PDFium on Windows. Needle binaries are compressed resources verified before
+alive while its parser is used. Needle binaries are compressed resources verified before
 remote installation.
 
 ```sh
@@ -115,7 +113,7 @@ Development, checks, packaging and release run through `cargo xtask`; see
 | Format / validate the workspace | `cargo fmt --all` / `cargo xtask check` |
 | Build Linux agents | `cargo xtask agents` |
 | Desktop / SSH / container tests | `cargo xtask test desktop` / `cargo xtask test ssh` / `cargo xtask test remote` |
-| Grammar / PDFium resources | `cargo xtask grammars` / `cargo xtask pdfium` |
+| Grammar resources | `cargo xtask grammars` |
 | Development packages | `cargo xtask package` |
 | macOS distribution | `cargo xtask release macos` |
 | Windows update payload | `cargo xtask release windows-update` |

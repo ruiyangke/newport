@@ -1,5 +1,6 @@
 //! Async Git client. Cancellation retires the owning channel before it can be reused.
 use newport_protocol::desktop::git::{CollectedDiff, GitResult};
+use newport_protocol::git::code;
 use newport_protocol::{
     encoding::protobuf::{FrameError, tokio::FrameReader},
     git::{
@@ -63,8 +64,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
         Ok(())
     }
     pub async fn request(&mut self, request: Request) -> Result<Value, Error> {
-        let value = self.request_typed(request.clone()).await?;
-        super::project_result(&value, &request)
+        let value = self.request_typed(request).await?;
+        super::project_result(&value)
     }
     pub(crate) async fn request_typed(&mut self, request: Request) -> Result<GitResult, Error> {
         request
@@ -72,7 +73,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
             .map_err(|error| Error::invalid(error.to_string()))?;
         if !self.methods.iter().any(|method| method == request.method()) {
             return Err(Error::new(
-                "UNSUPPORTED_METHOD",
+                code::UNSUPPORTED_METHOD,
                 "The agent does not support this Git method.",
             ));
         }
@@ -119,7 +120,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
                         .is_none_or(|length| length > protocol::MAX_DIFF)
                     {
                         return Err(Error::new(
-                            "PROTOCOL_ERROR",
+                            code::PROTOCOL_ERROR,
                             "Git stream exceeds its limit.",
                         ));
                     }
@@ -163,7 +164,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
 }
 fn invalid() -> Error {
     Error::new(
-        "PROTOCOL_ERROR",
+        code::PROTOCOL_ERROR,
         "Invalid Git agent response. Reconnect before continuing.",
     )
 }
@@ -197,11 +198,15 @@ async fn receive<S: AsyncRead + Unpin>(
             FrameError::Io(_) | FrameError::Truncated => {
                 Error::transport(format!("Git channel could not be read: {error}"))
             }
-            _ => Error::new("PROTOCOL_ERROR", format!("Invalid Git frame: {error}")),
+            _ => Error::new(code::PROTOCOL_ERROR, format!("Invalid Git frame: {error}")),
         })?
         .ok_or_else(|| Error::transport("Git channel closed."))?;
-    ServerMessage::decode(body)
-        .map_err(|error| Error::new("PROTOCOL_ERROR", format!("Invalid Git response: {error}")))
+    ServerMessage::decode(body).map_err(|error| {
+        Error::new(
+            code::PROTOCOL_ERROR,
+            format!("Invalid Git response: {error}"),
+        )
+    })
 }
 async fn send(stream: &mut (impl AsyncWrite + Unpin), message: &impl Message) -> Result<(), Error> {
     let frame = encode(message)?;
@@ -238,7 +243,10 @@ pub(super) async fn response_typed<S: AsyncRead + AsyncWrite + Unpin>(
     };
     if !mutation
         && let Err(error) = &mut result
-        && matches!(error.code.as_str(), "TRANSPORT_ERROR" | "PROTOCOL_ERROR")
+        && matches!(
+            error.code.as_str(),
+            code::TRANSPORT_ERROR | code::PROTOCOL_ERROR
+        )
     {
         // This stream cannot be reused, but its SSH connection
         // may still be serving other read lanes successfully.
@@ -256,8 +264,8 @@ pub(super) async fn response<S: AsyncRead + AsyncWrite + Unpin>(
     deadline: std::time::Duration,
     session_cancel: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<Value, Error> {
-    let value = response_typed(slot, request.clone(), deadline, session_cancel).await?;
-    super::project_result(&value, &request)
+    let value = response_typed(slot, request, deadline, session_cancel).await?;
+    super::project_result(&value)
 }
 
 #[cfg(test)]

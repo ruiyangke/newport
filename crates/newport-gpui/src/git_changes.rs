@@ -1,7 +1,9 @@
 //! Grouped working-tree comparisons. Each row selects one diff side, not a file
 //! to commit. Bulk actions use only the visible, snapshot-bound entry identities.
 use super::*;
+use git_listing::{Entry, StatusPage};
 use gpui_kit::base::Selectable;
+use newport_protocol::git::StatusEntry;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Group {
@@ -25,6 +27,15 @@ impl Group {
             Self::Untracked => "untracked",
         }
     }
+    fn total(self, page: &StatusPage) -> u64 {
+        let counts = &page.metadata.group_counts;
+        match self {
+            Self::Conflicted => counts.conflicted,
+            Self::Staged => counts.staged,
+            Self::Unstaged => counts.unstaged,
+            Self::Untracked => counts.untracked,
+        }
+    }
     fn title(self) -> &'static str {
         match self {
             Self::Conflicted => "Conflicts",
@@ -33,16 +44,16 @@ impl Group {
             Self::Untracked => "Untracked",
         }
     }
-    fn holds(self, entry: &Value) -> bool {
-        if self == Self::Conflicted {
-            return entry["conflicted"] == true;
+    fn holds(self, entry: &StatusEntry) -> bool {
+        match self {
+            Self::Conflicted => entry.conflicted,
+            Self::Staged => !entry.conflicted && entry.staged,
+            Self::Unstaged => !entry.conflicted && entry.unstaged && !entry.untracked,
+            Self::Untracked => !entry.conflicted && entry.untracked,
         }
-        entry["conflicted"] != true
-            && entry[self.key()] == true
-            && (self != Self::Unstaged || entry["untracked"] != true)
     }
-    fn mark(self, entry: &Value) -> &'static str {
-        let flags = entry["flags"].as_u64().unwrap_or(0);
+    fn mark(self, entry: &StatusEntry) -> &'static str {
+        let flags = entry.flags;
         match self {
             Self::Conflicted => "!",
             Self::Untracked => "?",
@@ -66,7 +77,7 @@ pub(super) struct Changes {
     collapsed: std::collections::HashSet<Group>,
 }
 impl Changes {
-    pub(super) fn row_count(&self, page: &Value) -> usize {
+    pub(super) fn row_count(&self, page: Option<&StatusPage>) -> usize {
         row_count(page, self.group, &self.collapsed)
     }
     fn toggle(&mut self, group: Group) {
@@ -105,15 +116,21 @@ impl Changes {
 }
 #[derive(Clone)]
 enum Row {
-    Header { group: Group, entries: Vec<Value> },
-    File { group: Group, entry: Value },
+    Header {
+        group: Group,
+        entries: Vec<StatusEntry>,
+    },
+    File {
+        group: Group,
+        entry: Box<StatusEntry>,
+    },
 }
 fn grouped(
-    page: &Value,
+    page: Option<&StatusPage>,
     only: Option<Group>,
     collapsed: &std::collections::HashSet<Group>,
 ) -> Vec<Row> {
-    let entries = rows(&page["entries"]);
+    let entries = page.map(|page| page.entries.as_slice()).unwrap_or_default();
     let mut result = Vec::new();
     for group in Group::ALL {
         if only.is_some_and(|only| only != group) {
@@ -132,18 +149,21 @@ fn grouped(
             entries: entries.clone(),
         });
         if !collapsed.contains(&group) {
-            result.extend(entries.into_iter().map(|entry| Row::File { group, entry }));
+            result.extend(entries.into_iter().map(|entry| Row::File {
+                group,
+                entry: Box::new(entry),
+            }));
         }
     }
     result
 }
 /// Count the actual virtual rows, including headers and both sides of a file.
 pub(super) fn row_count(
-    page: &Value,
+    page: Option<&StatusPage>,
     only: Option<Group>,
     collapsed: &std::collections::HashSet<Group>,
 ) -> usize {
-    let Some(entries) = page["entries"].as_array() else {
+    let Some(entries) = page.map(|page| &page.entries) else {
         return 0;
     };
     Group::ALL
@@ -161,10 +181,10 @@ pub(super) fn row_count(
         })
         .sum()
 }
-fn scope(page: &Value, filtered: bool) -> &'static str {
+fn scope(page: Option<&StatusPage>, filtered: bool) -> &'static str {
     if filtered {
         "shown"
-    } else if page["nextCursor"].is_string() || page["metadata"]["truncated"] == true {
+    } else if page.is_some_and(|page| page.next_cursor.is_some() || page.metadata.truncated) {
         "loaded"
     } else {
         "all"
@@ -175,7 +195,7 @@ impl Newport {
         &self,
         index: usize,
         group: Group,
-        entries: &[Value],
+        entries: &[StatusEntry],
         scope: &'static str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -186,7 +206,7 @@ impl Newport {
                 .all(|entry| self.git_can_change_entry(stage, entry));
         let selected = entries.to_vec();
 
-        let total = self.git.page["metadata"]["groupCounts"][group.key()].as_u64();
+        let total = self.git.status_page().map(|page| group.total(page));
         let open = !self.git.changes.collapsed.contains(&group);
         div()
             .h(px(crate::ui::ROW_HEIGHT))
@@ -247,7 +267,7 @@ impl Newport {
     pub(super) fn sync_git_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.page != Page::Projects
             || self.git.tab != 0
-            || !self.git.repo["repoId"].is_string()
+            || self.git.repo.is_none()
             || self.git.changes.input.is_some()
         {
             return;
@@ -282,27 +302,28 @@ impl Newport {
         self.git_load();
         true
     }
-    fn change_entries(&mut self, entries: &[Value], group: Group, cx: &mut Context<Self>) {
+    fn change_entries(&mut self, entries: &[StatusEntry], group: Group, cx: &mut Context<Self>) {
         let stage = group != Group::Staged;
-        let current: std::collections::HashMap<_, _> = self.git.page["entries"]
-            .as_array()
+        let current: std::collections::HashMap<_, _> = self
+            .git
+            .status_page()
             .into_iter()
-            .flatten()
-            .filter_map(|entry| entry["entryId"].as_str().map(|id| (id, entry)))
+            .flat_map(|page| &page.entries)
+            .map(|entry| (entry.entry_id.as_str(), entry))
             .collect();
         if group == Group::Conflicted
             || entries.is_empty()
             || !entries.iter().all(|entry| {
                 self.git_can_change_entry(stage, entry)
                     && current
-                        .get(entry["entryId"].as_str().unwrap_or_default())
-                        .is_some_and(|current| **current == *entry)
+                        .get(entry.entry_id.as_str())
+                        .is_some_and(|current| *current == entry)
             })
         {
             return;
         }
-        let ids: Vec<String> = entries.iter().map(|entry| text(entry, "entryId")).collect();
-        let snapshot = text(&self.git.page, "snapshot");
+        let ids: Vec<String> = entries.iter().map(|entry| entry.entry_id.clone()).collect();
+        let snapshot = self.git.snapshot().to_owned();
         self.start_git_index_mutation(
             self.git_repository_id(),
             format!(
@@ -319,12 +340,12 @@ impl Newport {
     }
     pub(super) fn git_changes_list(&self, cx: &mut Context<Self>) -> AnyElement {
         let display = grouped(
-            &self.git.page,
+            self.git.status_page(),
             self.git.changes.group,
             &self.git.changes.collapsed,
         );
-        let scope = scope(&self.git.page, self.git.changes.filtering());
-        let scroll_key = git_page_demand::identity(&self.git.page);
+        let scope = scope(self.git.status_page(), self.git.changes.filtering());
+        let scroll_key = self.git.page.as_ref().map(git_listing::Listing::identity);
         let headers: Vec<_> = display
             .iter()
             .enumerate()
@@ -344,7 +365,7 @@ impl Newport {
                 .expect("known group header");
             this.change_group_header(index, *group, entries, scope, cx)
         });
-        let empty = display.is_empty() && self.git.page["entries"].is_array();
+        let empty = display.is_empty() && self.git.page.is_some();
         let pending = self.git.changes.searching()
             || self.resources.get("git-list").is_some_and(|r| r.pending);
         let failed = self.git.error.is_some()
@@ -442,7 +463,7 @@ impl Newport {
                         if pending {
                             "Searching…".into()
                         } else {
-                            let count = rows(&self.git.page["entries"]).len();
+                            let count = self.git.page.as_ref().map_or(0, |page| page.len());
                             format!(
                                 "{count} matching {} loaded",
                                 if count == 1 { "file" } else { "files" }
@@ -474,15 +495,16 @@ impl Newport {
                                     div().h(px(crate::ui::ROW_HEIGHT)).into_any_element()
                                 }
                                 Row::File { group, entry } => {
-                                    let path = text(&entry["path"], "display");
+                                    let entry: &StatusEntry = entry;
+                                    let path = entry.path.display.clone();
                                     let group = *group;
-                                    let selected = entry.clone();
+                                    let selected = Entry::Change(entry.clone());
                                     let action_entry = entry.clone();
                                     let stage = group != Group::Staged;
-                                    let active = this.git.selected == *entry
+                                    let active = this.git.entry() == Some(entry)
                                         && this.git.diff_staged == !stage;
                                     let description = git_file_row::description(
-                                        entry,
+                                        git_file_row::origin(entry.old_path.as_ref(), &entry.path),
                                         &path,
                                         git_file_row::name(group.mark(entry)),
                                     );
@@ -529,7 +551,10 @@ impl Newport {
                                             .child(git_file_row::badge(group.mark(entry), cx))
                                             .child(git_file_row::path(path.clone(), cx))
                                             .when_some(
-                                                git_file_row::origin(entry),
+                                                git_file_row::origin(
+                                                    entry.old_path.as_ref(),
+                                                    &entry.path,
+                                                ),
                                                 |button, origin| {
                                                     button.child(
                                                         div()
@@ -544,12 +569,12 @@ impl Newport {
                                             )
                                             .on_click(
                                                 cx.listener(move |this, _, _, cx| {
-                                                    if !rows(&this.git.page["entries"])
-                                                        .contains(&selected)
-                                                    {
+                                                    if !this.git.page.as_ref().is_some_and(|page| {
+                                                        page.contains(&selected)
+                                                    }) {
                                                         return;
                                                     }
-                                                    this.git.selected = selected.clone();
+                                                    this.git.selected = Some(selected.clone());
                                                     this.git.detail_open = true;
                                                     this.git_select_side(!stage);
                                                     this.project_show_review(cx);
@@ -621,10 +646,10 @@ impl Newport {
             .into_any_element()
     }
 }
-pub(super) fn selected_mark(entry: &Value, staged: bool) -> &'static str {
-    let group = if entry["conflicted"] == true {
+pub(super) fn selected_mark(entry: &StatusEntry, staged: bool) -> &'static str {
+    let group = if entry.conflicted {
         Group::Conflicted
-    } else if entry["untracked"] == true {
+    } else if entry.untracked {
         Group::Untracked
     } else if staged {
         Group::Staged
@@ -641,20 +666,36 @@ pub(super) fn index_action_label(stage: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{Changes, Group, Row, grouped, scope};
+    use crate::git_fixture::{status_entry, status_page};
     use gpui_kit::component::input::InputState;
     use gpui_kit::{self as gpui, AppContext, Context, IntoElement, Render, Window, div};
+    use newport_protocol::git::StatusEntry;
     use serde_json::json;
     use std::collections::HashSet;
+
+    fn entry(staged: bool, unstaged: bool, untracked: bool, conflicted: bool) -> StatusEntry {
+        let mut entry = status_entry("entry", "file");
+        entry.staged = staged;
+        entry.unstaged = unstaged;
+        entry.untracked = untracked;
+        entry.conflicted = conflicted;
+        entry
+    }
 
     #[test]
     fn pagination_counts_group_headers_and_files_with_both_sides() {
         let open = HashSet::new();
-        let page = json!({"entries":[
-            {"staged":true,"unstaged":true},
-            {"untracked":true},
-            {"conflicted":true},
-            {"staged":true}
-        ]});
+        let page = status_page(
+            "s",
+            vec![
+                entry(true, true, false, false),
+                entry(false, false, true, false),
+                entry(false, false, false, true),
+                entry(true, false, false, false),
+            ],
+            None,
+        );
+        let page = Some(&page);
         for only in [
             None,
             Some(Group::Staged),
@@ -663,18 +704,22 @@ mod tests {
             Some(Group::Conflicted),
         ] {
             assert_eq!(
-                super::row_count(&page, only, &open),
-                grouped(&page, only, &open).len()
+                super::row_count(page, only, &open),
+                grouped(page, only, &open).len()
             );
         }
-        assert_eq!(super::row_count(&page, None, &open), 9);
-        assert_eq!(super::row_count(&json!({"entries":[]}), None, &open), 0);
+        assert_eq!(super::row_count(page, None, &open), 9);
+        assert_eq!(
+            super::row_count(Some(&status_page("s", vec![], None)), None, &open),
+            0
+        );
+        assert_eq!(super::row_count(None, None, &open), 0);
         // A folded group keeps its heading; its file rows leave the list.
         let folded = HashSet::from([Group::Staged, Group::Untracked]);
-        assert_eq!(super::row_count(&page, None, &folded), 6);
-        assert_eq!(grouped(&page, None, &folded).len(), 6);
+        assert_eq!(super::row_count(page, None, &folded), 6);
+        assert_eq!(grouped(page, None, &folded).len(), 6);
         assert!(matches!(
-            grouped(&page, Some(Group::Staged), &folded).as_slice(),
+            grouped(page, Some(Group::Staged), &folded).as_slice(),
             [Row::Header {
                 group: Group::Staged,
                 ..
@@ -703,7 +748,11 @@ mod tests {
             workspace.changes.dispatched();
             let cached = std::mem::take(&mut workspace.changes);
             workspace.tab = 1;
-            workspace.page = json!({"snapshot":"history", "entries":[{"oid":{"hex":"commit"}}]});
+            workspace.page = Some(crate::git_fixture::history_page(
+                "history",
+                vec![crate::git_fixture::commit("commit", "Commit")],
+                None,
+            ));
             let history = workspace.page.clone();
             assert!(!workspace.changes.update_query(
                 workspace.tab,
@@ -769,9 +818,10 @@ mod tests {
     }
     #[test]
     fn mixed_file_has_two_comparisons_and_side_specific_marks() {
-        let entry = json!({"entryId":"mixed","staged":true,"unstaged":true,"flags":513});
-        let page = json!({"entries":[entry]});
-        let rows = grouped(&page, None, &HashSet::new());
+        let mut entry = entry(true, true, false, false);
+        entry.flags = 513;
+        let page = status_page("s", vec![entry.clone()], None);
+        let rows = grouped(Some(&page), None, &HashSet::new());
         assert_eq!(rows.len(), 4);
         assert!(matches!(
             &rows[1],
@@ -792,8 +842,15 @@ mod tests {
     }
     #[test]
     fn conflicts_and_untracked_do_not_leak_into_other_groups() {
-        let page = json!({"entries":[{"conflicted":true,"staged":true,"unstaged":true},{"untracked":true,"unstaged":true}]});
-        let rows = grouped(&page, None, &HashSet::new());
+        let page = status_page(
+            "s",
+            vec![
+                entry(true, true, false, true),
+                entry(false, true, true, false),
+            ],
+            None,
+        );
+        let rows = grouped(Some(&page), None, &HashSet::new());
         assert_eq!(rows.len(), 4);
         assert!(matches!(
             &rows[1],
@@ -809,16 +866,20 @@ mod tests {
                 ..
             }
         ));
-        assert!(grouped(&page, Some(Group::Staged), &HashSet::new()).is_empty());
+        assert!(grouped(Some(&page), Some(Group::Staged), &HashSet::new()).is_empty());
     }
     #[test]
     fn bulk_scope_never_claims_all_when_filtered_or_partial() {
-        assert_eq!(scope(&json!({}), false), "all");
-        assert_eq!(scope(&json!({"nextCursor":"more"}), false), "loaded");
+        let complete = status_page("s", vec![], None);
+        assert_eq!(scope(Some(&complete), false), "all");
+        assert_eq!(scope(None, false), "all");
         assert_eq!(
-            scope(&json!({"metadata":{"truncated":true}}), false),
+            scope(Some(&status_page("s", vec![], Some("more"))), false),
             "loaded"
         );
-        assert_eq!(scope(&json!({}), true), "shown");
+        let mut truncated = complete.clone();
+        truncated.metadata.truncated = true;
+        assert_eq!(scope(Some(&truncated), false), "loaded");
+        assert_eq!(scope(Some(&complete), true), "shown");
     }
 }

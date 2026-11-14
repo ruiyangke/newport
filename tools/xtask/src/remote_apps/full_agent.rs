@@ -446,6 +446,7 @@ pub(super) fn build(
             .tempdir_in(output)?;
         let artifacts = temporary.path().join("artifacts");
         fs::create_dir(&artifacts)?;
+        let target = Target::new(platform, snapshot.tree(), !production);
         util::run(
             command(remote::docker())
                 .args(["run", "--rm", "--platform", &format!("linux/{platform}")])
@@ -457,7 +458,7 @@ pub(super) fn build(
                     "-v",
                     &format!("newport-static-agent-registry-{platform}:/opt/cargo/registry"),
                     "-v",
-                    &format!("newport-unified-agent-target-{platform}:/build"),
+                    &format!("{}:/build", target.volume),
                     "-v",
                 ])
                 .arg(format!("{}:/src:ro", snapshot.tree().display()))
@@ -471,6 +472,7 @@ pub(super) fn build(
                 ]),
         )
         .with_context(|| format!("The Full agent build failed for {arch}"))?;
+        drop(target);
         checked_build(&artifacts)?;
         fs::write(
             artifacts.join(BUILD_PROVENANCE),
@@ -500,6 +502,47 @@ pub(super) fn build(
         );
     }
     Ok(())
+}
+
+/// The Docker volume a build's Cargo output goes to. Development builds
+/// share one per architecture, so rebuilding is quick. Cargo decides what to
+/// rebuild by modification time, so a shared volume can hand one checkout's
+/// build to another; a production build gets an empty volume of its own,
+/// removed when it is dropped.
+struct Target {
+    volume: String,
+    private: bool,
+}
+impl Target {
+    /// `snapshot` is the build's source directory, unique to the run.
+    fn new(platform: &str, snapshot: &Path, development: bool) -> Self {
+        if development {
+            return Self {
+                volume: format!("newport-unified-agent-target-{platform}"),
+                private: false,
+            };
+        }
+        let run = snapshot
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .trim_start_matches("newport-full-agent-")
+            .to_ascii_lowercase();
+        Self {
+            volume: format!("newport-unified-agent-production-{platform}-{run}"),
+            private: true,
+        }
+    }
+}
+impl Drop for Target {
+    fn drop(&mut self) {
+        if self.private {
+            let _ = command(remote::docker())
+                .args(["volume", "rm", "--force", &self.volume])
+                .stdout(Stdio::null())
+                .status();
+        }
+    }
 }
 
 fn checked_build(artifacts: &Path) -> Result<()> {
@@ -545,7 +588,11 @@ fn checked_product(product: &Product) -> Result<()> {
         .context("Invalid Full agent service protocols")?;
     ensure!(
         product.control_versions == [1]
-            && product.services.get("remote-apps").map(Vec::as_slice) == Some(&[1][..]),
+            && product
+                .services
+                .get(newport_protocol::runtime::service::REMOTE_APPS)
+                .map(Vec::as_slice)
+                == Some(&[1][..]),
         "Export requires control version 1 and remote-apps version 1"
     );
     Ok(())
@@ -684,6 +731,31 @@ mod tests {
         Source {
             commit: commit.into(),
             dirty,
+        }
+    }
+
+    #[test]
+    fn only_development_builds_share_a_cargo_volume() {
+        let snapshot = || {
+            tempfile::Builder::new()
+                .prefix("newport-full-agent-")
+                .tempdir()
+                .unwrap()
+        };
+        let (first, second) = (snapshot(), snapshot());
+        let shared = Target::new("arm64", first.path(), true);
+        assert_eq!(
+            shared.volume,
+            Target::new("arm64", second.path(), true).volume
+        );
+        let one = Target::new("arm64", first.path(), false);
+        let other = Target::new("arm64", second.path(), false);
+        assert_ne!(one.volume, other.volume);
+        assert_ne!(one.volume, shared.volume);
+        assert!(one.private && !shared.private);
+        // No Docker volume was made for these, so none is removed.
+        for target in [shared, one, other] {
+            std::mem::forget(target);
         }
     }
 

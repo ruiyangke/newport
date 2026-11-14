@@ -10,6 +10,11 @@ use crate::remote_apps_install as install;
 use crate::remote_apps_sessions::{Launch, Sessions};
 use crate::terminal_status::ExitPolicy;
 use gpui_kit::component::{button::ButtonGroup, input::InputEvent};
+use newport_domain::requirements as req;
+use newport_protocol::desktop::applications::{Availability, Display};
+use newport_protocol::desktop::configuration::ConnectionScope;
+use newport_protocol::desktop::preferences::{Installed, Settings};
+use newport_protocol::remote_apps::apps::Catalogue;
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
@@ -153,7 +158,7 @@ const WALL_GAP: f32 = 14.;
 /// Everything Remote apps keeps outside the page.
 struct State {
     sessions: Rc<Sessions>,
-    connections: RefCell<HashMap<String, Value>>,
+    connections: RefCell<HashMap<String, ConnectionScope>>,
     /// A snapshot listed the servers, so a server missing from
     /// `connections` was removed rather than not read yet.
     servers_known: Cell<bool>,
@@ -207,38 +212,35 @@ fn sessions(cx: &App) -> Option<Rc<Sessions>> {
 /// Follows account changes for launcher notices and sign-out. The backend
 /// renews the shared graphical session and enforces its license.
 pub(crate) fn follow_account(
-    status: &newport_client::account::Status,
+    status: &newport_protocol::desktop::account::Status,
     cx: &mut App,
 ) -> Option<String> {
-    use newport_client::account::Phase;
+    use newport_protocol::desktop::account::Phase;
     let state = cx.try_global::<State>()?;
     let held = state.account.get();
-    if status.phase == Phase::Loading {
+    if status.state == Phase::Loading {
         return None;
     }
-    let holds = match status.phase {
+    let holds = match status.state {
         Phase::SignedIn => status.license.as_ref().map(|license| license.holds_pro()),
         _ => None,
     };
     state.account.set(holds);
     // Signed out, here or on the account site: a signed-out computer runs
     // nothing on the account.
-    if held.is_some() && status.phase == Phase::SignedOut {
+    if held.is_some() && status.state == Phase::SignedOut {
         stop_all(cx);
         return None;
     }
     let open = active_sessions(cx) > 0;
     let license = status.license.as_ref();
     if held == Some(true) && holds == Some(false) && open {
-        let field = |key: &str| {
-            license.and_then(|license| match key {
-                "state" => Some(license.state.as_str()),
-                _ => license.seat.as_deref(),
-            })
-        };
         // Refunded, or this computer's seat moved to another one: what the
         // account site and its portal promise is that Remote stops here now.
-        let stopped_now = match (field("state"), field("seat")) {
+        let stopped_now = match (
+            license.and_then(|license| license.state.as_deref()),
+            license.and_then(|license| license.seat.as_deref()),
+        ) {
             (Some("revoked"), _) => Some("Newport Pro was refunded, so open remote apps closed."),
             (Some("active" | "grace"), Some("free")) => Some(
                 "This computer’s Pro seat moved to another computer, so its open remote apps closed.",
@@ -290,18 +292,23 @@ pub(crate) fn active_sessions(cx: &App) -> usize {
     sessions(cx).map_or(0, |sessions| sessions.active())
 }
 
+const INSTALL_AGENT_FIRST: &str = "Install the full Newport agent on this server first.";
+
 /// The backend has verified the selected full runtime and supported service.
 /// Its actual executable is selected by runtime admission, never by this marker.
-pub(crate) fn launch_agent(status: &Value) -> Result<String, String> {
-    if let Some(error) = status["agentError"].as_str() {
-        return Err(error.to_owned());
+pub(crate) fn launch_agent(status: &Availability) -> Result<String, String> {
+    if let Some(error) = &status.agent_error {
+        return Err(error.clone());
     }
-    if status["selectedRuntime"]["product"] == "full"
-        && let Some(agent) = status["agent"].as_str().filter(|agent| !agent.is_empty())
+    if status
+        .selected_runtime
+        .as_ref()
+        .is_some_and(|runtime| runtime.product == newport_protocol::product::Variant::Full)
+        && let Some(agent) = status.agent.as_deref().filter(|agent| !agent.is_empty())
     {
         return Ok(agent.to_owned());
     }
-    Err("Install the full Newport agent on this server first.".into())
+    Err(INSTALL_AGENT_FIRST.into())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -313,25 +320,30 @@ enum Update {
 
 /// Use the shared lifecycle's verified release ordering. UI code never starts
 /// an automatic replacement; that policy belongs to the server session.
-fn update_offer(status: &Value) -> Option<(String, String, Update)> {
+fn update_offer(status: &Availability) -> Option<(String, String, Update)> {
+    use newport_protocol::{desktop::configuration::BuildRelation, product::Variant};
     if selected_is_bundled(status)
-        || status["bundledVariant"] != "full"
-        || status["installedVariant"] != "full"
-        || status["agentError"].is_string()
+        || status.bundled_variant != Variant::Full
+        || status.installed_variant != Some(Variant::Full)
+        || status.agent_error.is_some()
     {
         return None;
     }
-    let installed = status["revision"].as_str()?;
-    let bundled = status["bundledRevision"].as_str()?;
+    let installed = status.revision.as_deref()?;
+    let bundled = status.bundled_revision.as_deref()?;
     if installed == bundled {
         return None;
     }
-    let update = match status["buildRelation"].as_str()? {
-        "older" => Update::Newer,
-        "newer" => Update::Older,
+    let update = match status.build_relation {
+        BuildRelation::Older => Update::Newer,
+        BuildRelation::Newer => Update::Older,
         // Another build of the same release moves to this Newport's on its
         // own once idle; only a failed attempt needs the person.
-        "different" | "sameRelease" if failed_update(status).is_some() => Update::Unordered,
+        BuildRelation::Different | BuildRelation::SameRelease
+            if failed_update(status).is_some() =>
+        {
+            Update::Unordered
+        }
         _ => return None,
     };
     Some((installed.into(), bundled.into(), update))
@@ -339,21 +351,21 @@ fn update_offer(status: &Value) -> Option<(String, String, Update)> {
 
 /// Why the last automatic update to this Newport's agent build failed, when
 /// the server still runs another build.
-fn failed_update(status: &Value) -> Option<String> {
+fn failed_update(status: &Availability) -> Option<String> {
     if selected_is_bundled(status) {
         return None;
     }
-    let outcome = &status["automaticUpdate"];
-    let error = outcome["error"].as_str()?;
-    (outcome["to"].as_str()? == status["bundledRevision"].as_str()?
-        && status["revision"].as_str()? != status["bundledRevision"].as_str()?)
-    .then(|| error.trim_end_matches('.').to_owned())
+    let outcome = status.automatic_update.as_ref()?;
+    let error = outcome.error.as_deref()?;
+    let bundled = status.bundled_revision.as_deref()?;
+    (outcome.to.as_deref()? == bundled && status.revision.as_deref()? != bundled)
+        .then(|| error.trim_end_matches('.').to_owned())
 }
 
-fn selected_is_bundled(status: &Value) -> bool {
-    status["selectedRuntime"]["buildSha256"]
-        .as_str()
-        .is_some_and(|hash| Some(hash) == status["bundledRevision"].as_str())
+fn selected_is_bundled(status: &Availability) -> bool {
+    status.selected_runtime.as_ref().is_some_and(|runtime| {
+        Some(runtime.build_sha256.as_str()) == status.bundled_revision.as_deref()
+    })
 }
 
 /// Running Remote apps that failed since last asked, worded for a toast.
@@ -370,21 +382,16 @@ pub(crate) fn take_changed(cx: &App) -> bool {
 }
 
 /// Mirror per-server permissions from the accepted snapshot.
-pub(crate) fn sync_permissions(snapshot: &Value, cx: &App) {
+pub(crate) fn sync_permissions(snapshot: &configuration::Snapshot, cx: &App) {
     let Some(state) = cx.try_global::<State>() else {
         return;
     };
-    state
-        .servers_known
-        .set(snapshot["config"]["servers"].is_array());
-    *state.connections.borrow_mut() = rows(&snapshot["config"]["servers"])
+    state.servers_known.set(true);
+    *state.connections.borrow_mut() = snapshot
+        .config
+        .servers
         .iter()
-        .map(|server| {
-            (
-                text(server, "id"),
-                newport_domain::connection_scope::connection(server, snapshot),
-            )
-        })
+        .map(|server| (server.id.to_string(), snapshot.connection_scope(server)))
         .collect();
 }
 
@@ -454,14 +461,14 @@ pub(crate) fn open_from_shortcut(
 /// A launch's server, as the snapshot and the server's status describe it.
 struct ShortcutLaunch {
     server: String,
-    connection: Value,
+    connection: ConnectionScope,
     agent: String,
 }
 impl ShortcutLaunch {
     fn as_launch(&self) -> Launch<'_> {
         Launch {
             server: &self.server,
-            expected_connection: self.connection.clone(),
+            expected_connection: Some(self.connection.clone()),
             agent: &self.agent,
         }
     }
@@ -522,7 +529,7 @@ async fn launch_from_shortcut(
                         )
                         .map_err(|error| error.to_string())
                         .and_then(|reply| {
-                            newport_client::desktop_result::project(reply)
+                            newport_client::backend::availability_reply(reply)
                                 .map_err(|error| error.to_string())
                         })
                 });
@@ -593,38 +600,25 @@ const SETTINGS_KEY: &str = "remote-apps-settings";
 /// The servers last seen with the agent, from the backend's preferences.
 const INSTALLED_KEY: &str = "remote-apps-installed";
 
-pub(crate) fn decode_settings(value: &Value) -> api::StreamingSettings {
+/// Streaming settings from the saved record, or the defaults before one is read.
+fn streaming_settings(record: Option<&Settings>) -> api::StreamingSettings {
     let defaults = api::StreamingSettings::default();
+    let Some(record) = record else {
+        return defaults;
+    };
     api::StreamingSettings {
-        audio: value["audio"].as_bool().unwrap_or(defaults.audio),
-        codec: match value["codec"].as_str() {
-            Some("lossless") => api::CodecPreference::Lossless,
-            Some("fast") => api::CodecPreference::Fast,
-            _ => api::CodecPreference::Auto,
+        audio: record.audio,
+        codec: match record.codec {
+            desktop::preferences::Codec::Auto => api::CodecPreference::Auto,
+            desktop::preferences::Codec::Lossless => api::CodecPreference::Lossless,
+            desktop::preferences::Codec::Fast => api::CodecPreference::Fast,
         },
-        fps_goal: value["fpsGoal"]
-            .as_u64()
+        fps_goal: Some(record.fps_goal)
             .filter(|fps| [15, 30, 60].contains(fps))
-            .map_or(defaults.fps_goal, |fps| fps as u32),
-        hud: value["hud"].as_bool().unwrap_or(defaults.hud),
-        separate_apps: value["separateApps"]
-            .as_bool()
-            .unwrap_or(defaults.separate_apps),
+            .unwrap_or(defaults.fps_goal),
+        hud: record.hud,
+        separate_apps: record.separate_apps,
     }
-}
-
-fn encode_settings(settings: api::StreamingSettings) -> Value {
-    json!({
-        "audio": settings.audio,
-        "codec": match settings.codec {
-            api::CodecPreference::Auto => "auto",
-            api::CodecPreference::Lossless => "lossless",
-            api::CodecPreference::Fast => "fast",
-        },
-        "fpsGoal": settings.fps_goal,
-        "hud": settings.hud,
-        "separateApps": settings.separate_apps,
-    })
 }
 
 const TILE_WIDTH: f32 = 112.;
@@ -682,9 +676,9 @@ pub(crate) enum Entitlement {
 }
 
 impl Entitlement {
-    pub(crate) fn of(status: &newport_client::account::Status) -> Self {
-        use newport_client::account::Phase;
-        match status.phase {
+    pub(crate) fn of(status: &newport_protocol::desktop::account::Status) -> Self {
+        use newport_protocol::desktop::account::Phase;
+        match status.state {
             Phase::Loading => Self::Unknown,
             Phase::SignedOut => Self::SignedOut,
             Phase::Waiting => Self::Waiting,
@@ -693,15 +687,15 @@ impl Entitlement {
                     return Self::Unknown;
                 };
                 let free_seat = license.seat.as_deref() == Some("free");
-                match license.state.as_str() {
+                let trial_used = license.trial_used == Some(true);
+                let trial_used_here = license.trial_used_here == Some(true);
+                match license.state.as_deref().unwrap_or_default() {
                     _ if license.holds_pro() => Self::Pro,
                     "trial" if free_seat => Self::TrialElsewhere,
                     "active" | "grace" if free_seat => Self::FreeSeat,
-                    "none" if license.trial_used_here && !license.trial_used => Self::TrialUsedHere,
-                    "none" if !license.trial_used => Self::TrialAvailable,
-                    _ => Self::Ended {
-                        trial_used: license.trial_used,
-                    },
+                    "none" if trial_used_here && !trial_used => Self::TrialUsedHere,
+                    "none" if !trial_used => Self::TrialAvailable,
+                    _ => Self::Ended { trial_used },
                 }
             }
         }
@@ -720,8 +714,8 @@ enum RemoteRead {
     Catalogue,
     Display,
 }
-fn settings_record(value: api::StreamingSettings) -> desktop::preferences::Settings {
-    desktop::preferences::Settings {
+fn settings_record(value: api::StreamingSettings) -> Settings {
+    Settings {
         audio: value.audio,
         codec: match value.codec {
             api::CodecPreference::Auto => desktop::preferences::Codec::Auto,
@@ -745,10 +739,8 @@ fn installed_mutation(server: &str, installed: bool) -> Mutation {
 }
 
 /// Whether the installed-servers record lists this server.
-fn known_installed(record: &Value, server: &str) -> bool {
-    record
-        .as_array()
-        .is_some_and(|servers| servers.iter().any(|id| id == server))
+fn known_installed(record: Option<&Installed>, server: &str) -> bool {
+    record.is_some_and(|record| record.servers.iter().any(|id| id.to_string() == server))
 }
 
 /// "one fix", "two gaps", "7 fixes".
@@ -789,10 +781,103 @@ fn display_key(server: &str) -> String {
     format!("remote-apps-display:{server}")
 }
 
+/// The replies of Remote apps reads, under their request keys. Each key's
+/// read in Newport's resources says whether its reply still shows.
+#[derive(Default)]
+pub(crate) struct Readings {
+    status: HashMap<String, Availability>,
+    catalogue: HashMap<String, Catalogue>,
+    display: HashMap<String, Display>,
+    settings: HashMap<String, Settings>,
+    installed: HashMap<String, Installed>,
+}
+
+impl Readings {
+    /// The reply `held` keeps for `key`, while that key's read still shows it.
+    fn shown<'a, T>(
+        resources: &state::Resources,
+        held: &'a HashMap<String, T>,
+        key: &str,
+    ) -> Option<&'a T> {
+        resources
+            .get(key)
+            .is_some_and(newport_client::resources::Resource::has_value)
+            .then(|| held.get(key))
+            .flatten()
+    }
+
+    /// The server status `key`'s read shows.
+    pub(crate) fn status(&self, resources: &state::Resources, key: &str) -> Option<&Availability> {
+        Self::shown(resources, &self.status, key)
+    }
+
+    fn installed(&self, resources: &state::Resources) -> Option<&Installed> {
+        Self::shown(resources, &self.installed, INSTALLED_KEY)
+    }
+
+    /// Keeps `value` for `key` once the read accepts it, with whether it
+    /// differs from the reply shown.
+    fn hold<T: PartialEq>(
+        resources: &mut state::Resources,
+        held: &mut HashMap<String, T>,
+        key: &str,
+        generation: u64,
+        value: T,
+    ) -> bool {
+        let changed = held.get(key) != Some(&value);
+        let accepted = resources.complete_owned(key, generation, Ok(changed));
+        if accepted {
+            held.insert(key.to_owned(), value);
+        }
+        accepted
+    }
+
+    /// Settles a Remote apps read or preference save. A failure keeps the
+    /// reply shown.
+    pub(crate) fn complete(
+        &mut self,
+        resources: &mut state::Resources,
+        key: &str,
+        generation: u64,
+        result: Result<desktop::Reply, newport_client::request_error::RequestError>,
+    ) -> bool {
+        use desktop::{applications::Reply as Applications, preferences::Reply as Preferences};
+        let unexpected = || Err("The backend answered with an unexpected reply.".into());
+        match result {
+            Ok(desktop::Reply::Applications(reply)) => match *reply {
+                Applications::Status(status) => {
+                    Self::hold(resources, &mut self.status, key, generation, *status)
+                }
+                Applications::Catalogue(catalogue) => {
+                    Self::hold(resources, &mut self.catalogue, key, generation, *catalogue)
+                }
+                Applications::Display(display) => {
+                    Self::hold(resources, &mut self.display, key, generation, *display)
+                }
+                _ => resources.complete_owned(key, generation, unexpected()),
+            },
+            Ok(desktop::Reply::Preferences(reply)) => match *reply {
+                Preferences::Settings(settings) | Preferences::SettingsSave(settings) => {
+                    Self::hold(resources, &mut self.settings, key, generation, *settings)
+                }
+                Preferences::Installed(installed) | Preferences::InstalledSave(installed) => {
+                    Self::hold(resources, &mut self.installed, key, generation, *installed)
+                }
+                _ => resources.complete_owned(key, generation, unexpected()),
+            },
+            Ok(_) => resources.complete_owned(key, generation, unexpected()),
+            Err(error) => resources.complete_owned(key, generation, Err(error)),
+        }
+    }
+}
+
 /// One backend query as the page last saw it.
-#[derive(Clone, Default)]
-pub(crate) struct QueryRead {
-    value: Value,
+#[derive(Clone)]
+pub(crate) struct QueryRead<T> {
+    value: Option<T>,
+    /// An edit shown in place of the value until its save settles: a
+    /// confirmed save brings a newer reading, a failed one leaves the value.
+    edit: Option<T>,
     error: Option<String>,
     pending: bool,
     /// Whether a reading ever succeeded; a failed refresh keeps the old value.
@@ -800,70 +885,97 @@ pub(crate) struct QueryRead {
     revision: u64,
     /// When the last read finished, successfully or not.
     finished_at: Option<Instant>,
-    /// The value holds an edit whose save hasn't been confirmed.
-    edited: bool,
 }
 
-impl QueryRead {
-    /// Copies the value only when a newer reading replaced it.
-    fn observe(&mut self, resource: Option<&state::Resource>) {
+impl<T> Default for QueryRead<T> {
+    fn default() -> Self {
+        Self {
+            value: None,
+            edit: None,
+            error: None,
+            pending: false,
+            loaded: false,
+            revision: 0,
+            finished_at: None,
+        }
+    }
+}
+
+impl<T: Clone> QueryRead<T> {
+    /// Copies the reading only when a newer one replaced it.
+    fn observe(&mut self, resource: Option<&state::Resource>, reading: Option<&T>) {
         let Some(resource) = resource else {
             *self = Self::default();
             return;
         };
-        // A newer reading replaces the value. So does a settled save that
-        // failed: the edit it carried was not kept.
-        let rejected = self.edited && !resource.pending;
+        // A newer reading replaces the value and any edit. So does a settled
+        // save that failed: the edit it carried was not kept.
+        let rejected = self.edit.is_some() && !resource.pending;
         if resource.revision != self.revision
             || !self.loaded && resource.updated_at.is_some()
             || rejected
         {
-            self.value = resource.value.clone();
+            self.value = reading.cloned();
             self.revision = resource.revision;
-            self.edited = false;
+            self.edit = None;
         }
         self.loaded = resource.updated_at.is_some();
         self.error = resource.error.clone();
         self.pending = resource.pending;
         self.finished_at = resource.finished_at;
     }
+
+    /// What the page shows: the unconfirmed edit, else the reading.
+    fn shown(&self) -> Option<&T> {
+        self.edit.as_ref().or(self.value.as_ref())
+    }
+
+    /// Show an edit at once; the backend's reply confirms or reverts it.
+    fn edit(&mut self, value: T) {
+        self.edit = Some(value);
+    }
 }
 
 /// What the server falls short of, as the backend reported it.
-fn gaps(status: &Value) -> Vec<api::Gap> {
-    serde_json::from_value(status["gaps"].clone()).unwrap_or_default()
+fn gaps(status: Option<&Availability>) -> Vec<api::Gap> {
+    status.map_or_else(Vec::new, |status| status.gaps.clone())
 }
 
 /// What the server's account can do about its gaps.
-fn host(status: &Value) -> api::Host {
-    serde_json::from_value(status["host"].clone()).unwrap_or_default()
+fn host(status: Option<&Availability>) -> api::Host {
+    // Until a check reports otherwise, advice assumes the account uses sudo.
+    status.map_or(
+        api::Host {
+            elevation: api::Elevation::Sudo,
+            updater: None,
+            user_services: false,
+        },
+        |status| status.host.clone(),
+    )
 }
 
-/// The agent's catalogue entries, as the agent prints them.
-pub(crate) fn decode_catalogue(value: &Value) -> Vec<api::RemoteApp> {
+/// The agent's catalogue entries, with their icons decoded.
+pub(crate) fn decode_catalogue(catalogue: &Catalogue) -> Vec<api::RemoteApp> {
     use base64::Engine;
-    let text = |value: &Value, key: &str| value[key].as_str().unwrap_or_default().to_owned();
-    value["apps"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    catalogue
+        .apps
+        .iter()
         .map(|app| api::RemoteApp {
-            id: text(app, "id"),
-            name: text(app, "name"),
-            description: Some(text(app, "description")).filter(|d| !d.is_empty()),
-            icon_png: app["icon"].as_str().and_then(|icon| {
+            id: app.id.clone(),
+            name: app.name.clone(),
+            description: Some(app.description.clone()).filter(|d| !d.is_empty()),
+            icon_png: app.icon.as_deref().and_then(|icon| {
                 base64::engine::general_purpose::STANDARD
                     .decode(icon)
                     .ok()
                     .map(Into::into)
             }),
-            actions: app["actions"]
-                .as_array()
-                .into_iter()
-                .flatten()
+            actions: app
+                .actions
+                .iter()
                 .map(|action| api::AppAction {
-                    id: text(action, "id"),
-                    name: text(action, "name"),
+                    id: action.id.clone(),
+                    name: action.name.clone(),
                 })
                 .collect(),
         })
@@ -893,13 +1005,13 @@ pub(crate) struct Launchpad {
     terminal: Option<InstallTerminal>,
     /// Numbers each shell opened.
     terminals_opened: u64,
-    status: QueryRead,
-    settings: QueryRead,
+    status: QueryRead<Availability>,
+    settings: QueryRead<Settings>,
     /// The servers last seen with the agent.
-    installed_record: QueryRead,
-    catalogue: QueryRead,
+    installed_record: QueryRead<Installed>,
+    catalogue: QueryRead<Catalogue>,
     /// The server's display as this computer knows it.
-    display: QueryRead,
+    display: QueryRead<Display>,
     /// An app Quit was chosen for that Remote apps didn't start here.
     quit_elsewhere: Option<String>,
     /// The decoded catalogue and the revision it came from.
@@ -1461,13 +1573,20 @@ impl Launchpad {
     /// What the server has for the agent, from its latest status reading.
     fn checks(&self) -> Vec<Check> {
         use api::Requirement;
-        let value = &self.status.value;
+        let status = self.status.value.as_ref();
         let name = &self.server_name;
-        let gaps = gaps(value);
+        let gaps = gaps(status);
         let os = self.os();
-        let host = host(value);
-        let text = |key: &str| value[key].as_str().unwrap_or_default().to_owned();
-        let (system, architecture) = (text("system"), text("architecture"));
+        let host = host(status);
+        let text = |field: fn(&Availability) -> &Option<String>| {
+            status
+                .and_then(|status| field(status).clone())
+                .unwrap_or_default()
+        };
+        let (system, architecture) = (
+            text(|status| &status.system),
+            text(|status| &status.architecture),
+        );
         let passed = |label: &str, detail: &str, requirement| Check {
             label: label.to_owned(),
             detail: detail.to_owned(),
@@ -1476,17 +1595,18 @@ impl Launchpad {
             fix: None,
         };
         let row = |gap: &api::Gap| Check {
-            label: gap.title(),
-            detail: gap.detail(name, os.as_ref(), &host),
+            label: req::title(gap),
+            detail: req::detail(gap, name, os.as_ref(), &host),
             outcome: CheckOutcome::Gap,
             requirement: Some(gap.requirement),
-            fix: Some(gap.remedy(os.as_ref(), &host)).filter(|fix| *fix != api::Remedy::Manual),
+            fix: Some(req::remedy(gap, os.as_ref(), &host))
+                .filter(|fix| *fix != api::Remedy::Manual),
         };
         let requirement = |requirement: Requirement, detail: &str| {
             gaps.iter()
                 .find(|gap| gap.requirement == requirement)
                 .map_or_else(
-                    || passed(requirement.name(), detail, Some(requirement)),
+                    || passed(req::name(requirement), detail, Some(requirement)),
                     row,
                 )
         };
@@ -1515,9 +1635,9 @@ impl Launchpad {
                     fix: None,
                 }
             },
-            requirement(Requirement::Dbus, Requirement::Dbus.purpose()),
-            requirement(Requirement::Xwayland, Requirement::Xwayland.purpose()),
-            requirement(Requirement::Audio, Requirement::Audio.purpose()),
+            requirement(Requirement::Dbus, req::purpose(Requirement::Dbus)),
+            requirement(Requirement::Xwayland, req::purpose(Requirement::Xwayland)),
+            requirement(Requirement::Audio, req::purpose(Requirement::Audio)),
         ];
         // Whatever else is missing follows the rows every server gets.
         checks.extend(
@@ -1547,7 +1667,7 @@ impl Launchpad {
             return;
         }
         let server = self.server.clone();
-        let (progress, finished) = match install::start(&server, &self.status.value) {
+        let (progress, finished) = match install::start(&server, self.status.value.as_ref()) {
             Ok(started) => started,
             Err(error) => {
                 self.installs.insert(server, Install::Failed(error));
@@ -1626,8 +1746,12 @@ impl Launchpad {
     /// reused one it already had.
     fn settle_activation(&mut self) {
         if let Some(Install::Finished(activation, revision)) = self.installs.get(&self.server) {
-            let reported =
-                self.status.revision != *revision && self.status.value["agent"].is_string();
+            let reported = self.status.revision != *revision
+                && self
+                    .status
+                    .value
+                    .as_ref()
+                    .is_some_and(|status| status.agent.is_some());
             if reported && !activation.held() {
                 self.installs.remove(&self.server);
             }
@@ -1637,11 +1761,11 @@ impl Launchpad {
     /// Whether this server had the agent when last checked, before this
     /// visit's check answers.
     fn known_installed(&self) -> bool {
-        known_installed(&self.installed_record.value, &self.server)
+        known_installed(self.installed_record.value.as_ref(), &self.server)
     }
 
     fn outdated(&self) -> Option<(String, String, Update)> {
-        update_offer(&self.status.value)
+        self.status.value.as_ref().and_then(update_offer)
     }
 
     /// While the server check or the app list has failed, read them again
@@ -1698,11 +1822,16 @@ impl Launchpad {
     }
 
     /// The newest readings of this server's queries, from Newport's resources.
-    fn observe(&mut self, resources: &state::Resources) {
-        self.settings.observe(resources.get(SETTINGS_KEY));
-        self.installed_record.observe(resources.get(INSTALLED_KEY));
+    fn observe(&mut self, resources: &state::Resources, readings: &Readings) {
+        self.settings.observe(
+            resources.get(SETTINGS_KEY),
+            Readings::shown(resources, &readings.settings, SETTINGS_KEY),
+        );
+        self.installed_record
+            .observe(resources.get(INSTALLED_KEY), readings.installed(resources));
+        let key = status_key(&self.server);
         self.status
-            .observe(resources.get(&status_key(&self.server)));
+            .observe(resources.get(&key), readings.status(resources, &key));
         let read = &self.status;
         if let Some(Install::Diagnosing(diagnosis)) = self.installs.get_mut(&self.server) {
             // Only a read finished after the check began counts, not an
@@ -1712,15 +1841,21 @@ impl Launchpad {
             diagnosis.confirmed |= diagnosis.arrived && !read.pending && read.error.is_none();
         }
         self.settle_activation();
-        self.catalogue
-            .observe(resources.get(&catalogue_key(&self.server)));
+        let key = catalogue_key(&self.server);
+        self.catalogue.observe(
+            resources.get(&key),
+            Readings::shown(resources, &readings.catalogue, &key),
+        );
         // Remote apps opened as separate Mac apps take their names and icons
         // from here, as soon as a reading arrives rather than when drawn.
         if self.catalogue.loaded {
             self.decode_catalogue();
         }
-        self.display
-            .observe(resources.get(&display_key(&self.server)));
+        let key = display_key(&self.server);
+        self.display.observe(
+            resources.get(&key),
+            Readings::shown(resources, &readings.display, &key),
+        );
     }
 
     fn decode_catalogue(&self) {
@@ -1730,7 +1865,11 @@ impl Launchpad {
             .as_ref()
             .is_none_or(|(revision, _)| *revision != read.revision)
         {
-            let apps = decode_catalogue(&read.value);
+            let apps = read
+                .value
+                .as_ref()
+                .map(decode_catalogue)
+                .unwrap_or_default();
             crate::remote_app_catalog::remember(&self.server, &self.server_name, &apps);
             *decoded = Some((read.revision, apps));
         }
@@ -1745,19 +1884,13 @@ impl Launchpad {
     }
 
     /// The server's display as this computer knows it.
-    fn display(&self) -> api::Display {
-        serde_json::from_value(self.display.value.clone()).unwrap_or_default()
-    }
-
-    /// Show an edit at once; the backend's reply confirms or reverts it.
-    fn edit(read: &mut QueryRead, value: Value) {
-        read.value = value;
-        read.edited = true;
+    fn display(&self) -> Display {
+        self.display.value.clone().unwrap_or_default()
     }
 
     /// Streaming settings from the backend's preferences.
     fn settings(&self) -> api::StreamingSettings {
-        decode_settings(&self.settings.value)
+        streaming_settings(self.settings.shown())
     }
 
     /// Whether this server can run apps, from the server query.
@@ -1769,11 +1902,15 @@ impl Launchpad {
                 _ => api::ServerStatus::Checking,
             };
         }
-        if let Some(error) = read.value["agentError"].as_str() {
-            return api::ServerStatus::Failed(error.into());
+        if let Some(error) = read
+            .value
+            .as_ref()
+            .and_then(|status| status.agent_error.clone())
+        {
+            return api::ServerStatus::Failed(error);
         }
-        let gaps = gaps(&read.value);
-        if launch_agent(&read.value).is_err() {
+        let gaps = gaps(read.value.as_ref());
+        if self.launch_agent().is_err() {
             api::ServerStatus::NeedsInstall
         } else if !gaps.is_empty() {
             api::ServerStatus::Gaps(gaps)
@@ -1784,11 +1921,14 @@ impl Launchpad {
 
     /// A verified full agent; the backend chooses its admitted runtime build.
     fn launch_agent(&self) -> Result<String, String> {
-        launch_agent(&self.status.value)
+        self.status
+            .value
+            .as_ref()
+            .map_or_else(|| Err(INSTALL_AGENT_FIRST.into()), launch_agent)
     }
 
     fn os(&self) -> Option<api::ServerOs> {
-        let release = self.status.value["osRelease"].as_str()?;
+        let release = self.status.value.as_ref()?.os_release.as_str();
         Some(api::ServerOs::parse(release)).filter(|os| !os.id.is_empty())
     }
 
@@ -1933,19 +2073,19 @@ impl Launchpad {
 
     /// Why no app can start yet: software every app needs is missing.
     fn missing_for_launch(&self, app: &str) -> Result<(), String> {
-        let blocking: Vec<_> = gaps(&self.status.value)
+        let blocking: Vec<_> = gaps(self.status.value.as_ref())
             .into_iter()
-            .filter(|gap| !gap.optional())
+            .filter(|gap| !req::optional(gap))
             .collect();
         if blocking.is_empty() {
             return Ok(());
         }
         let what = if blocking.len() == 1 { "it" } else { "them" };
-        let advice = if blocking.iter().all(api::Gap::installs) {
-            newport_domain::requirements::install_advice(
+        let advice = if blocking.iter().all(req::installs) {
+            req::install_advice(
                 what,
                 self.os().as_ref(),
-                &host(&self.status.value),
+                &host(self.status.value.as_ref()),
                 "then try again.",
             )
         } else {
@@ -1953,7 +2093,7 @@ impl Launchpad {
         };
         Err(format!(
             "{app} needs {} on {}. {advice}",
-            newport_domain::requirements::listed(&blocking),
+            req::listed(&blocking),
             self.server_name
         ))
     }
@@ -1963,8 +2103,7 @@ impl Launchpad {
             server: &self.server,
             expected_connection: cx
                 .try_global::<State>()
-                .and_then(|state| state.connections.borrow().get(&self.server).cloned())
-                .unwrap_or_default(),
+                .and_then(|state| state.connections.borrow().get(&self.server).cloned()),
             agent,
         }
     }
@@ -2438,9 +2577,9 @@ impl Launchpad {
                                     .as_ref()
                                     .is_some_and(|terminal| terminal.command == command);
                                 let run = command.clone();
-                                let title = check
-                                    .requirement
-                                    .map_or("Install".into(), |r| format!("Install {}", r.noun()));
+                                let title = check.requirement.map_or("Install".into(), |r| {
+                                    format!("Install {}", req::noun(r))
+                                });
                                 button
                                     .icon(IconName::SquareTerminal)
                                     .label(if open { "Installing…" } else { "Install" })
@@ -2578,28 +2717,23 @@ impl Launchpad {
         }
         // An app that needed X11, on a server without the XWayland that
         // would have given it.
-        let xwayland = gaps(&self.status.value)
+        let xwayland = gaps(self.status.value.as_ref())
             .into_iter()
-            .find(|gap| gap.requirement == api::Requirement::Xwayland && gap.installs());
+            .find(|gap| gap.requirement == api::Requirement::Xwayland && req::installs(gap));
         if let Some(gap) = xwayland
             && reason.lines().any(no_x11_display)
         {
             let os = self.os();
-            let host = host(&self.status.value);
+            let host = host(self.status.value.as_ref());
             let found = match &gap.finding {
-                api::Finding::Outdated { version } => format!(
+                api::Finding::Outdated(version) => format!(
                     "{server} has XWayland {version}, and Newport needs {} or newer",
-                    newport_domain::requirements::XWAYLAND_MINIMUM
+                    req::XWAYLAND_MINIMUM
                 ),
                 _ => format!("{server} has no XWayland"),
             };
-            let advice = newport_domain::requirements::install_advice(
-                "XWayland",
-                os.as_ref(),
-                &host,
-                "then open it again.",
-            );
-            let fix = match gap.remedy(os.as_ref(), &host) {
+            let advice = req::install_advice("XWayland", os.as_ref(), &host, "then open it again.");
+            let fix = match req::remedy(&gap, os.as_ref(), &host) {
                 api::Remedy::Command(command) => Some(api::Fix::Command(command)),
                 api::Remedy::Configure(settings) => Some(api::Fix::Configure(settings)),
                 api::Remedy::Manual => None,
@@ -2615,7 +2749,7 @@ impl Launchpad {
         &self,
         status: &api::ServerStatus,
         sessions: &[api::SessionSummary],
-        display: &api::Display,
+        display: &Display,
     ) -> Vec<(api::Alert, bool)> {
         let server = self.server_name.as_str();
         let mut alerts = Vec::new();
@@ -2628,7 +2762,7 @@ impl Launchpad {
                 .filter(|gap| gap.requirement != api::Requirement::Xwayland)
                 .cloned()
                 .collect();
-            let host = host(&self.status.value);
+            let host = host(self.status.value.as_ref());
             let fix = |remedy| match remedy {
                 api::Remedy::Command(command) => api::Fix::Command(command),
                 api::Remedy::Configure(settings) => api::Fix::Configure(settings),
@@ -2636,15 +2770,19 @@ impl Launchpad {
             };
             // Everything a package fixes installs together, what every app
             // needs named first.
-            let mut installs: Vec<_> = gaps.iter().filter(|gap| gap.installs()).cloned().collect();
-            installs.sort_by_key(api::Gap::optional);
+            let mut installs: Vec<_> = gaps
+                .iter()
+                .filter(|gap| req::installs(gap))
+                .cloned()
+                .collect();
+            installs.sort_by_key(req::optional);
             if !installs.is_empty() {
-                let optional = installs.iter().all(api::Gap::optional);
+                let optional = installs.iter().all(req::optional);
                 let (label, title, detail) = match installs.as_slice() {
                     [gap] => (
-                        gap.requirement.noun().to_owned(),
-                        gap.title(),
-                        gap.detail(server, os.as_ref(), &host),
+                        req::noun(gap.requirement).to_owned(),
+                        req::title(gap),
+                        req::detail(gap, server, os.as_ref(), &host),
                     ),
                     _ => (
                         "missing software".to_owned(),
@@ -2656,13 +2794,8 @@ impl Launchpad {
                             } else {
                                 "Remote apps"
                             },
-                            newport_domain::requirements::listed(&installs),
-                            newport_domain::requirements::install_advice(
-                                "them",
-                                os.as_ref(),
-                                &host,
-                                "then check again."
-                            )
+                            req::listed(&installs),
+                            req::install_advice("them", os.as_ref(), &host, "then check again.")
                         ),
                     ),
                 };
@@ -2677,31 +2810,27 @@ impl Launchpad {
                         },
                         title,
                         detail,
-                        fix: Some(fix(newport_domain::requirements::install_remedy(
-                            &installs,
-                            os.as_ref(),
-                            &host,
-                        ))),
+                        fix: Some(fix(req::install_remedy(&installs, os.as_ref(), &host))),
                         output: None,
                     },
                     optional,
                 ));
             }
-            for gap in gaps.iter().filter(|gap| !gap.installs()) {
+            for gap in gaps.iter().filter(|gap| !req::installs(gap)) {
                 alerts.push((
                     api::Alert {
-                        id: format!("gap:{}", gap.requirement.name()),
-                        severity: if gap.optional() {
+                        id: format!("gap:{}", req::name(gap.requirement)),
+                        severity: if req::optional(gap) {
                             api::Severity::Warning
                         } else {
                             api::Severity::Error
                         },
-                        title: gap.title(),
-                        detail: gap.detail(server, os.as_ref(), &host),
-                        fix: Some(fix(gap.remedy(os.as_ref(), &host))),
+                        title: req::title(gap),
+                        detail: req::detail(gap, server, os.as_ref(), &host),
+                        fix: Some(fix(req::remedy(gap, os.as_ref(), &host))),
                         output: None,
                     },
-                    gap.optional(),
+                    req::optional(gap),
                 ));
             }
         }
@@ -2757,7 +2886,7 @@ impl Launchpad {
                     api::ServerStatus::Ready | api::ServerStatus::Gaps(_)
                 ) && let Some((installed, bundled, update)) = self.outdated()
                 {
-                    let failed = failed_update(&self.status.value);
+                    let failed = self.status.value.as_ref().and_then(failed_update);
                     let (title, detail) = match update {
                         _ if failed.is_some() && update != Update::Older => (
                             "This server runs an older Newport agent".to_owned(),
@@ -3190,7 +3319,7 @@ impl Launchpad {
     }
 
     fn save(&mut self, settings: api::StreamingSettings, cx: &mut Context<Self>) {
-        Self::edit(&mut self.settings, encode_settings(settings));
+        self.settings.edit(settings_record(settings));
         cx.emit(LaunchpadEvent::SaveSettings(settings));
         cx.notify();
     }
@@ -3584,7 +3713,7 @@ fn on_computer(computer: Option<&str>) -> String {
 }
 
 /// Whether `app` has windows on the display.
-fn shows(display: &api::Display, app: &str) -> bool {
+fn shows(display: &Display, app: &str) -> bool {
     display.applications.iter().any(|shown| shown.app_id == app)
 }
 
@@ -3969,7 +4098,7 @@ impl Newport {
             )
             .into_any_element();
         };
-        let name = text(server, "name");
+        let name = server.name.clone();
         let id = self.server.clone();
         let view = match &self.remote_apps {
             Some(view) => view.clone(),
@@ -4007,6 +4136,7 @@ impl Newport {
         }
         let visit = self.remote_apps_visit;
         let resources = &self.resources;
+        let readings = &self.remote_apps_readings;
         let entitlement = Entitlement::of(self.account.status());
         let seat_message = self
             .account
@@ -4027,7 +4157,7 @@ impl Newport {
         view.update(cx, |view, cx| {
             view.set_account(entitlement, seat_message, busy);
             view.show(&id, &name, visit, window, cx);
-            view.observe(resources);
+            view.observe(resources, readings);
             view.retry_failed_status(cx);
         });
         div()
@@ -4076,7 +4206,7 @@ impl Newport {
                 self.resources.fence(&mutation.key);
             }
             let generation = self.resources.begin_refresh(&mutation.key, true);
-            self.dispatch_result(
+            self.dispatch_typed(
                 &mutation.key,
                 mutation
                     .operation
@@ -4123,10 +4253,11 @@ impl Newport {
         let server = self.server.clone();
         // Reads that failed before the server's connection came back are
         // asked again at once rather than at their next poll.
-        let transport = &self.snapshot["runtime"]["agentTransport"][&server];
-        let connected = (transport["status"] == "connected")
-            .then(|| transport["generation"].as_u64())
-            .flatten();
+        let connected = self
+            .server_id()
+            .and_then(|id| self.runtime()?.agent_transport(id))
+            .filter(|transport| transport.status == configuration::TransportStatus::Connected)
+            .map(|transport| transport.generation);
         let current = Some((server.clone(), connected));
         let reconnected = connected.is_some()
             && std::mem::replace(&mut self.remote_apps_transport, current.clone()) != current;
@@ -4136,7 +4267,7 @@ impl Newport {
             let generation = self.resources.begin_refresh(SETTINGS_KEY, false);
             self.dispatch_request(
                 SETTINGS_KEY,
-                request_dispatch::Request::Desktop(Box::new(desktop::Operation::Preferences(
+                request_dispatch::Request::Typed(Box::new(desktop::Operation::Preferences(
                     Box::new(desktop::preferences::Operation::Settings(Box::new(
                         newport_protocol::common::Present {},
                     ))),
@@ -4150,7 +4281,7 @@ impl Newport {
             let generation = self.resources.begin_refresh(INSTALLED_KEY, false);
             self.dispatch_request(
                 INSTALLED_KEY,
-                request_dispatch::Request::Desktop(Box::new(desktop::Operation::Preferences(
+                request_dispatch::Request::Typed(Box::new(desktop::Operation::Preferences(
                     Box::new(desktop::preferences::Operation::Installed(Box::new(
                         newport_protocol::common::Present {},
                     ))),
@@ -4170,19 +4301,29 @@ impl Newport {
             },
         );
         // The status's agent once a reading arrived, and whether it settled.
+        let key = status_key(&server);
         let status = self
             .resources
-            .get(&status_key(&server))
+            .get(&key)
             .filter(|status| status.updated_at.is_some())
             .map(|status| {
                 let settled = !status.pending && status.error.is_none();
-                (status.value["agent"].is_string(), settled, status.revision)
+                let agent = self
+                    .remote_apps_readings
+                    .status(&self.resources, &key)
+                    .is_some_and(|status| status.agent.is_some());
+                (agent, settled, status.revision)
             });
         let record = self
             .resources
             .get(INSTALLED_KEY)
             .filter(|record| record.updated_at.is_some())
-            .map(|record| known_installed(&record.value, &server));
+            .map(|_| {
+                known_installed(
+                    self.remote_apps_readings.installed(&self.resources),
+                    &server,
+                )
+            });
         let known = record == Some(true);
         // Remember what this check found, for the next first visit.
         // Once per reading: a save that failed waits for the next one.
@@ -4256,7 +4397,7 @@ impl Newport {
             self.resources.fence(key);
         }
         let generation = self.resources.begin_refresh(key, manual);
-        self.dispatch_result(
+        self.dispatch_typed(
             key,
             desktop_server(server).map(|server| {
                 desktop::Operation::Applications(Box::new(match query {
@@ -4287,125 +4428,169 @@ mod tests {
     use super::{Update, failed_update, launch_agent, update_offer};
     use crate::page_perf_tests::{PageHost, frame};
     use crate::remote_apps_api as api;
+    use crate::remote_apps_fixture as fixture;
     use gpui_kit::{self as gpui, AppContext, Modifiers, TestAppContext, VisualTestContext};
-    use serde_json::{Value, json};
+    use newport_protocol::desktop::applications::{
+        Availability, Display, Elevation, Inactive, Requirement,
+    };
+    use newport_protocol::desktop::configuration::BuildRelation;
+    use newport_protocol::product::Variant;
+    use newport_protocol::remote_apps::apps::Catalogue;
     use std::{cell::RefCell, rc::Rc};
 
     fn typed_owner(
         window: &mut gpui_kit::Window,
         cx: &mut gpui_kit::Context<crate::Newport>,
     ) -> crate::Newport {
-        let mut view = crate::page_perf_tests::owner(window, cx);
-        let old = view.server.clone();
-        let id = "11111111-1111-4111-8111-111111111111";
-        view.server = id.into();
-        view.snapshot["instanceId"] = json!("22222222-2222-4222-8222-222222222222");
-        view.snapshot["config"]["servers"][0]["id"] = json!(id);
-        view.snapshot["config"]["servers"][0]["sshPort"] = json!(22);
-        view.snapshot["config"]["servers"][0]["authMethod"] = json!("publicKey");
-        if let Some(runtime) = view.snapshot["runtime"].as_object_mut() {
-            for values in runtime.values_mut() {
-                if let Some(map) = values.as_object_mut()
-                    && let Some(value) = map.remove(&old)
-                {
-                    map.insert(id.into(), value);
-                }
-            }
-        }
-        view.snapshot["runtime"]["connectionRevisions"][id] = json!(1);
-        view
+        crate::page_perf_tests::owner_at(
+            window,
+            cx,
+            uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
+            uuid::Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap(),
+        )
     }
     const AGENT: &str = "newport-agent";
 
     #[test]
     fn separate_apps_are_on_unless_saved_off() {
         assert_eq!(
-            super::decode_settings(&json!({"audio": true})).separate_apps,
+            super::streaming_settings(None).separate_apps,
             cfg!(any(target_os = "macos", windows))
         );
         let off = api::StreamingSettings {
             separate_apps: false,
             ..Default::default()
         };
-        assert!(!super::decode_settings(&super::encode_settings(off)).separate_apps);
+        assert!(!super::streaming_settings(Some(&super::settings_record(off))).separate_apps);
     }
 
     #[test]
     fn launches_require_the_verified_selected_full_runtime() {
-        let mut status = json!({"agent":"newport-agent", "installedVariant":null,
-            "installationError":"The default product cannot be verified", "revision":"older", "bundledRevision":"ours",
-            "selectedRuntime":{"product":"full", "buildSha256":"ours"}});
+        let mut status = Availability {
+            installed_variant: None,
+            installation_error: Some("The default product cannot be verified".into()),
+            revision: Some("older".into()),
+            bundled_revision: Some("ours".into()),
+            ..fixture::installed("newport-agent", "ours")
+        };
         assert_eq!(launch_agent(&status).unwrap(), "newport-agent");
-        status["installedVariant"] = json!("full");
-        status["selectedRuntime"]["product"] = json!("core");
+        status.installed_variant = Some(Variant::Full);
+        status.selected_runtime.as_mut().unwrap().product = Variant::Core;
         assert!(launch_agent(&status).is_err());
-        status["selectedRuntime"] = Value::Null;
+        status.selected_runtime = None;
         assert!(launch_agent(&status).is_err());
-        assert!(launch_agent(&json!({"agent":"/old/run-agent"})).is_err());
         assert!(
-            launch_agent(&json!({"agent":"newport-agent", "installedVariant":"core"})).is_err()
+            launch_agent(&Availability {
+                agent: Some("/old/run-agent".into()),
+                ..fixture::status()
+            })
+            .is_err()
+        );
+        assert!(
+            launch_agent(&Availability {
+                agent: Some("newport-agent".into()),
+                installed_variant: Some(Variant::Core),
+                ..fixture::status()
+            })
+            .is_err()
         );
         assert_eq!(
-            launch_agent(&json!({"agentError":"Incompatible protocol"})).unwrap_err(),
+            launch_agent(&Availability {
+                agent_error: Some("Incompatible protocol".into()),
+                ..fixture::status()
+            })
+            .unwrap_err(),
             "Incompatible protocol"
         );
     }
 
     #[test]
     fn a_bundled_selected_runtime_needs_no_default_replacement() {
-        let status = json!({"installedVariant":"full", "bundledVariant":"full",
-            "revision":"theirs", "bundledRevision":"ours", "buildRelation":"older",
-            "selectedRuntime":{"product":"full", "buildSha256":"ours"},
-            "automaticUpdate":{"at":1, "from":"theirs", "to":"ours", "error":"upload failed."}});
+        let status = Availability {
+            selected_runtime: fixture::selected("ours"),
+            automatic_update: fixture::update("theirs", "ours", Some("upload failed.")),
+            ..older_full()
+        };
         assert!(update_offer(&status).is_none());
         assert!(failed_update(&status).is_none());
     }
 
     #[test]
     fn a_failed_automatic_update_is_shown_only_for_a_different_build() {
-        let mut status = json!({"installedVariant":"full", "bundledVariant":"full", "revision":"theirs", "bundledRevision":"ours", "buildRelation":"older",
-            "automaticUpdate": {"at":1, "from":"theirs", "to":"ours", "error":"upload failed."}});
+        let mut status = Availability {
+            automatic_update: fixture::update("theirs", "ours", Some("upload failed.")),
+            ..older_full()
+        };
         assert_eq!(failed_update(&status).as_deref(), Some("upload failed"));
-        status["automaticUpdate"]["to"] = json!("another");
+        fn outcome(
+            status: &mut Availability,
+        ) -> &mut newport_protocol::desktop::configuration::UpdateOutcome {
+            status.automatic_update.as_mut().unwrap()
+        }
+        outcome(&mut status).to = Some("another".into());
         assert_eq!(failed_update(&status), None);
-        status["automaticUpdate"]["to"] = json!("ours");
-        status["automaticUpdate"]["error"] = json!(null);
+        outcome(&mut status).to = Some("ours".into());
+        outcome(&mut status).error = None;
         assert_eq!(failed_update(&status), None);
-        status["automaticUpdate"]["error"] = json!("x");
-        status["revision"] = json!("ours");
+        outcome(&mut status).error = Some("x".into());
+        status.revision = Some("ours".into());
         assert_eq!(failed_update(&status), None);
     }
 
     #[test]
     fn update_offers_follow_the_shared_lifecycle() {
-        let mut status = json!({"installedVariant":"full", "bundledVariant":"full", "revision":"theirs", "bundledRevision":"ours", "buildRelation":"older"});
+        let mut status = older_full();
         assert_eq!(update_offer(&status).unwrap().2, Update::Newer);
-        status["buildRelation"] = json!("newer");
+        status.build_relation = BuildRelation::Newer;
         assert_eq!(update_offer(&status).unwrap().2, Update::Older);
-        status["buildRelation"] = json!("different");
+        status.build_relation = BuildRelation::Different;
         assert!(
             update_offer(&status).is_none(),
             "another build of the release updates on its own"
         );
-        status["automaticUpdate"] =
-            json!({"at":1, "from":"theirs", "to":"ours", "error":"upload failed."});
+        status.automatic_update = fixture::update("theirs", "ours", Some("upload failed."));
         assert_eq!(update_offer(&status).unwrap().2, Update::Unordered);
-        status["installedVariant"] = json!("core");
+        status.installed_variant = Some(Variant::Core);
         assert!(update_offer(&status).is_none());
-        status["installedVariant"] = json!("full");
-        status["revision"] = json!("ours");
+        status.installed_variant = Some(Variant::Full);
+        status.revision = Some("ours".into());
         assert!(update_offer(&status).is_none());
+    }
+
+    /// A server whose full agent `theirs` is older than this Newport's `ours`.
+    fn older_full() -> Availability {
+        Availability {
+            installed_variant: Some(Variant::Full),
+            bundled_variant: Variant::Full,
+            revision: Some("theirs".into()),
+            bundled_revision: Some("ours".into()),
+            build_relation: BuildRelation::Older,
+            ..fixture::status()
+        }
     }
 
     /// A server with the agent installed, as the backend's status query reports it.
-    fn ready() -> Value {
-        json!({"installedVariant": "full", "agent": AGENT,
-            "selectedRuntime":{"product":"full", "buildSha256":"ours"},
-            "osRelease": "ID=ubuntu\nPRETTY_NAME=\"Ubuntu 24.04 LTS\""})
+    fn ready() -> Availability {
+        Availability {
+            os_release: "ID=ubuntu\nPRETTY_NAME=\"Ubuntu 24.04 LTS\"".into(),
+            ..fixture::installed(AGENT, "ours")
+        }
+    }
+
+    /// A ready server falling short of `gaps`, running `os_release`.
+    fn short_of(
+        gaps: Vec<newport_protocol::desktop::applications::Gap>,
+        os_release: &str,
+    ) -> Availability {
+        Availability {
+            gaps,
+            os_release: os_release.into(),
+            ..ready()
+        }
     }
 
     /// Eleven applications; sorted by name, Files comes first.
-    fn catalogue() -> Value {
+    fn catalogue() -> Catalogue {
         let apps = [
             ("google-chrome.desktop", "Google Chrome"),
             ("firefox.desktop", "Firefox"),
@@ -4419,33 +4604,37 @@ mod tests {
             ("libreoffice-writer.desktop", "LibreOffice Writer"),
             ("org.gnome.Settings.desktop", "Settings"),
         ];
-        json!({"apps": apps.iter().map(|(id, name)| json!({
-            "id": id, "name": name, "description": "", "keywords": [], "icon": null,
-            "actions": if *id == "google-chrome.desktop" {
-                json!([{"id": "new-private-window", "name": "New Incognito Window"}])
-            } else {
-                json!([])
-            },
-        })).collect::<Vec<_>>()})
+        fixture::catalogue(
+            apps.iter()
+                .map(|(id, name)| {
+                    let mut app = fixture::app(id, name);
+                    if *id == "google-chrome.desktop" {
+                        app.actions = vec![fixture::action(
+                            "new-private-window",
+                            "New Incognito Window",
+                        )];
+                    }
+                    app
+                })
+                .collect(),
+        )
     }
 
     /// Complete the page's server queries, as backend replies would.
     fn feed(
         view: &gpui::Entity<crate::Newport>,
         visual: &mut VisualTestContext,
-        status: Value,
-        catalogue: Option<Value>,
+        status: Availability,
+        catalogue: Option<Catalogue>,
     ) {
         view.update(visual, |v, _| {
             let server = v.server.clone();
-            let reads = [
-                (super::status_key(&server), Some(status)),
-                (super::catalogue_key(&server), catalogue),
-            ];
-            for (key, value) in reads {
-                let Some(value) = value else { continue };
-                let generation = v.resources.begin_refresh(&key, false).unwrap();
-                v.resources.complete(&key, generation, Ok(value));
+            v.feed_remote_apps(&super::status_key(&server), fixture::status_reply(status));
+            if let Some(catalogue) = catalogue {
+                v.feed_remote_apps(
+                    &super::catalogue_key(&server),
+                    fixture::catalogue_reply(catalogue),
+                );
             }
         });
         frame(visual);
@@ -4461,13 +4650,17 @@ mod tests {
 
     /// Answer the status read the diagnosis asked for, once the page has
     /// drawn it in flight.
-    fn answer(view: &gpui::Entity<crate::Newport>, visual: &mut VisualTestContext, status: Value) {
+    fn answer(
+        view: &gpui::Entity<crate::Newport>,
+        visual: &mut VisualTestContext,
+        status: Availability,
+    ) {
         frame(visual);
         view.update(visual, |v, _| {
             let key = super::status_key(&v.server);
             v.resources.fence(&key);
             let generation = v.resources.begin_refresh(&key, true).unwrap();
-            v.resources.complete(&key, generation, Ok(status));
+            v.answer_remote_apps(&key, generation, fixture::status_reply(status));
         });
         frame(visual);
     }
@@ -4487,7 +4680,7 @@ mod tests {
     /// An account whose backend answers every request with `status`, and
     /// records what was asked.
     fn account(
-        status: serde_json::Value,
+        status: newport_protocol::desktop::account::Status,
     ) -> (
         newport_client::account::Account,
         Rc<RefCell<Vec<newport_protocol::desktop::Kind>>>,
@@ -4502,8 +4695,25 @@ mod tests {
     }
 
     /// The account status of a computer that holds Newport Pro, or not.
-    fn signed_in(license: serde_json::Value) -> serde_json::Value {
-        json!({"status":"signedIn","email":"ada@example.com","license":license})
+    fn signed_in(
+        license: newport_protocol::desktop::account::License,
+    ) -> newport_protocol::desktop::account::Status {
+        newport_protocol::desktop::account::Status {
+            email: Some("ada@example.com".into()),
+            ..crate::account_fixture::signed_in(Some(license))
+        }
+    }
+
+    /// A license in `state` on `plan` and `seat`.
+    fn license(
+        state: &str,
+        plan: Option<&str>,
+        seat: Option<&str>,
+    ) -> newport_protocol::desktop::account::License {
+        newport_protocol::desktop::account::License {
+            plan: plan.map(Into::into),
+            ..crate::account_fixture::license(state, seat)
+        }
     }
 
     /// Put `account` in the app and let it read its first status.
@@ -4525,9 +4735,7 @@ mod tests {
         size: Option<(f32, f32)>,
     ) -> (gpui::Entity<crate::Newport>, &mut VisualTestContext) {
         let (view, visual) = page_without_pro(cx, size);
-        let (pro, _) = account(signed_in(
-            json!({"state":"active","plan":"pro","seat":"pro"}),
-        ));
+        let (pro, _) = account(signed_in(license("active", Some("pro"), Some("pro"))));
         use_account(&view, visual, pro);
         (view, visual)
     }
@@ -4574,12 +4782,14 @@ mod tests {
     #[gpui::test]
     fn a_verified_full_runtime_opens_apps_beside_an_unverified_default(cx: &mut TestAppContext) {
         let (view, visual) = page(cx, None);
-        let mut status = ready();
-        status["installedVariant"] = Value::Null;
-        status["revision"] = json!("older");
-        status["buildRelation"] = json!("older");
-        status["bundledRevision"] = json!("ours");
-        status["installationError"] = json!("The default product cannot be verified");
+        let status = Availability {
+            installed_variant: None,
+            revision: Some("older".into()),
+            build_relation: BuildRelation::Older,
+            bundled_revision: Some("ours".into()),
+            installation_error: Some("The default product cannot be verified".into()),
+            ..ready()
+        };
         feed(&view, visual, status, Some(catalogue()));
         assert!(visual.debug_bounds("remote-app-0").is_some());
         assert!(visual.debug_bounds("remote-apps-retry").is_none());
@@ -4603,7 +4813,7 @@ mod tests {
         });
         assert!(visual.debug_bounds("remote-app-0").is_none());
         // No agent yet: Get started checks the server first.
-        feed(&view, visual, json!({"agent": null, "osRelease": ""}), None);
+        feed(&view, visual, fixture::status(), None);
         click(visual, "remote-apps-get-started");
         assert!(visual.debug_bounds("remote-apps-diagnosis").is_some());
         feed(&view, visual, ready(), Some(catalogue()));
@@ -4636,17 +4846,14 @@ mod tests {
     #[gpui::test]
     fn get_started_diagnoses_then_activates(cx: &mut TestAppContext) {
         let (view, visual) = page(cx, None);
-        let linux = |missing: Value| {
-            json!({"agent": null, "system": "Linux", "architecture": "aarch64",
-                "gaps": missing, "osRelease": "ID=debian"})
-        };
-        let dbus = json!({"requirement": "dbus", "state": "missing"});
-        let xwayland = json!({"requirement": "xwayland", "state": "missing"});
+        let linux = |gaps| fixture::linux("aarch64", "ID=debian", gaps);
+        let dbus = fixture::missing(Requirement::Dbus);
+        let xwayland = fixture::missing(Requirement::Xwayland);
         // The welcome screen: the wall and one button, nothing else.
         feed(
             &view,
             visual,
-            linux(json!([dbus.clone(), xwayland.clone()])),
+            linux(vec![dbus.clone(), xwayland.clone()]),
             None,
         );
         assert!(visual.debug_bounds("remote-apps-wall").is_some());
@@ -4656,11 +4863,7 @@ mod tests {
         click(visual, "remote-apps-get-started");
         assert!(visual.debug_bounds("remote-apps-diagnosis").is_some());
         assert!(visual.debug_bounds("remote-apps-check-again").is_none());
-        answer(
-            &view,
-            visual,
-            linux(json!([dbus.clone(), xwayland.clone()])),
-        );
+        answer(&view, visual, linux(vec![dbus.clone(), xwayland.clone()]));
         reveal(visual);
         // Missing host packages block apps, not the shared agent installation.
         assert!(visual.debug_bounds("remote-apps-check-fix-2").is_some());
@@ -4669,7 +4872,7 @@ mod tests {
         assert!(visual.debug_bounds("remote-apps-check-again").is_some());
         // Rechecking dependencies does not replace or reinstall the agent.
         click(visual, "remote-apps-check-again");
-        answer(&view, visual, linux(json!([xwayland.clone()])));
+        answer(&view, visual, linux(vec![xwayland.clone()]));
         reveal(visual);
         assert!(visual.debug_bounds("remote-apps-activate").is_some());
         assert!(visual.debug_bounds("remote-apps-check-fix-2").is_none());
@@ -4711,9 +4914,13 @@ mod tests {
         feed(
             &view,
             visual,
-            json!({"installedVariant": "full", "agent": format!("/c/releases/system/{new}/current/run-agent"), "revision": new,
-                "selectedRuntime":{"product":"full", "buildSha256":new},
-                "system": "Linux", "architecture": "aarch64", "osRelease": "ID=debian"}),
+            Availability {
+                revision: Some(new.into()),
+                ..linux_with(fixture::installed(
+                    &format!("/c/releases/system/{new}/current/run-agent"),
+                    new,
+                ))
+            },
             Some(catalogue()),
         );
         view.update(visual, |v, cx| {
@@ -4729,8 +4936,7 @@ mod tests {
         feed(
             &view,
             visual,
-            json!({"agent": null, "system": "Linux", "architecture": "aarch64",
-                "osRelease": "ID=debian"}),
+            fixture::linux("aarch64", "ID=debian", vec![]),
             None,
         );
         // The install already finished and the server reports the agent, but
@@ -4743,10 +4949,10 @@ mod tests {
                     .insert(server, super::Install::Finished(activation(1), 0));
             });
         });
-        let installed = json!({"installedVariant": "full", "agent": "newport-agent",
-            "selectedRuntime":{"product":"full", "buildSha256":"new"},
-            "revision": "new", "system": "Linux", "architecture": "aarch64",
-            "osRelease": "ID=debian"});
+        let installed = Availability {
+            revision: Some("new".into()),
+            ..linux_with(fixture::installed("newport-agent", "new"))
+        };
         feed(&view, visual, installed.clone(), Some(catalogue()));
         assert!(visual.debug_bounds("remote-apps-wall").is_some());
         assert!(
@@ -4772,11 +4978,12 @@ mod tests {
     #[gpui::test]
     fn install_opens_a_shell_on_the_page_and_the_checklist_follows_it(cx: &mut TestAppContext) {
         let (view, visual) = page(cx, None);
-        let xwayland = json!({"requirement": "xwayland", "state": "missing"});
-        let missing = json!({"agent": null, "system": "Linux", "architecture": "aarch64",
-            "gaps": [xwayland], "osRelease": "ID=debian"});
-        let present = json!({"agent": null, "system": "Linux", "architecture": "aarch64",
-            "gaps": [], "osRelease": "ID=debian"});
+        let missing = fixture::linux(
+            "aarch64",
+            "ID=debian",
+            vec![fixture::missing(Requirement::Xwayland)],
+        );
+        let present = fixture::linux("aarch64", "ID=debian", vec![]);
         feed(&view, visual, missing.clone(), None);
         click(visual, "remote-apps-get-started");
         answer(&view, visual, missing.clone());
@@ -4852,8 +5059,11 @@ mod tests {
     #[gpui::test]
     fn install_shell_exit_closes_the_popup_and_rechecks_dependencies(cx: &mut TestAppContext) {
         let (view, visual) = page(cx, None);
-        let missing = json!({"agent": null, "system": "Linux", "architecture": "aarch64",
-            "gaps": [{"requirement": "xwayland", "state": "missing"}], "osRelease": "ID=debian"});
+        let missing = fixture::linux(
+            "aarch64",
+            "ID=debian",
+            vec![fixture::missing(Requirement::Xwayland)],
+        );
         feed(&view, visual, missing.clone(), None);
         click(visual, "remote-apps-get-started");
         answer(&view, visual, missing.clone());
@@ -5005,9 +5215,11 @@ mod tests {
     #[gpui::test]
     fn check_again_keeps_the_checklist_in_place(cx: &mut TestAppContext) {
         let (view, visual) = page(cx, None);
-        let dbus = json!({"requirement": "dbus", "state": "missing"});
-        let status = json!({"agent": null, "system": "Linux", "architecture": "aarch64",
-            "gaps": [dbus], "osRelease": "ID=debian"});
+        let status = fixture::linux(
+            "aarch64",
+            "ID=debian",
+            vec![fixture::missing(Requirement::Dbus)],
+        );
         feed(&view, visual, status.clone(), None);
         click(visual, "remote-apps-get-started");
         answer(&view, visual, status);
@@ -5032,9 +5244,12 @@ mod tests {
         feed(
             &view,
             visual,
-            json!({"agent": null, "installedVariant": "full", "bundledVariant": "full",
-                "revision": "theirs", "bundledRevision": "ours", "buildRelation": "older",
-                "system": "Linux", "architecture": "x86_64", "osRelease": "ID=ubuntu"}),
+            Availability {
+                system: Some("Linux".into()),
+                architecture: Some("x86_64".into()),
+                os_release: "ID=ubuntu".into(),
+                ..older_full()
+            },
             None,
         );
         assert!(visual.debug_bounds("remote-apps-get-started").is_none());
@@ -5067,8 +5282,7 @@ mod tests {
         feed(
             &view,
             visual,
-            json!({"agent": null, "system": "Linux", "architecture": "x86_64",
-                "osRelease": "ID=debian"}),
+            fixture::linux("x86_64", "ID=debian", vec![]),
             None,
         );
         view.update(visual, |v, cx| {
@@ -5091,8 +5305,11 @@ mod tests {
     fn other_systems_and_processors_are_blocked_in_the_diagnosis(cx: &mut TestAppContext) {
         let (view, visual) = page(cx, None);
         for (system, architecture) in [("FreeBSD", "amd64"), ("Linux", "riscv64")] {
-            let status = json!({"agent": null, "system": system,
-                "architecture": architecture, "osRelease": ""});
+            let status = Availability {
+                system: Some(system.into()),
+                architecture: Some(architecture.into()),
+                ..fixture::status()
+            };
             feed(&view, visual, status.clone(), None);
             click(visual, "remote-apps-get-started");
             answer(&view, visual, status);
@@ -5148,11 +5365,11 @@ mod tests {
         display(
             &view,
             visual,
-            json!({"shownOn": null, "applications": [{"appId": "firefox.desktop", "windows": 1}]}),
+            fixture::display(None, &[("firefox.desktop", 1)]),
         );
         assert!(sessions(visual).is_empty());
         // Its window closing later says nothing about the launch.
-        display(&view, visual, json!({"shownOn": null, "applications": []}));
+        display(&view, visual, fixture::display(None, &[]));
         assert!(sessions(visual).is_empty());
     }
 
@@ -5178,7 +5395,7 @@ mod tests {
         display(
             &view,
             visual,
-            json!({"shownOn": null, "applications": [{"appId": "firefox.desktop", "windows": 1}]}),
+            fixture::display(None, &[("firefox.desktop", 1)]),
         );
         click(visual, "remote-app-1");
         assert_eq!(*asked.borrow(), ["firefox.desktop"]);
@@ -5187,9 +5404,10 @@ mod tests {
         display(
             &view,
             visual,
-            json!({"shownOn": {"computer": "studio-mac"}, "applications": [
-                {"appId": "firefox.desktop", "windows": 1}
-            ]}),
+            fixture::display(
+                fixture::elsewhere("studio-mac", None),
+                &[("firefox.desktop", 1)],
+            ),
         );
         click(visual, "remote-app-1");
         assert_eq!(asked.borrow().len(), 1);
@@ -5214,13 +5432,11 @@ mod tests {
         assert_eq!(shows(visual), 2);
         // Firefox runs on the display, started before this Newport or from
         // a terminal: its windows are shown, here or on another computer.
-        for shown_on in [json!(null), json!({"computer": "studio-mac"})] {
+        for shown_on in [None, fixture::elsewhere("studio-mac", None)] {
             display(
                 &view,
                 visual,
-                json!({"shownOn": shown_on, "applications": [
-                    {"appId": "firefox.desktop", "windows": 1}
-                ]}),
+                fixture::display(shown_on, &[("firefox.desktop", 1)]),
             );
             click(visual, "remote-app-1");
         }
@@ -5342,16 +5558,22 @@ mod tests {
         assert_eq!(page(visual), 1);
     }
 
-    /// A ready server whose status report adds these fields.
+    /// A Linux server on aarch64 running Debian, as `status` reports it.
+    fn linux_with(status: Availability) -> Availability {
+        Availability {
+            system: Some("Linux".into()),
+            architecture: Some("aarch64".into()),
+            os_release: "ID=debian".into(),
+            ..status
+        }
+    }
+
+    /// The page of a server that reports `status`, with its apps.
     fn launchpad_with(
-        extra: Value,
+        status: Availability,
         cx: &mut TestAppContext,
     ) -> (gpui::Entity<crate::Newport>, &mut VisualTestContext) {
         let (view, visual) = page(cx, None);
-        let mut status = ready();
-        if let (Some(status), Some(extra)) = (status.as_object_mut(), extra.as_object()) {
-            status.extend(extra.clone());
-        }
         feed(&view, visual, status, Some(catalogue()));
         (view, visual)
     }
@@ -5414,8 +5636,18 @@ mod tests {
             v.work = work.into();
             v.window_visible = true;
             let server = v.server.clone();
-            v.snapshot["runtime"]["agentTransport"][&server] =
-                json!({"status": "connected", "generation": 1});
+            let id = v.server_id().unwrap();
+            let transport = |generation| newport_protocol::desktop::configuration::Transport {
+                generation,
+                ..crate::snapshot_fixture::transport(
+                    newport_protocol::desktop::configuration::TransportStatus::Connected,
+                )
+            };
+            crate::snapshot_fixture::set(
+                &mut v.snapshot_mut().runtime.agent_transport,
+                id,
+                transport(1),
+            );
             v.poll_remote_apps(cx);
             let key = super::catalogue_key(&server);
             v.resources.fence(&key);
@@ -5426,14 +5658,17 @@ mod tests {
             requests.try_iter().for_each(drop);
             v.poll_remote_apps(cx);
             assert!(v.resources.get(&key).is_some_and(|r| !r.pending));
-            v.snapshot["runtime"]["agentTransport"][&server] =
-                json!({"status": "connected", "generation": 2});
+            crate::snapshot_fixture::set(
+                &mut v.snapshot_mut().runtime.agent_transport,
+                id,
+                transport(2),
+            );
             v.poll_remote_apps(cx);
             assert!(v.resources.get(&key).is_some_and(|r| r.pending));
             assert!(
                 requests
                     .try_iter()
-                    .any(|r|matches!(r.request,crate::request_dispatch::Request::Desktop(operation) if operation.kind()==newport_protocol::desktop::Kind::ApplicationsCatalogue))
+                    .any(|r|matches!(r.request,crate::request_dispatch::Request::Typed(operation) if operation.kind()==newport_protocol::desktop::Kind::ApplicationsCatalogue))
             );
         });
     }
@@ -5462,7 +5697,7 @@ mod tests {
 
     #[gpui::test]
     fn returning_draws_the_last_readings_at_once_and_reads_them_again(cx: &mut TestAppContext) {
-        let (view, visual) = launchpad_with(json!({}), cx);
+        let (view, visual) = launchpad_with(ready(), cx);
         click(visual, "remote-apps-preferences");
         assert!(
             visual
@@ -5525,13 +5760,8 @@ mod tests {
         let (view, visual) = page(cx, None);
         // Only the record of installed servers has arrived: no status yet.
         view.update(visual, |v, _| {
-            let server = v.server.clone();
-            let generation = v
-                .resources
-                .begin_refresh(super::INSTALLED_KEY, false)
-                .unwrap();
-            v.resources
-                .complete(super::INSTALLED_KEY, generation, Ok(json!([server])));
+            let server = uuid::Uuid::parse_str(&v.server).unwrap();
+            v.feed_remote_apps(super::INSTALLED_KEY, fixture::installed_reply(vec![server]));
         });
         frame(visual);
         assert!(visual.debug_bounds("remote-apps-wall").is_none());
@@ -5548,14 +5778,9 @@ mod tests {
 
     #[gpui::test]
     fn each_check_updates_the_record_of_installed_servers(cx: &mut TestAppContext) {
-        let (view, visual) = launchpad_with(json!({}), cx);
+        let (view, visual) = launchpad_with(ready(), cx);
         view.update(visual, |v, cx| {
-            let generation = v
-                .resources
-                .begin_refresh(super::INSTALLED_KEY, false)
-                .unwrap();
-            v.resources
-                .complete(super::INSTALLED_KEY, generation, Ok(json!([])));
+            v.feed_remote_apps(super::INSTALLED_KEY, fixture::installed_reply(vec![]));
             v.window_visible = true;
             v.poll_remote_apps(cx);
             // The check found the agent; the record is saved with it.
@@ -5626,36 +5851,45 @@ mod tests {
         assert_eq!(upsell_label(visual), None);
         assert!(visual.debug_bounds("remote-apps-wall").is_some());
         for (status, label) in [
-            (json!({"status":"signedOut"}), "Sign in"),
             (
-                signed_in(json!({"state":"none","trialUsed":false})),
+                crate::account_fixture::status(
+                    newport_protocol::desktop::account::Phase::SignedOut,
+                ),
+                "Sign in",
+            ),
+            (
+                signed_in(newport_protocol::desktop::account::License {
+                    trial_used: Some(false),
+                    ..license("none", None, None)
+                }),
                 "Start free trial",
             ),
             (
-                signed_in(json!({"state":"expired","trialUsed":true})),
+                signed_in(newport_protocol::desktop::account::License {
+                    trial_used: Some(true),
+                    ..license("expired", None, None)
+                }),
                 "Upgrade to Pro",
             ),
             (
-                signed_in(json!({"state":"active","plan":"pro","seat":"free"})),
+                signed_in(license("active", Some("pro"), Some("free"))),
                 "Use Pro on this computer",
             ),
             (
-                signed_in(json!({"state":"trial","plan":"trial","seat":"free"})),
+                signed_in(license("trial", Some("trial"), Some("free"))),
                 "Upgrade to Pro",
             ),
         ] {
             let (account, _) = account(status.clone());
             use_account(&view, visual, account);
-            assert_eq!(upsell_label(visual), Some(label), "{status}");
+            assert_eq!(upsell_label(visual), Some(label), "{status:?}");
             assert!(
                 visual.debug_bounds("remote-apps-get-started").is_none(),
                 "nothing reaches the server without Pro"
             );
         }
         // With Pro the page goes on to the server.
-        let (pro, _) = account(signed_in(
-            json!({"state":"trial","plan":"trial","seat":"trial"}),
-        ));
+        let (pro, _) = account(signed_in(license("trial", Some("trial"), Some("trial"))));
         use_account(&view, visual, pro);
         assert_eq!(upsell_label(visual), None);
     }
@@ -5663,7 +5897,10 @@ mod tests {
     #[gpui::test]
     fn start_free_trial_asks_the_backend(cx: &mut TestAppContext) {
         let (view, visual) = page_without_pro(cx, None);
-        let (free, asked) = account(signed_in(json!({"state":"none","trialUsed":false})));
+        let (free, asked) = account(signed_in(newport_protocol::desktop::account::License {
+            trial_used: Some(false),
+            ..license("none", None, None)
+        }));
         use_account(&view, visual, free);
         assert!(visual.debug_bounds("remote-apps-upgrade").is_some());
         click(visual, "remote-apps-upsell: Start free trial");
@@ -5687,20 +5924,21 @@ mod tests {
         view: &gpui::Entity<crate::Newport>,
         visual: &mut VisualTestContext,
         key: &str,
-        value: Value,
+        reply: newport_protocol::desktop::Reply,
     ) {
-        view.update(visual, |v, _| {
-            let generation = v.resources.begin_refresh(key, false).unwrap();
-            v.resources.complete(key, generation, Ok(value));
-        });
+        view.update(visual, |v, _| v.feed_remote_apps(key, reply));
         frame(visual);
     }
 
     /// A server missing sound, which only some apps need, or D-Bus, which
     /// every app needs.
-    fn package(required: bool) -> Value {
-        let requirement = if required { "dbus" } else { "audio" };
-        json!({"gaps": [{"requirement": requirement, "state": "missing"}], "osRelease": "ID=debian"})
+    fn package(required: bool) -> Availability {
+        let requirement = if required {
+            Requirement::Dbus
+        } else {
+            Requirement::Audio
+        };
+        short_of(vec![fixture::missing(requirement)], "ID=debian")
     }
 
     #[gpui::test]
@@ -5730,7 +5968,7 @@ mod tests {
 
     #[gpui::test]
     fn a_change_is_sent_even_while_a_read_is_in_flight(cx: &mut TestAppContext) {
-        let (view, visual) = launchpad_with(json!({}), cx);
+        let (view, visual) = launchpad_with(ready(), cx);
         view.update(visual, |v, _| {
             let key = super::INSTALLED_KEY.to_owned();
             let save = |installed: bool, server: &str| super::installed_mutation(server, installed);
@@ -5749,7 +5987,11 @@ mod tests {
             v.remote_apps_mutating.insert(key.clone());
             v.queue_remote_mutation(save(false, &server));
             assert_eq!(v.remote_apps_mutations.len(), 1);
-            v.resources.complete(&key, generation, Ok(json!([server])));
+            v.answer_remote_apps(
+                &key,
+                generation,
+                fixture::installed_reply(vec![uuid::Uuid::parse_str(&server).unwrap()]),
+            );
             v.send_remote_mutations();
             assert!(v.remote_apps_mutations.is_empty());
         });
@@ -5757,7 +5999,7 @@ mod tests {
 
     #[gpui::test]
     fn refresh_replaces_a_background_read_in_flight(cx: &mut TestAppContext) {
-        let (view, visual) = launchpad_with(json!({}), cx);
+        let (view, visual) = launchpad_with(ready(), cx);
         view.update(visual, |v, cx| {
             v.window_visible = true;
             let key = super::status_key(&v.server);
@@ -5780,18 +6022,18 @@ mod tests {
 
     #[gpui::test]
     fn without_a_known_os_the_alert_asks_to_check_again(cx: &mut TestAppContext) {
-        let mut extra = package(false);
-        extra["osRelease"] = json!("ID=slackware\nPRETTY_NAME=\"Slackware 15.0\"");
-        let (_, visual) = launchpad_with(extra, cx);
+        let mut status = package(false);
+        status.os_release = "ID=slackware\nPRETTY_NAME=\"Slackware 15.0\"".into();
+        let (_, visual) = launchpad_with(status, cx);
         assert!(visual.debug_bounds("remote-apps-alert-0").is_some());
         assert!(visual.debug_bounds("remote-apps-alert-run-0").is_none());
     }
 
     #[gpui::test]
     fn nixos_gets_settings_to_copy_instead_of_a_command(cx: &mut TestAppContext) {
-        let mut extra = package(false);
-        extra["osRelease"] = json!("ID=nixos\nPRETTY_NAME=\"NixOS 26.05 (Yarara)\"");
-        let (view, visual) = launchpad_with(extra, cx);
+        let mut status = package(false);
+        status.os_release = "ID=nixos\nPRETTY_NAME=\"NixOS 26.05 (Yarara)\"".into();
+        let (view, visual) = launchpad_with(status, cx);
         assert!(visual.debug_bounds("remote-apps-alert-run-0").is_none());
         assert!(visual.debug_bounds("remote-apps-alert-copy-0").is_some());
         view.read_with(visual, |v, cx| {
@@ -5808,10 +6050,13 @@ mod tests {
 
     #[gpui::test]
     fn optional_software_says_only_some_apps_need_it(cx: &mut TestAppContext) {
-        let extra = json!({"gaps": [
-            {"requirement": "gles", "state": "missing"},
-            {"requirement": "audio", "state": "missing"},
-        ], "host": {"elevation": "sudo", "updater": null}, "osRelease": "ID=alpine"});
+        let extra = short_of(
+            vec![
+                fixture::missing(Requirement::Gles),
+                fixture::missing(Requirement::Audio),
+            ],
+            "ID=alpine",
+        );
         let (view, visual) = launchpad_with(extra, cx);
         view.read_with(visual, |v, cx| {
             let launchpad = v.remote_apps.as_ref().unwrap().read(cx);
@@ -5837,10 +6082,13 @@ mod tests {
 
     #[gpui::test]
     fn required_software_is_named_before_optional(cx: &mut TestAppContext) {
-        let extra = json!({"gaps": [
-            {"requirement": "audio", "state": "missing"},
-            {"requirement": "fonts", "state": "missing"},
-        ], "host": {"elevation": "sudo", "updater": null}, "osRelease": "ID=debian"});
+        let extra = short_of(
+            vec![
+                fixture::missing(Requirement::Audio),
+                fixture::missing(Requirement::Fonts),
+            ],
+            "ID=debian",
+        );
         let (view, visual) = launchpad_with(extra, cx);
         view.read_with(visual, |v, cx| {
             let launchpad = v.remote_apps.as_ref().unwrap().read(cx);
@@ -5859,11 +6107,15 @@ mod tests {
 
     #[gpui::test]
     fn everything_a_package_fixes_installs_from_one_alert(cx: &mut TestAppContext) {
-        let extra = json!({"gaps": [
-            {"requirement": "dbus", "state": "missing"},
-            {"requirement": "fonts", "state": "missing"},
-            {"requirement": "audio", "state": "inactive", "reason": "root"},
-        ], "host": {"elevation": "root", "updater": null}, "osRelease": "ID=arch"});
+        let mut extra = short_of(
+            vec![
+                fixture::missing(Requirement::Dbus),
+                fixture::missing(Requirement::Fonts),
+                fixture::inactive(Requirement::Audio, Inactive::Root),
+            ],
+            "ID=arch",
+        );
+        extra.host.elevation = Elevation::Root;
         let (view, visual) = launchpad_with(extra, cx);
         view.read_with(visual, |v, cx| {
             let launchpad = v.remote_apps.as_ref().unwrap().read(cx);
@@ -5897,10 +6149,13 @@ mod tests {
 
     #[gpui::test]
     fn apps_dont_start_without_the_software_every_app_needs(cx: &mut TestAppContext) {
-        let extra = json!({"gaps": [
-            {"requirement": "dbus", "state": "missing"},
-            {"requirement": "audio", "state": "missing"},
-        ], "host": {"elevation": "sudo", "updater": null}, "osRelease": "ID=debian"});
+        let extra = short_of(
+            vec![
+                fixture::missing(Requirement::Dbus),
+                fixture::missing(Requirement::Audio),
+            ],
+            "ID=debian",
+        );
         let (view, visual) = launchpad_with(extra, cx);
         view.read_with(visual, |v, cx| {
             let launchpad = v.remote_apps.as_ref().unwrap().read(cx);
@@ -5926,7 +6181,10 @@ mod tests {
         });
         assert_eq!(*rechecks.borrow(), 1);
         // Software only some apps need doesn't stop a launch.
-        let extra = json!({"gaps": [{"requirement": "audio", "state": "missing"}]});
+        let extra = Availability {
+            gaps: vec![fixture::missing(Requirement::Audio)],
+            ..ready()
+        };
         let (view, visual) = launchpad_with(extra, cx);
         view.read_with(visual, |v, cx| {
             let launchpad = v.remote_apps.as_ref().unwrap().read(cx);
@@ -5943,23 +6201,20 @@ mod tests {
 
     #[gpui::test]
     fn an_unusable_xwayland_shows_in_the_checklist_until_rechecked(cx: &mut TestAppContext) {
-        let (view, visual) = launchpad_with(json!({}), cx);
+        let (view, visual) = launchpad_with(ready(), cx);
         for (gap, title, installable) in [
             (
-                json!({"requirement": "xwayland", "state": "outdated", "version": "22.1.9"}),
+                fixture::outdated(Requirement::Xwayland, "22.1.9"),
                 "XWayland is too old",
                 true,
             ),
             (
-                json!({"requirement": "xwayland", "state": "unverified"}),
+                fixture::unverified(Requirement::Xwayland),
                 "XWayland couldn’t be checked",
                 false,
             ),
         ] {
-            let mut status = ready();
-            status["gaps"] = json!([gap]);
-            status["osRelease"] = json!("ID=debian");
-            answer(&view, visual, status);
+            answer(&view, visual, short_of(vec![gap], "ID=debian"));
             view.read_with(visual, |v, cx| {
                 let launchpad = v.remote_apps.as_ref().unwrap().read(cx);
                 let status = launchpad.status();
@@ -5998,7 +6253,7 @@ mod tests {
             },
         };
         // A server with XWayland: the app's own first two lines, and all of it on request.
-        let (view, visual) = launchpad_with(json!({}), cx);
+        let (view, visual) = launchpad_with(ready(), cx);
         view.read_with(visual, |v, cx| {
             let launchpad = v.remote_apps.as_ref().unwrap().read(cx);
             let alerts = launchpad.alerts(&launchpad.status(), &[failed("Chromium")], &Default::default());
@@ -6012,7 +6267,10 @@ mod tests {
         });
         // Without XWayland, the missing X11 is the reason, and installing it the fix.
         let (view, visual) = launchpad_with(
-            json!({"gaps": [{"requirement": "xwayland", "state": "missing"}]}),
+            Availability {
+                gaps: vec![fixture::missing(Requirement::Xwayland)],
+                ..ready()
+            },
             cx,
         );
         view.read_with(visual, |v, cx| {
@@ -6032,7 +6290,10 @@ mod tests {
             assert_eq!(alert.output.as_deref(), Some(reported));
         });
         let (view, visual) = launchpad_with(
-            json!({"gaps": [{"requirement": "xwayland", "state": "missing"}]}),
+            Availability {
+                gaps: vec![fixture::missing(Requirement::Xwayland)],
+                ..ready()
+            },
             cx,
         );
         view.update(visual, |v, cx| {
@@ -6065,7 +6326,7 @@ mod tests {
         };
         let long = "x".repeat(super::CLAMPED_CHARS + 1);
         let fits = "y".repeat(super::CLAMPED_CHARS);
-        let (view, visual) = launchpad_with(json!({}), cx);
+        let (view, visual) = launchpad_with(ready(), cx);
         view.read_with(visual, |v, cx| {
             let launchpad = v.remote_apps.as_ref().unwrap().read(cx);
             let alerts = |ending| {
@@ -6093,8 +6354,7 @@ mod tests {
     #[gpui::test]
     fn alerts_without_output_are_not_cut(cx: &mut TestAppContext) {
         let (view, visual) = launchpad_with(
-            json!({"gaps": [{"requirement": "portal", "state": "missing"}],
-                "host": {"elevation": "sudo", "updater": null}, "osRelease": "ID=alpine"}),
+            short_of(vec![fixture::missing(Requirement::Portal)], "ID=alpine"),
             cx,
         );
         view.read_with(visual, |v, cx| {
@@ -6108,7 +6368,7 @@ mod tests {
 
     #[gpui::test]
     fn apps_shown_on_another_computer_offer_show_here(cx: &mut TestAppContext) {
-        let (view, visual) = launchpad_with(json!({}), cx);
+        let (view, visual) = launchpad_with(ready(), cx);
         let session = |id, app: &str, state| api::SessionSummary {
             id: api::SessionId(id),
             server: "server".into(),
@@ -6162,11 +6422,14 @@ mod tests {
     }
 
     /// The backend's reading of the server's display.
-    fn display(view: &gpui::Entity<crate::Newport>, visual: &mut VisualTestContext, value: Value) {
+    fn display(
+        view: &gpui::Entity<crate::Newport>,
+        visual: &mut VisualTestContext,
+        value: Display,
+    ) {
         view.update(visual, |v, _| {
             let key = super::display_key(&v.server);
-            let generation = v.resources.begin_refresh(&key, false).unwrap();
-            v.resources.complete(&key, generation, Ok(value));
+            v.feed_remote_apps(&key, fixture::display_reply(value));
         });
         frame(visual);
     }
@@ -6182,9 +6445,10 @@ mod tests {
         display(
             &view,
             visual,
-            json!({"shownOn": {"computer": "studio-mac"}, "applications": [
-                {"appId": "org.gnome.Nautilus.desktop", "windows": 1}
-            ]}),
+            fixture::display(
+                fixture::elsewhere("studio-mac", None),
+                &[("org.gnome.Nautilus.desktop", 1)],
+            ),
         );
         view.read_with(visual, |v, cx| {
             let launchpad = v.remote_apps.as_ref().unwrap().read(cx);
@@ -6203,9 +6467,7 @@ mod tests {
         display(
             &view,
             visual,
-            json!({"shownOn": null, "applications": [
-                {"appId": "org.gnome.Nautilus.desktop", "windows": 1}
-            ]}),
+            fixture::display(None, &[("org.gnome.Nautilus.desktop", 1)]),
         );
         view.read_with(visual, |v, cx| {
             let launchpad = v.remote_apps.as_ref().unwrap().read(cx);
@@ -6234,7 +6496,8 @@ mod tests {
                     .collect::<Vec<_>>()
             })
         };
-        let viewer = |session: &str| json!({"shownOn": {"computer": "studio-mac", "session": session}, "applications": []});
+        let viewer =
+            |session: &str| fixture::display(fixture::elsewhere("studio-mac", Some(session)), &[]);
         display(&view, visual, viewer("first"));
         assert_eq!(shown_on(&view, visual), ["Shown on studio-mac"]);
         // Dismissed, as its Dismiss button does.
@@ -6265,9 +6528,7 @@ mod tests {
         display(
             &view,
             visual,
-            json!({"shownOn": null, "applications": [
-                {"appId": "org.gnome.Nautilus.desktop", "windows": 2}
-            ]}),
+            fixture::display(None, &[("org.gnome.Nautilus.desktop", 2)]),
         );
         view.update(visual, |v, cx| {
             v.remote_apps.as_ref().unwrap().update(cx, |launchpad, _| {
@@ -6314,7 +6575,7 @@ mod tests {
 
     #[gpui::test]
     fn a_launch_the_running_copy_took_reports_nothing(cx: &mut TestAppContext) {
-        let (view, visual) = launchpad_with(json!({}), cx);
+        let (view, visual) = launchpad_with(ready(), cx);
         let session = |ending| api::SessionSummary {
             id: api::SessionId(1),
             server: "server".into(),
@@ -6324,14 +6585,10 @@ mod tests {
                 ending: Some(ending),
             },
         };
-        let showing: api::Display = serde_json::from_value(json!({
-            "shownOn": null,
-            "applications": [{"appId": "1password.desktop", "windows": 1}],
-        }))
-        .unwrap();
+        let showing = fixture::display(None, &[("1password.desktop", 1)]);
         view.read_with(visual, |v, cx| {
             let launchpad = v.remote_apps.as_ref().unwrap().read(cx);
-            let alerts = |ending, display: &api::Display| {
+            let alerts = |ending, display: &Display| {
                 launchpad
                     .alerts(&launchpad.status(), &[session(ending)], display)
                     .into_iter()
@@ -6351,7 +6608,7 @@ mod tests {
 
     #[gpui::test]
     fn launches_that_end_without_a_window_say_why(cx: &mut TestAppContext) {
-        let (view, visual) = launchpad_with(json!({}), cx);
+        let (view, visual) = launchpad_with(ready(), cx);
         let session = |id, ending| api::SessionSummary {
             id: api::SessionId(id),
             server: "server".into(),
@@ -6451,8 +6708,10 @@ mod tests {
 
     #[gpui::test]
     fn xwayland_is_offered_never_required(cx: &mut TestAppContext) {
-        let mut status = ready();
-        status["gaps"] = json!([{"requirement": "xwayland", "state": "missing"}]);
+        let status = Availability {
+            gaps: vec![fixture::missing(Requirement::Xwayland)],
+            ..ready()
+        };
         let (view, visual) = launchpad_with(status, cx);
         view.read_with(visual, |v, cx| {
             let pad = v.remote_apps.as_ref().unwrap().read(cx);
@@ -6477,7 +6736,7 @@ mod tests {
 
     #[gpui::test]
     fn preferences_change_what_new_sessions_use(cx: &mut TestAppContext) {
-        let (view, visual) = launchpad_with(json!({}), cx);
+        let (view, visual) = launchpad_with(ready(), cx);
         assert!(
             visual
                 .debug_bounds("remote-apps-preferences-panel")
@@ -6501,10 +6760,10 @@ mod tests {
         assert!(audio(visual));
         assert!(visual.debug_bounds("remote-apps-alert-0").is_some());
         // A confirmed save shows the saved value.
-        let saved = super::encode_settings(api::StreamingSettings {
+        let saved = fixture::settings_reply(super::settings_record(api::StreamingSettings {
             audio: false,
             ..Default::default()
-        });
+        }));
         confirm(&view, visual, super::SETTINGS_KEY, saved);
         assert!(!audio(visual));
         click(visual, "remote-apps-preferences");
@@ -6517,12 +6776,16 @@ mod tests {
 
     #[test]
     fn the_agent_catalogue_decodes_with_icons_and_actions() {
-        let apps = super::decode_catalogue(&json!({"apps": [
-            {"id": "google-chrome.desktop", "name": "Google Chrome", "description": "",
-             "keywords": [], "icon": "iVBORw0KGgo=",
-             "actions": [{"id": "new-private-window", "name": "New Incognito Window"}]},
-            {"id": "", "name": "Broken"}
-        ]}));
+        let mut chrome = fixture::app("google-chrome.desktop", "Google Chrome");
+        chrome.icon = Some("iVBORw0KGgo=".into());
+        chrome.actions = vec![fixture::action(
+            "new-private-window",
+            "New Incognito Window",
+        )];
+        let apps = super::decode_catalogue(&fixture::catalogue(vec![
+            chrome,
+            fixture::app("", "Broken"),
+        ]));
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].name, "Google Chrome");
         assert_eq!(apps[0].description, None);
@@ -6533,18 +6796,74 @@ mod tests {
     #[test]
     fn a_failed_refresh_keeps_the_last_reading() {
         let mut resources = crate::state::Resources::default();
+        let mut readings = super::Readings::default();
         let mut read = super::QueryRead::default();
-        let generation = resources.begin_refresh("q", false).unwrap();
-        resources.complete("q", generation, Ok(json!({"agent": "/a/run-agent"})));
-        read.observe(resources.get("q"));
+        let key = super::status_key("server");
+        let agent = |read: &super::QueryRead<Availability>| {
+            read.value.as_ref().and_then(|status| status.agent.clone())
+        };
+        let generation = resources.begin_refresh(&key, false).unwrap();
+        let reply = fixture::status_reply(fixture::installed("/a/run-agent", "a"));
+        readings.complete(&mut resources, &key, generation, Ok(reply));
+        read.observe(resources.get(&key), readings.status(&resources, &key));
         assert!(read.loaded);
-        assert_eq!(read.value["agent"], "/a/run-agent");
-        let generation = resources.begin_refresh("q", true).unwrap();
-        resources.complete("q", generation, Err("offline".into()));
-        read.observe(resources.get("q"));
+        assert_eq!(agent(&read).as_deref(), Some("/a/run-agent"));
+        let generation = resources.begin_refresh(&key, true).unwrap();
+        readings.complete(&mut resources, &key, generation, Err("offline".into()));
+        read.observe(resources.get(&key), readings.status(&resources, &key));
         assert!(read.loaded);
-        assert_eq!(read.value["agent"], "/a/run-agent");
+        assert_eq!(agent(&read).as_deref(), Some("/a/run-agent"));
         assert_eq!(read.error.as_deref(), Some("offline"));
+    }
+
+    #[test]
+    fn an_edit_shows_until_its_save_settles() {
+        let mut resources = crate::state::Resources::default();
+        let mut readings = super::Readings::default();
+        let mut read = super::QueryRead::default();
+        let key = super::SETTINGS_KEY;
+        let observe = |read: &mut super::QueryRead<_>,
+                       resources: &crate::state::Resources,
+                       readings: &super::Readings| {
+            read.observe(
+                resources.get(key),
+                super::Readings::shown(resources, &readings.settings, key),
+            );
+        };
+        let generation = resources.begin_refresh(key, false).unwrap();
+        readings.complete(
+            &mut resources,
+            key,
+            generation,
+            Ok(fixture::settings_reply(fixture::settings())),
+        );
+        observe(&mut read, &resources, &readings);
+        let muted = newport_protocol::desktop::preferences::Settings {
+            audio: false,
+            ..fixture::settings()
+        };
+        // The edit shows while its save is in flight.
+        read.edit(muted.clone());
+        let generation = resources.begin_refresh(key, true).unwrap();
+        observe(&mut read, &resources, &readings);
+        assert_eq!(read.shown(), Some(&muted));
+        // A refused save brings back what the backend has.
+        readings.complete(&mut resources, key, generation, Err("disk full".into()));
+        observe(&mut read, &resources, &readings);
+        assert_eq!(read.shown(), Some(&fixture::settings()));
+        // A confirmed save shows what was saved.
+        read.edit(muted.clone());
+        let generation = resources.begin_refresh(key, true).unwrap();
+        observe(&mut read, &resources, &readings);
+        readings.complete(
+            &mut resources,
+            key,
+            generation,
+            Ok(fixture::settings_reply(muted.clone())),
+        );
+        observe(&mut read, &resources, &readings);
+        assert_eq!(read.shown(), Some(&muted));
+        assert!(read.edit.is_none());
     }
 
     #[gpui::test]

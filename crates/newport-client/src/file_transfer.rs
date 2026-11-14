@@ -2,9 +2,8 @@
 //! The original write is never replayed. Cancellation acknowledges a request,
 //! while only the original transfer reply establishes its outcome.
 use crate::{backend::Backend, desktop_inputs};
-use newport_protocol::desktop::{self, files};
+use newport_protocol::desktop::{self, configuration::ConnectionScope, files};
 use serde::Deserialize;
-use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
 use std::{
@@ -49,7 +48,7 @@ pub struct Update {
 
 pub struct Transfer {
     backend: Backend,
-    connection: Value,
+    connection: Option<ConnectionScope>,
     operation: uuid::Uuid,
     server: String,
     path: String,
@@ -72,7 +71,7 @@ impl Transfer {
         server: String,
         path: String,
         direction: Direction,
-        expected_connection: Value,
+        expected_connection: Option<ConnectionScope>,
         local_path: std::path::PathBuf,
     ) -> Self {
         let operation = uuid::Uuid::new_v4();
@@ -83,7 +82,7 @@ impl Transfer {
             .to_owned();
         let request = (|| -> Result<files::Operation, desktop_inputs::Invalid> {
             let server = desktop_inputs::identity(&server, "file server identity")?;
-            let expected = desktop_inputs::connection_scope(&expected_connection)?;
+            let expected = desktop_inputs::captured(expected_connection.as_ref())?;
             let local_path = desktop_inputs::native_path(&local_path);
             Ok(match direction {
                 Direction::Download => files::Operation::Download(Box::new(files::DownloadArgs {
@@ -126,8 +125,8 @@ impl Transfer {
     pub fn operation(&self) -> uuid::Uuid {
         self.operation
     }
-    pub fn connection(&self) -> &Value {
-        &self.connection
+    pub fn connection(&self) -> Option<&ConnectionScope> {
+        self.connection.as_ref()
     }
     pub fn retired(&self) -> bool {
         self.retired

@@ -1,6 +1,7 @@
 use super::*;
 use crate::file_ipc_fixture::{self as rpc, Observation as Request, Peer as Stream};
 use newport_platform::ipc::Listener;
+use serde_json::Value;
 type FixtureReply = Result<Value, String>;
 use std::path::PathBuf;
 
@@ -58,8 +59,8 @@ fn reply(mut stream: Stream, result: FixtureReply) {
     stream.reply(result);
 }
 
-fn connection() -> Value {
-    rpc::connection()
+fn connection() -> Option<desktop::configuration::ConnectionScope> {
+    Some(rpc::connection())
 }
 fn start(host: &Host, direction: Direction) -> (Transfer, Stream, Instant) {
     let transfer = Transfer::start(
@@ -76,7 +77,7 @@ fn start(host: &Host, direction: Direction) -> (Transfer, Stream, Instant) {
     });
     assert_eq!(
         request.args,
-        json!({"id":SERVER,"path":"/srv/資料/file's.txt","operation":transfer.operation(),"expectedConnection":connection(),"localPath":std::ffi::OsString::from("/tmp/資料/file's.txt")})
+        json!({"id":SERVER,"path":"/srv/資料/file's.txt","operation":transfer.operation(),"expectedConnection":rpc::scope(&rpc::connection()),"localPath":std::ffi::OsString::from("/tmp/資料/file's.txt")})
     );
     let now = transfer.last_progress;
     (transfer, original, now)
@@ -116,7 +117,7 @@ fn transfer_captures_scope_and_each_direction_delivers_completion_once() {
         assert_eq!(transfer.server(), SERVER);
         assert_eq!(transfer.path(), "/srv/資料/file's.txt");
         assert_eq!(transfer.name(), "file's.txt");
-        assert_eq!(transfer.connection(), &connection());
+        assert_eq!(transfer.connection(), connection().as_ref());
         assert_eq!(transfer.direction(), direction);
         reply(original, Ok(json!("/completed/資料.txt")));
         assert_eq!(

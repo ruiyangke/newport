@@ -202,7 +202,7 @@ jobs:
       - uses: ./.github/actions/rust
         with:
           cache-key: needle-remote
-      # The patched dependencies in patches/, which the cargo steps below need.
+      # The patched dependencies in vendor/, which the cargo steps below need.
       - run: cargo xtask patched
       # The harness reuses a fixture image labelled with the inputs it was built
       # from, so restore the last build's images and save them again only after
@@ -288,7 +288,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           cache-key: desktop-core-${{ matrix.target }}
-      # The patched dependencies in patches/, which the cargo steps below need.
+      # The patched dependencies in vendor/, which the cargo steps below need.
       - run: cargo xtask patched
       - name: Check native source formatting
         run: cargo fmt -p newport-domain -p newport-protocol -p newport-client -p newport-clipboard -p newport-win32 -p newport-platform -p newport-backend -p newport-gpui -p newport-app -p newport-grammars -p newport-release -p newport-terminal --check
@@ -367,15 +367,12 @@ jobs:
         with:
           target: ${{ matrix.target }}
           cache-key: desktop-ui-${{ matrix.target }}
-      # The patched dependencies in patches/, which the cargo steps below need.
+      # The patched dependencies in vendor/, which the cargo steps below need.
       - run: cargo xtask patched
       - run: cargo xtask grammars
       # Installs the pinned cargo-about that packaging uses, and fails early
       # on a dependency whose license the notices policy doesn't accept.
       - run: cargo xtask notices
-      - name: Stage Windows PDF renderer
-        if: runner.os == 'Windows'
-        run: cargo xtask pdfium
       # The app embeds the Needle agents; until they arrive, build everything
       # that doesn't depend on the backend.
       - name: Compile while Needle builds
@@ -386,7 +383,6 @@ jobs:
       - run: cargo xtask artifact verify resources/agents
       - run: cargo clippy --locked ${{ env.PACKAGES }} --all-targets -- -D warnings
       - run: cargo test --locked ${{ env.TESTED }}
-      - run: cargo test --locked -p newport-platform --features pdf pdf::tests
       - run: cargo build --locked -p newport-gpui -p newport-app
       - name: Verify standalone startup and profile ownership
         run: cargo test --locked -p newport-app --test standalone_lifecycle -- --ignored --skip standalone_gui --nocapture

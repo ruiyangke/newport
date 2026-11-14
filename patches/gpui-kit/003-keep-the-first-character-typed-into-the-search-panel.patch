@@ -1,0 +1,48 @@
+input: Keep the first character typed into the search panel
+
+Since 0660be4c, set_search_query anchors a changed query to the viewport.
+The panel's own typing calls it, so the first character moves the anchor
+from None to the viewport start. The overlay compared anchors to tell the
+panel's echo from an outside change, so it re-showed the panel, which
+selects the query, and the next keystroke replaced it: typing "Docker"
+after opening search left "ocker".
+
+An anchor change is now part of the echo when the panel already holds the
+session's query. Opening search again still re-shows the panel, because it
+bumps the activation revision.
+
+Send upstream; remove once GPUI Kit releases the fix.
+
+diff --git a/tests/integration/input/editor.rs b/tests/integration/input/editor.rs
+index 16aae17..d9c97f2 100644
+--- a/tests/integration/input/editor.rs
++++ b/tests/integration/input/editor.rs
+@@ -397,6 +397,28 @@ fn multicursor_vertical_selection_replaces_and_undoes_each_range(cx: &mut TestAp
+     .unwrap();
+ }
+ 
++#[gpui_kit::test]
++fn typing_into_the_opened_search_panel_keeps_every_character(cx: &mut TestAppContext) {
++    let (handle, state) = editor(cx, "plaintext", "Docker docker");
++    cx.update_window(handle.into(), |_, window, cx| {
++        window.click(("input", state.entity_id()), cx);
++        window.press("secondary-f", cx);
++    })
++    .unwrap();
++    cx.run_until_parked();
++    // A window draws between keystrokes; the first character must survive
++    // the frame after it changes the query.
++    let cx = &mut gpui_kit::VisualTestContext::from_window(handle.into(), cx);
++    for character in ["D", "o", "c", "k", "e", "r"] {
++        cx.simulate_input(character);
++        cx.update(|window, cx| window.draw(cx).clear(cx));
++    }
++    assert_eq!(
++        state.read_with(cx, |state, _| state.search_session().query.clone()),
++        "Docker"
++    );
++}
++
+ #[gpui_kit::test]
+ fn search_keyboard_navigation_wraps_and_escape_returns_editor_focus(cx: &mut TestAppContext) {
+     let (handle, state) = editor(cx, "plaintext", "one two one");

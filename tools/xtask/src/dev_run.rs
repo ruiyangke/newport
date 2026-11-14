@@ -31,7 +31,6 @@ pub const PROBES: &[&str] = &[
     "--check-needle",
     "--agent-identity",
     "--check-grammars",
-    "--check-pdf",
 ];
 
 /// Variables passed through LaunchServices, which does not inherit the shell's

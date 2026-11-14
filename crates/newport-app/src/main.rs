@@ -92,11 +92,6 @@ fn run() -> Result<(), String> {
         println!("Bundled grammars validated");
         return Ok(());
     }
-    if args.iter().any(|arg| arg == "--check-pdf") {
-        newport_platform::pdf::check_renderer()?;
-        println!("Bundled PDF renderer validated");
-        return Ok(());
-    }
     let launch = startup::Launch::from_args(args.iter().skip(1).cloned())?;
     if let Some(directory) = &launch.data_directory {
         // SAFETY: no other thread runs yet. The variable carries the
@@ -120,7 +115,6 @@ fn run() -> Result<(), String> {
     if launch.check == Some(startup::Check::UpdateHealth) {
         newport_backend::agent_lifecycle::check_resources()?;
         newport_gpui::check_grammars()?;
-        newport_platform::pdf::check_renderer()?;
     }
     startup::profile_policy(
         cfg!(debug_assertions),
@@ -276,6 +270,7 @@ fn run() -> Result<(), String> {
     // and the slower configuration/feature snapshot refresh.
     let mut connections = backend.connections();
     let initial_connections = connections.borrow_and_update().clone();
+    let mut latencies = backend.latencies();
     let failed_desktop = desktop.clone();
     let services = runtime.spawn(async move {
         tokio::select! {
@@ -360,6 +355,16 @@ fn run() -> Result<(), String> {
             #[cfg(newport_remote_apps)]
             graphical_presentation::start(graphical, remote_apps, cx);
             newport_gpui::connectivity::publish(initial_connections, cx);
+            cx.spawn(async move |cx| {
+                loop {
+                    let current = latencies.borrow_and_update().clone();
+                    cx.update(|cx| newport_gpui::connectivity::publish_latencies(current, cx));
+                    if latencies.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
             cx.spawn(async move |cx| {
                 while connections.changed().await.is_ok() {
                     let snapshot = connections.borrow_and_update().clone();

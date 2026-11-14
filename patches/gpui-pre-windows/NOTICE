@@ -1,0 +1,14 @@
+gpui-pre-windows 0.3.10
+Upstream: https://github.com/zed-industries/zed (gpui-pre snapshot by https://github.com/longbridge/gpui-kit)
+License: Apache-2.0; the upstream LICENSE-APACHE is distributed with gpui-pre-windows.
+
+Newport modifies gpui-pre-windows for key events that keep the physical key and
+the layout's metadata, and window lifecycle, DPI, title bar, appearance, popup,
+text input, file drop, drag and app ID handling for Newport's remote windows.
+The changed files are Cargo.toml, examples/input_lifecycle.rs,
+examples/input_lifecycle/windows.rs, examples/window_lifecycle.rs,
+examples/window_lifecycle/windows.rs, src/app_user_model.rs,
+src/client_frame.rs, src/events.rs, src/file_drop.rs, src/gpui_windows.rs,
+src/native_characters.rs, src/native_drag.rs, src/native_resize.rs,
+src/platform.rs, src/window.rs, src/window_appearance_tests.rs and
+src/window_state.rs. All other published package files remain unchanged.

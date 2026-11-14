@@ -83,12 +83,11 @@ pub(super) type Picker = ComboboxState<SearchableVec<ServerItem>>;
 
 /// Only an empty name falls back; whitespace is an explicit name, and the
 /// fallback includes the SSH user.
-pub(super) fn display_name(server: &Value) -> String {
-    let name = text(server, "name");
-    if name.is_empty() {
-        format!("{}@{}", text(server, "sshUser"), text(server, "sshHost"))
+pub(super) fn display_name(server: &configuration::Server) -> String {
+    if server.name.is_empty() {
+        format!("{}@{}", server.ssh_user, server.ssh_host)
     } else {
-        name
+        server.name.clone()
     }
 }
 
@@ -128,20 +127,20 @@ fn compare_labels(a: &str, b: &str, server_name: bool) -> std::cmp::Ordering {
     }
 }
 
-fn items(snapshot: &Value, reach: impl Fn(&str) -> Reach) -> Vec<ServerItem> {
-    let mut items: Vec<_> = rows(&snapshot["config"]["servers"])
+fn items(servers: &[configuration::Server], reach: impl Fn(&str) -> Reach) -> Vec<ServerItem> {
+    let mut items: Vec<_> = servers
         .iter()
         .map(|server| {
-            let host = text(server, "sshHost");
+            let host = &server.ssh_host;
             let host = if host.contains(':') && !host.starts_with('[') {
                 format!("[{host}]")
             } else {
-                host
+                host.clone()
             };
-            let port = server["sshPort"].as_u64().unwrap_or(22);
+            let port = server.ssh_port;
             let endpoint = format!(
                 "{}@{}{}",
-                text(server, "sshUser"),
+                server.ssh_user,
                 host,
                 if port == 22 {
                     String::new()
@@ -150,15 +149,15 @@ fn items(snapshot: &Value, reach: impl Fn(&str) -> Reach) -> Vec<ServerItem> {
                 }
             );
             let name = display_name(server);
+            let id = server.id.to_string();
             ServerItem {
                 search_text: format!(
                     "{name} {} {} {port} {endpoint}",
-                    text(server, "sshHost"),
-                    text(server, "sshUser")
+                    server.ssh_host, server.ssh_user
                 )
                 .to_lowercase(),
-                reach: reach(&text(server, "id")),
-                id: text(server, "id"),
+                reach: reach(&id),
+                id,
                 name,
                 endpoint,
             }
@@ -192,9 +191,10 @@ impl Newport {
                 && this.server_form.is_none()
                 && !this.modal_open
                 && this.configuration_available()
-                && rows(&this.snapshot["config"]["servers"])
+                && this
+                    .servers()
                     .iter()
-                    .any(|server| server["id"] == *id)
+                    .any(|server| server.id.to_string() == *id)
                 && (this.server != *id || this.page == Page::Settings)
             {
                 this.save_workspace_selection();
@@ -216,8 +216,8 @@ impl Newport {
         picker
     }
     pub(super) fn sync_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let snapshot = &self.snapshot;
-        let items = items(snapshot, |id| {
+        let snapshot = self.snapshot.as_ref();
+        let items = items(self.servers(), |id| {
             match crate::connectivity::scoped(id, snapshot, cx).map(|state| state.phase) {
                 Some(crate::connectivity::Phase::Connected) => Reach::Connected,
                 Some(crate::connectivity::Phase::Failed) => Reach::Failed,
@@ -402,20 +402,30 @@ impl Newport {
 #[cfg(test)]
 mod tests {
     use super::{Reach, display_name, items};
-    fn items_unreached(snapshot: &serde_json::Value) -> Vec<super::ServerItem> {
-        items(snapshot, |_| Reach::Unknown)
-    }
+    use crate::snapshot_fixture as fixture;
     use gpui_kit::component::searchable_list::SearchableListItem;
-    use serde_json::json;
+    use newport_protocol::desktop::configuration::Server;
+    fn items_unreached(servers: &[Server]) -> Vec<super::ServerItem> {
+        items(servers, |_| Reach::Unknown)
+    }
+    /// A server with this id, name and address.
+    fn server(id: u128, name: &str, user: &str, host: &str, port: u16) -> Server {
+        Server {
+            ssh_user: user.into(),
+            ssh_host: host.into(),
+            ssh_port: port,
+            ..fixture::server(uuid::Uuid::from_u128(id), name)
+        }
+    }
     #[test]
     fn unnamed_servers_use_the_reference_user_and_host_label() {
-        let server = json!({"id":"a", "name":"", "sshUser":"dev", "sshHost":"example.org"});
-        assert_eq!(display_name(&server), "dev@example.org");
-        let list = items_unreached(&json!({"config":{"servers":[server]}}));
+        let unnamed = server(0xa, "", "dev", "example.org", 22);
+        assert_eq!(display_name(&unnamed), "dev@example.org");
+        let list = items_unreached(&[unnamed]);
         assert_eq!(list[0].name, "dev@example.org");
         assert!(list[0].matches("dev@example.org"));
         assert_eq!(
-            display_name(&json!({"name":"  ", "sshUser":"dev", "sshHost":"example.org"})),
+            display_name(&server(0xa, "  ", "dev", "example.org", 22)),
             "  "
         );
     }
@@ -428,28 +438,34 @@ mod tests {
         assert_eq!(compare_labels("node2", "node10", true), Ordering::Less);
         assert_eq!(compare_labels("NODE2", "node2", true), Ordering::Equal);
         assert_eq!(compare_labels("nóde2", "node2", true), Ordering::Equal);
-        let list = items_unreached(&json!({"config":{"servers":[
-            {"id":"10", "name":"node10", "sshUser":"dev", "sshHost":"host"},
-            {"id":"2", "name":"node2", "sshUser":"dev", "sshHost":"host"}
-        ]}}));
+        let list = items_unreached(&[
+            server(10, "node10", "dev", "host", 22),
+            server(2, "node2", "dev", "host", 22),
+        ]);
         assert_eq!(
-            list.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
-            ["2", "10"]
+            list.iter().map(|item| item.id.clone()).collect::<Vec<_>>(),
+            [uuid::Uuid::from_u128(2), uuid::Uuid::from_u128(10)].map(|id| id.to_string())
         );
     }
     #[test]
     fn server_search_preserves_identity_and_formats_endpoints() {
-        let list = items_unreached(&json!({"config":{"servers":[
-            {"id":"b","name":"Same","sshHost":"::1","sshUser":"dev","sshPort":2222},
-            {"id":"a","name":"Same","sshHost":"example.org","sshUser":"other","sshPort":22}
-        ]}}));
+        let list = items_unreached(&[
+            server(0xb, "Same", "dev", "::1", 2222),
+            server(0xa, "Same", "other", "example.org", 22),
+        ]);
         assert_eq!(list.len(), 2);
-        let ipv6 = list.iter().find(|item| item.id == "b").unwrap();
+        let ipv6 = list
+            .iter()
+            .find(|item| item.id == uuid::Uuid::from_u128(0xb).to_string())
+            .unwrap();
         assert_eq!(ipv6.endpoint, "dev@[::1]:2222");
         assert!(ipv6.matches("DEV@"));
         assert!(list.iter().any(|item| item.matches("example.org")));
         assert_ne!(list[0].value(), list[1].value());
-        let standard = list.iter().find(|item| item.id == "a").unwrap();
+        let standard = list
+            .iter()
+            .find(|item| item.id == uuid::Uuid::from_u128(0xa).to_string())
+            .unwrap();
         assert!(standard.matches("  SAME  OTHER 22 "));
         assert!(standard.matches("EXAMPLE other"));
         assert!(!standard.matches("same missing"));

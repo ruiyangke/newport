@@ -7,7 +7,7 @@ use newport_domain::connectivity::Phase;
 impl Newport {
     /// The selected server's connection while it isn't up.
     pub(super) fn connection_down(&self, cx: &App) -> Option<Phase> {
-        crate::connectivity::scoped(&self.server, &self.snapshot, cx)
+        crate::connectivity::scoped(&self.server, self.snapshot.as_ref(), cx)
             .map(|state| state.phase)
             .filter(|phase| *phase != Phase::Connected)
     }
@@ -33,7 +33,7 @@ impl Newport {
 
     fn server_label(&self) -> String {
         self.selected_server()
-            .map(|server| text(server, "name"))
+            .map(|server| server.name.clone())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "the server".into())
     }

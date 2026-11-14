@@ -27,7 +27,7 @@ impl Newport {
         connections_grouped::unobserved_forwards(groups)
             .into_iter()
             .filter(|value| !self.tunnel_busy(value))
-            .filter_map(|value| serde_json::from_value::<Tunnel>(value).ok())
+            .map(|value| Tunnel::from(&value))
             .collect()
     }
 
@@ -262,7 +262,6 @@ mod tests {
     use crate::page_perf_tests::{connections_fixture, frame};
     use gpui::{TestAppContext, VisualTestContext};
     use gpui_kit as gpui;
-    use serde_json::json;
 
     #[gpui::test]
     fn clean_up_offers_every_saved_forward_without_an_observed_destination(
@@ -276,7 +275,7 @@ mod tests {
             tunnel.name = name.into();
             tunnel.remote_host = host.into();
             tunnel.local_port = port + 1000;
-            serde_json::to_value(tunnel).unwrap()
+            tunnel
         };
         let offered = |cx: &mut VisualTestContext| -> Vec<String> {
             let mut names: Vec<String> = view.update(cx, |view, cx| {
@@ -288,16 +287,10 @@ mod tests {
             names.sort();
             names
         };
-        let mut reverse = serde_json::from_value::<newport_domain::model::Tunnel>(forward(
-            "reverse",
-            "127.0.0.1",
-            4004,
-        ))
-        .unwrap();
+        let mut reverse = forward("reverse", "127.0.0.1", 4004);
         reverse.direction = newport_domain::model::Direction::Remote;
-        let reverse = serde_json::to_value(reverse).unwrap();
         view.update(cx, |view, _| {
-            view.snapshot["config"]["tunnels"] = json!([
+            view.snapshot_mut().config.tunnels = [
                 forward("listening", "127.0.0.1", 8000),
                 forward("dead", "127.0.0.1", 4000),
                 forward("dead by name", "localhost", 4001),
@@ -305,7 +298,10 @@ mod tests {
                 forward("same server by address", "10.0.0.5", 4002),
                 forward("never listened", "127.0.0.1", 4003),
                 reverse,
-            ]);
+            ]
+            .iter()
+            .map(newport_protocol::desktop::configuration::Tunnel::from)
+            .collect();
             discovery_fixture::put(
                 view,
                 discovery_fixture::observation([
@@ -339,9 +335,9 @@ mod tests {
         );
 
         view.update(cx, |view, _| {
-            let generation = view.resources.begin_refresh("page", false).unwrap();
+            let generation = view.resources.begin_refresh("ports", false).unwrap();
             view.resources
-                .complete("page", generation, Err("The reading failed".into()));
+                .complete("ports", generation, Err("The reading failed".into()));
         });
         assert!(offered(cx).is_empty());
     }
@@ -363,7 +359,10 @@ mod tests {
                 4000,
             )
             .unwrap();
-            view.snapshot["config"]["tunnels"] = json!([tunnel]);
+            view.snapshot_mut().config.tunnels =
+                vec![newport_protocol::desktop::configuration::Tunnel::from(
+                    &tunnel,
+                )];
             discovery_fixture::put(view, discovery_fixture::observation([]));
         });
         assert_eq!(offered(cx), 1);
@@ -394,7 +393,10 @@ mod tests {
                     8000,
                 )
                 .unwrap();
-                view.snapshot["config"]["tunnels"] = json!([tunnel]);
+                view.snapshot_mut().config.tunnels =
+                    vec![newport_protocol::desktop::configuration::Tunnel::from(
+                        &tunnel,
+                    )];
                 discovery_fixture::put(view, discovery_fixture::observation([Listener::new(8000)]));
                 let mut absent = discovery_fixture::observation([]);
                 absent.data.as_mut().unwrap().current.generation = 2;
@@ -415,10 +417,10 @@ mod tests {
             });
             view.update(visual, |view, _| match change {
                 "edited destination" => {
-                    let mut next = view.snapshot.clone();
-                    next["config"]["tunnels"][0]["remotePort"] = json!(8001);
+                    let mut next = view.snapshot.clone().unwrap();
+                    next.config.tunnels[0].remote_port = 8001;
                     view.sync_connections_snapshot(&next);
-                    view.snapshot = next;
+                    view.snapshot = Some(next);
                 }
                 _ => {
                     let mut next = discovery_fixture::observation(
@@ -445,10 +447,7 @@ mod tests {
             });
             view.read_with(visual, |view, _| {
                 assert!(!view.tunnel_operations.busy_tunnel(&tunnel), "{change}");
-                assert_eq!(
-                    view.snapshot["config"]["tunnels"].as_array().unwrap().len(),
-                    1
-                );
+                assert_eq!(view.tunnels().len(), 1);
             });
         }
     }

@@ -2,7 +2,7 @@ use super::{Point, positions};
 use crate::containers::tests::{draw, fixture, select, settle, snapshot};
 use gpui::{Bounds, TestAppContext, point, px, size};
 use gpui_kit as gpui;
-use newport_domain::containers::ContainerState;
+use newport_protocol::monitor::containers::ContainerState;
 use std::time::{Duration, Instant};
 
 #[test]

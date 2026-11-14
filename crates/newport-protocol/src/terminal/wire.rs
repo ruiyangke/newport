@@ -255,6 +255,7 @@ fn holder_to_wire(value: &Holder) -> pb::Holder {
         started: value.started,
         name: value.name.clone(),
         title: value.title.clone(),
+        agent: value.agent.clone(),
         creator: Some(computer_to_wire(&value.creator)),
         attached: value
             .attached
@@ -283,6 +284,7 @@ fn holder_from_wire(value: pb::Holder) -> Result<Holder, Error> {
         started: value.started,
         name: value.name,
         title: value.title,
+        agent: value.agent,
         creator: computer_from_wire(value.creator)?,
         attached: value
             .attached

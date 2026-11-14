@@ -1,5 +1,5 @@
 use super::*;
-use serde_json::json;
+use newport_protocol::desktop::applications::Updater;
 
 fn os(release: &str) -> Option<ServerOs> {
     Some(ServerOs::parse(release))
@@ -13,13 +13,24 @@ fn gap(requirement: Requirement, finding: Finding) -> Gap {
 }
 
 fn missing(requirement: Requirement) -> Gap {
-    gap(requirement, Finding::Missing)
+    gap(requirement, Finding::Missing(Box::default()))
+}
+
+fn inactive(requirement: Requirement, reason: Inactive) -> Gap {
+    gap(requirement, Finding::Inactive(Box::new(reason)))
+}
+
+/// An account that elevates with sudo, on a system without an image
+/// updater or a systemd user manager.
+fn sudo() -> Host {
+    host(Elevation::Sudo)
 }
 
 fn host(elevation: Elevation) -> Host {
     Host {
         elevation,
-        ..Host::default()
+        updater: None,
+        user_services: false,
     }
 }
 
@@ -29,12 +40,7 @@ fn every_gap_a_package_fixes_installs_in_one_command() {
     let gaps = [
         missing(Requirement::Dbus),
         missing(Requirement::Fonts),
-        gap(
-            Requirement::Audio,
-            Finding::Inactive {
-                reason: Inactive::Root,
-            },
-        ),
+        inactive(Requirement::Audio, Inactive::Root),
     ];
     assert_eq!(
         install_remedy(&gaps, debian.as_ref(), &host(Elevation::Sudo)),
@@ -53,7 +59,7 @@ fn commands_follow_the_account_and_the_system() {
         // A root login on Arch has no sudo.
         (
             "ID=arch",
-            Host::default().with(Elevation::Root),
+            host(Elevation::Root),
             Requirement::Dbus,
             Remedy::Command("pacman -Syu --needed dbus".into()),
             "Install D-Bus, then check again.",
@@ -76,7 +82,7 @@ fn commands_follow_the_account_and_the_system() {
             "ID=fedora\nVARIANT_ID=silverblue",
             Host {
                 updater: Some(Updater::RpmOstree),
-                ..Host::default()
+                ..sudo()
             },
             Requirement::Xwayland,
             Remedy::Command("sudo rpm-ostree install xorg-x11-server-Xwayland".into()),
@@ -86,7 +92,7 @@ fn commands_follow_the_account_and_the_system() {
             "ID=\"opensuse-microos\"\nID_LIKE=\"suse opensuse\"",
             Host {
                 updater: Some(Updater::TransactionalUpdate),
-                ..Host::default()
+                ..sudo()
             },
             Requirement::Fonts,
             Remedy::Command("sudo transactional-update pkg install dejavu-fonts".into()),
@@ -94,31 +100,31 @@ fn commands_follow_the_account_and_the_system() {
         ),
         (
             "ID=\"opensuse-leap\"\nVERSION_ID=\"15.6\"",
-            Host::default(),
+            sudo(),
             Requirement::Dbus,
             Remedy::Command("sudo zypper refresh && sudo zypper install dbus-1".into()),
             "Install D-Bus, then check again.",
         ),
         (
             "ID=nixos\nPRETTY_NAME=\"NixOS 26.05 (Yarara)\"",
-            Host::default(),
+            sudo(),
             Requirement::Xwayland,
             Remedy::Configure("programs.xwayland.enable = true;".into()),
             "Add XWayland to your NixOS configuration and rebuild, then check again.",
         ),
         (
             "ID=slackware\nPRETTY_NAME=\"Slackware 15.0\"",
-            Host::default(),
+            sudo(),
             Requirement::Dbus,
             Remedy::Manual,
             "Install D-Bus with Slackware 15.0’s package manager, then check again.",
         ),
     ];
-    for (release, host, requirement, remedy, advice) in cases {
+    for (release, host, requirement, expected, advice) in cases {
         let os = os(release);
         let gap = missing(requirement);
-        assert_eq!(gap.remedy(os.as_ref(), &host), remedy, "{release}");
-        let detail = gap.detail("box", os.as_ref(), &host);
+        assert_eq!(remedy(&gap, os.as_ref(), &host), expected, "{release}");
+        let detail = detail(&gap, "box", os.as_ref(), &host);
         assert!(detail.ends_with(advice), "{release}: {detail}");
     }
 }
@@ -126,18 +132,13 @@ fn commands_follow_the_account_and_the_system() {
 #[test]
 fn installed_software_that_doesnt_run_is_never_installed_again() {
     let arch = os("ID=arch");
-    let root = gap(
-        Requirement::Audio,
-        Finding::Inactive {
-            reason: Inactive::Root,
-        },
-    );
-    assert_eq!(root.title(), "No sound for root");
+    let root = inactive(Requirement::Audio, Inactive::Root);
+    assert_eq!(title(&root), "No sound for root");
     assert_eq!(
-        root.remedy(arch.as_ref(), &host(Elevation::Root)),
+        remedy(&root, arch.as_ref(), &host(Elevation::Root)),
         Remedy::Manual
     );
-    assert!(root.optional() && !root.installs());
+    assert!(optional(&root) && !installs(&root));
     assert_eq!(
         install_remedy(
             std::slice::from_ref(&root),
@@ -146,36 +147,19 @@ fn installed_software_that_doesnt_run_is_never_installed_again() {
         ),
         Remedy::Manual
     );
-    let stopped = gap(
-        Requirement::Audio,
-        Finding::Inactive {
-            reason: Inactive::Stopped,
-        },
-    );
+    let stopped = inactive(Requirement::Audio, Inactive::Stopped);
     let systemd = Host {
         user_services: true,
-        ..Host::default()
+        ..sudo()
     };
     assert_eq!(
-        stopped.remedy(arch.as_ref(), &systemd),
+        remedy(&stopped, arch.as_ref(), &systemd),
         Remedy::Command("systemctl --user enable --now pipewire-pulse.socket".into())
     );
-    assert_eq!(
-        stopped.remedy(arch.as_ref(), &Host::default()),
-        Remedy::Manual
-    );
-    let failed = gap(
-        Requirement::Dbus,
-        Finding::Inactive {
-            reason: Inactive::Failed,
-        },
-    );
-    assert_eq!(failed.title(), "D-Bus didn’t start");
-    assert!(
-        failed
-            .detail("box", arch.as_ref(), &Host::default())
-            .contains("dbus-run-session")
-    );
+    assert_eq!(remedy(&stopped, arch.as_ref(), &sudo()), Remedy::Manual);
+    let failed = inactive(Requirement::Dbus, Inactive::Failed);
+    assert_eq!(title(&failed), "D-Bus didn’t start");
+    assert!(detail(&failed, "box", arch.as_ref(), &sudo()).contains("dbus-run-session"));
 }
 
 #[test]
@@ -183,12 +167,12 @@ fn sound_without_systemd_comes_from_a_pulseaudio_needle_starts() {
     let alpine = os("ID=alpine");
     let audio = [missing(Requirement::Audio)];
     assert_eq!(
-        install_remedy(&audio, alpine.as_ref(), &Host::default()),
+        install_remedy(&audio, alpine.as_ref(), &sudo()),
         Remedy::Command("sudo apk update && sudo apk add pulseaudio".into())
     );
     let systemd = Host {
         user_services: true,
-        ..Host::default()
+        ..sudo()
     };
     assert_eq!(
         install_remedy(&audio, os("ID=debian").as_ref(), &systemd),
@@ -199,8 +183,7 @@ fn sound_without_systemd_comes_from_a_pulseaudio_needle_starts() {
 #[test]
 fn opensuse_names_dbus_by_release() {
     let dbus = |release| {
-        Requirement::Dbus
-            .packages(os(release).as_ref(), &Host::default())
+        packages(Requirement::Dbus, os(release).as_ref(), &sudo())
             .get(PackageManager::Zypper)
             .unwrap()
             .to_owned()
@@ -221,14 +204,12 @@ fn opensuse_names_dbus_by_release() {
 fn an_old_xwayland_names_its_version() {
     let outdated = gap(
         Requirement::Xwayland,
-        Finding::Outdated {
-            version: "22.1.9".into(),
-        },
+        Finding::Outdated(Box::new("22.1.9".into())),
     );
-    assert_eq!(outdated.title(), "XWayland is too old");
-    assert!(outdated.installs() && outdated.optional());
+    assert_eq!(title(&outdated), "XWayland is too old");
+    assert!(installs(&outdated) && optional(&outdated));
     assert_eq!(
-        outdated.detail("box", os("ID=ubuntu").as_ref(), &Host::default()),
+        detail(&outdated, "box", os("ID=ubuntu").as_ref(), &sudo()),
         "box has XWayland 22.1.9; Newport needs 23.1 or newer. Install XWayland, then check again."
     );
 }
@@ -236,43 +217,12 @@ fn an_old_xwayland_names_its_version() {
 #[test]
 fn xwayland_is_offered_never_required() {
     let missing = missing(Requirement::Xwayland);
-    assert!(missing.installs() && missing.optional());
-    assert_eq!(missing.title(), "XWayland is missing");
+    assert!(installs(&missing) && optional(&missing));
+    assert_eq!(title(&missing), "XWayland is missing");
     assert_eq!(
-        missing.detail("box", os("ID=ubuntu").as_ref(), &Host::default()),
+        detail(&missing, "box", os("ID=ubuntu").as_ref(), &sudo()),
         "Some apps use X11, and box has no XWayland for them. Install XWayland, then check again."
     );
-}
-
-#[test]
-fn gaps_cross_from_the_backend_as_tagged_json() {
-    let gaps = vec![
-        missing(Requirement::Fonts),
-        gap(
-            Requirement::Audio,
-            Finding::Inactive {
-                reason: Inactive::Root,
-            },
-        ),
-        gap(
-            Requirement::Xwayland,
-            Finding::Outdated {
-                version: "22.1.9".into(),
-            },
-        ),
-    ];
-    let value = serde_json::to_value(&gaps).unwrap();
-    assert_eq!(
-        value,
-        json!([
-            {"requirement": "fonts", "state": "missing"},
-            {"requirement": "audio", "state": "inactive", "reason": "root"},
-            {"requirement": "xwayland", "state": "outdated", "version": "22.1.9"},
-        ])
-    );
-    assert_eq!(serde_json::from_value::<Vec<Gap>>(value).unwrap(), gaps);
-    let host: Host = serde_json::from_value(json!({"elevation": "root", "updater": null})).unwrap();
-    assert_eq!(host, Host::default().with(Elevation::Root));
 }
 
 #[test]
@@ -289,20 +239,13 @@ fn every_requirement_has_a_package_for_every_manager() {
         for user_services in [false, true] {
             let host = Host {
                 user_services,
-                ..Host::default()
+                ..sudo()
             };
-            let names = requirement.packages(None, &host);
+            let names = packages(requirement, None, &host);
             for manager in [Apt, Dnf, Yum, Zypper, Pacman, Apk, Xbps, Emerge, Nix] {
                 assert!(names.get(manager).is_some(), "{requirement:?} {manager:?}");
             }
         }
-        assert!(requirement.nixos().ends_with(';'));
-    }
-}
-
-impl Host {
-    fn with(mut self, elevation: Elevation) -> Self {
-        self.elevation = elevation;
-        self
+        assert!(nixos(requirement).ends_with(';'));
     }
 }

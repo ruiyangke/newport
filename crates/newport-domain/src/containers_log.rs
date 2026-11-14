@@ -1,5 +1,5 @@
 //! Container log severity and local filtering.
-use crate::containers::ContainerLogEntry;
+use newport_protocol::monitor::containers::ContainerLogEntry;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Severity {
@@ -101,7 +101,7 @@ fn query_whitespace(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::containers::LogStream;
+    use newport_protocol::monitor::containers::LogStream;
 
     fn entry(source: Option<&str>, stream: LogStream, message: &str) -> ContainerLogEntry {
         ContainerLogEntry {

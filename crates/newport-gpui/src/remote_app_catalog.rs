@@ -207,15 +207,15 @@ fn read(server: String, name: String) {
                     )
                     .map_err(|error| error.to_string())
                     .and_then(|reply| {
-                        newport_client::desktop_result::project(reply)
+                        newport_client::backend::catalogue_reply(reply)
                             .map_err(|error| error.to_string())
                     })
             });
         match read {
-            Ok(value) => remember(
+            Ok(catalogue) => remember(
                 &server,
                 &name,
-                &crate::remote_apps::decode_catalogue(&value),
+                &crate::remote_apps::decode_catalogue(&catalogue),
             ),
             Err(error) => eprintln!("Remote app catalogue for {server}: {error}"),
         }

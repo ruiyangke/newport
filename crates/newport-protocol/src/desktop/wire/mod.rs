@@ -27,6 +27,8 @@ pub use stream_codec::*;
 mod scan;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) mod wire_tables;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -68,6 +70,80 @@ impl From<Error> for io::Error {
             _ => Self::new(io::ErrorKind::InvalidData, error),
         }
     }
+}
+/// The enum maps the desktop protocol's `Convert` impls hold.
+#[cfg(test)]
+pub(crate) fn enum_maps() -> Vec<wire_tables::EnumMap> {
+    fn convert<T: Convert<Proto = i32> + std::fmt::Debug + 'static>(
+        proto: &'static str,
+    ) -> wire_tables::EnumMap {
+        wire_tables::enum_map(
+            proto,
+            |value| T::from_proto(value).ok(),
+            |value| value.to_proto().unwrap(),
+        )
+    }
+    vec![
+        convert::<crate::desktop::preferences::Appearance>(
+            "newport.desktop.preferences.Appearance",
+        ),
+        convert::<crate::desktop::preferences::Codec>("newport.desktop.preferences.Codec"),
+        convert::<crate::desktop::stream::Ending>("newport.desktop.stream.Ending"),
+        convert::<crate::desktop::host::UpdatePhase>("newport.desktop.host.UpdatePhase"),
+        convert::<crate::desktop::configuration::AuthMethod>(
+            "newport.desktop.configuration.AuthMethod",
+        ),
+        convert::<crate::desktop::configuration::Direction>(
+            "newport.desktop.configuration.Direction",
+        ),
+        convert::<crate::desktop::configuration::Feature>("newport.desktop.configuration.Feature"),
+        convert::<crate::desktop::configuration::TransportStatus>(
+            "newport.desktop.configuration.TransportStatus",
+        ),
+        convert::<crate::desktop::configuration::RuntimeStatus>(
+            "newport.desktop.configuration.RuntimeStatus",
+        ),
+        convert::<crate::desktop::configuration::BuildRelation>(
+            "newport.desktop.configuration.BuildRelation",
+        ),
+        convert::<crate::desktop::configuration::InstallStage>(
+            "newport.desktop.configuration.InstallStage",
+        ),
+        convert::<crate::desktop::configuration::ConnectionStatus>(
+            "newport.desktop.configuration.ConnectionStatus",
+        ),
+        convert::<crate::desktop::configuration::DestinationStatus>(
+            "newport.desktop.configuration.DestinationStatus",
+        ),
+        convert::<crate::desktop::metrics::Section>("newport.desktop.metrics.Section"),
+        convert::<crate::desktop::account::Phase>("newport.desktop.account.Phase"),
+        convert::<crate::desktop::account::NoticeKind>("newport.desktop.account.NoticeKind"),
+        convert::<crate::desktop::account::NoticeAction>("newport.desktop.account.NoticeAction"),
+        convert::<crate::desktop::account::RefusalReason>("newport.desktop.account.RefusalReason"),
+        convert::<crate::desktop::containers::DiskPart>("newport.desktop.containers.DiskPart"),
+        convert::<crate::desktop::files::EntryKind>("newport.desktop.files.EntryKind"),
+        convert::<crate::desktop::files::PreviewKind>("newport.desktop.files.PreviewKind"),
+        convert::<crate::desktop::files::PageReason>("newport.desktop.files.PageReason"),
+        convert::<crate::desktop::files::WatchMode>("newport.desktop.files.WatchMode"),
+        convert::<crate::desktop::applications::State>("newport.desktop.applications.State"),
+        convert::<crate::desktop::applications::Requirement>(
+            "newport.desktop.applications.Requirement",
+        ),
+        convert::<crate::desktop::applications::Inactive>("newport.desktop.applications.Inactive"),
+        convert::<crate::desktop::applications::Elevation>(
+            "newport.desktop.applications.Elevation",
+        ),
+        convert::<crate::desktop::applications::Updater>("newport.desktop.applications.Updater"),
+        convert::<crate::desktop::git::ReceiptState>("newport.desktop.git.ReceiptState"),
+        convert::<crate::product::Variant>("newport.runtime.Product"),
+        convert::<crate::monitor::services::Scope>("newport.monitor.ServicesScope"),
+        convert::<crate::monitor::services::Verb>("newport.monitor.ServicesVerb"),
+        convert::<crate::monitor::containers::ContainerVerb>(
+            "newport.monitor.ContainersContainerVerb",
+        ),
+        convert::<crate::monitor::containers::ProjectVerb>("newport.monitor.ContainersProjectVerb"),
+        convert::<crate::monitor::containers::PruneTarget>("newport.monitor.ContainersPruneTarget"),
+    ]
 }
 trait Convert: Sized {
     type Proto;

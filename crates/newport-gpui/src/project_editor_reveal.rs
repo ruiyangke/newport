@@ -88,7 +88,7 @@ impl CodeWorkspace {
             if i > 0
                 && !self.directories[&parents[i - 1]]
                     .iter()
-                    .any(|e| e["path"].as_str() == Some(parent) && e["kind"] == "directory")
+                    .any(|e| &e.path == parent && e.kind == files::EntryKind::Directory)
             {
                 self.reveal_target = None;
                 self.reveal_notice = Some("The file's folder is no longer listed. Your open buffer is kept. Use Reveal in Explorer to retry.".into());

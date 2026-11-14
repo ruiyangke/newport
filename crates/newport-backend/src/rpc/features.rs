@@ -44,7 +44,7 @@ pub async fn services(
         _ => None,
     };
     let result = if let Some((key, refresh)) = cached {
-        match crate::server_queries::read_typed(&owner, key, refresh)
+        match crate::server_queries::read(&owner, key, refresh)
             .await
             .map_err(operation)?
         {
@@ -107,7 +107,7 @@ pub async fn containers(
         _ => None,
     };
     let result = if let Some((key, refresh)) = cached {
-        match crate::server_queries::read_typed(&owner, key, refresh)
+        match crate::server_queries::read(&owner, key, refresh)
             .await
             .map_err(operation)?
         {

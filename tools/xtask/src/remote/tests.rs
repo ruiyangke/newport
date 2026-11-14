@@ -170,3 +170,14 @@ esac
     assert_eq!(builds()?, 3, "a changed build argument builds again");
     Ok(())
 }
+
+#[test]
+fn a_clean_agent_build_never_shares_a_cargo_directory() {
+    assert_ne!(agent_build(true), agent_build(false));
+    let dockerfile = fs::read_to_string(root().join("crates/newport-agent/Dockerfile")).unwrap();
+    assert!(dockerfile.contains(&format!("ARG NEWPORT_AGENT_BUILD={}", agent_build(false))));
+    assert!(dockerfile.contains(&format!(
+        "if [ \"$NEWPORT_AGENT_BUILD\" = {} ]; then rm -rf \"$CARGO_TARGET_DIR\"; fi",
+        agent_build(true)
+    )));
+}

@@ -104,21 +104,10 @@ fn fixture(
     let (_, cx) = cx.add_window_view(|window, cx| {
         owner = Some(cx.new(|cx| {
             let mut view = crate::page_perf_tests::owner(window, cx);
-            let selected = view.server.clone();
-            let profile = view.snapshot["config"]["servers"]
-                .as_array_mut()
-                .unwrap()
-                .iter_mut()
-                .find(|profile| profile["id"] == selected)
-                .unwrap();
-            profile["id"] = json!(SERVER);
-            profile["sshPort"] = json!(22);
-            profile["authMethod"] = json!("publicKey");
-            view.server = SERVER.into();
-            view.snapshot["instanceId"] = json!("00000000-0000-4000-8000-000000000002");
-            view.snapshot["runtime"]["connectionRevisions"][SERVER] = json!(1);
-            let connection =
-                crate::terminal_scope::connection(view.selected_server().unwrap(), &view.snapshot);
+            assert_eq!(view.server, SERVER);
+            view.snapshot_mut().instance_id =
+                uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000002").unwrap();
+            let connection = view.selected_connection();
             view.page = Page::Overview;
             view.file_transfer = Some(Transfer::start(
                 Backend::at_path(host.path.clone()),
@@ -141,12 +130,9 @@ fn fixture(
     assert_eq!(request.args["path"], "/remote/file.txt");
     assert_eq!(
         request.args["expectedConnection"],
-        owner.read_with(cx, |view, _| view
-            .file_transfer
-            .as_ref()
-            .unwrap()
-            .connection()
-            .clone())
+        owner.read_with(cx, |view, _| crate::file_test_backend::scope(
+            view.file_transfer.as_ref().unwrap().connection().unwrap()
+        ))
     );
     (
         owner,
@@ -281,9 +267,10 @@ fn completed_transfer_waits_for_configuration_revalidation(cx: &mut TestAppConte
     for recovery in ["same", "replacement", "deleted"] {
         let (view, cx, _host, result, _) = fixture(cx, Direction::Upload);
         let mut restored = view.update(cx, |view, _| {
-            let snapshot = view.snapshot.clone();
-            view.snapshot["loadError"] = json!("Vault temporarily unavailable");
-            view.snapshot["config"]["servers"] = json!([]);
+            let snapshot = view.snapshot.clone().unwrap();
+            let unavailable = view.snapshot_mut();
+            unavailable.load_error = Some("Vault temporarily unavailable".into());
+            unavailable.config.servers.clear();
             snapshot
         });
         reply(result, Ok(json!("/remote/file.txt")));
@@ -297,11 +284,15 @@ fn completed_transfer_waits_for_configuration_revalidation(cx: &mut TestAppConte
         assert!(view.read_with(cx, |view, _| view.file_transfer.is_some()));
         assert!(view.read_with(cx, |view, _| view.notification.is_none()));
         if recovery == "replacement" {
-            restored["runtime"]["connectionRevisions"][SERVER] = json!(2);
+            crate::snapshot_fixture::set(
+                &mut restored.runtime.connection_revisions,
+                crate::snapshot_fixture::SERVER,
+                2,
+            );
         } else if recovery == "deleted" {
-            restored["config"]["servers"] = json!([]);
+            restored.config.servers.clear();
         }
-        view.update(cx, |view, _| view.snapshot = restored);
+        view.update(cx, |view, _| view.snapshot = Some(restored));
         assert_eq!(finish(&view, cx), 1);
         assert_eq!(
             view.read_with(cx, |view, _| view.notification.is_some()),

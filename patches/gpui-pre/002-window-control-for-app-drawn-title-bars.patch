@@ -1,0 +1,251 @@
+gpui_windows: Window control for app-drawn title bars
+
+Apps that draw their own title bar need the window controls that Wayland
+and X11 already offer. On Windows, GPUI gains:
+
+- start_window_move, start_window_resize and show_window_menu. They run
+  native modal loops, so they start after GPUI's update returns.
+- Client decorations (`WindowDecorations::Client`): the whole window is
+  drawable, keeps native resize edges, and a maximized window's client is
+  clipped to the work area. request_decorations changes them at runtime.
+- set_resizable, set_minimizable, set_maximizable and set_maximized at
+  runtime, and is_in_live_resize. Maximize permission follows resize
+  permission until it is set.
+- A native resize constraint (`NativeResizeConstraint`), applied in
+  WM_SIZING and WM_GETMINMAXINFO without entering GPUI.
+- zoom toggles between maximized and restored; resize measures the frame
+  on the UI thread before it applies a client size; a window created
+  hidden first shows with the requested activation.
+
+Newport needs it for Remote apps on Windows: Linux apps draw their own
+title bars and move, resize and maximize themselves.
+
+The new trait methods have defaults, and other platforms are unchanged.
+set_native_resize_constraint exists only on Windows. WindowParams
+gains a Windows-only window_decorations field.
+
+Remove when upstream gpui_windows supports client decorations and these
+window controls.
+
+diff --git a/src/platform.rs b/src/platform.rs
+index 453a6cf..e86749c 100644
+--- a/src/platform.rs
++++ b/src/platform.rs
+@@ -1220,6 +1220,28 @@ pub enum TextInputStateChange {
+     ContentChanged,
+ }
+ 
++/// Immutable client-size policy used by the Windows native sizing loop.
++///
++/// The selector receives and returns logical client dimensions. It must be
++/// bounded and pure: no GPUI access, native calls, window capture, or mutation.
++/// Returning `None` refuses that resize. Minimum and maximum must be finite,
++/// positive, and ordered; invalid values also refuse resizing.
++#[cfg(windows)]
++#[derive(Clone)]
++pub enum NativeResizeConstraint {
++    /// Keep the HWND's current size during an interactive resize.
++    Fixed,
++    /// Select a legal client size within the supplied bounds.
++    Constrained {
++        /// Smallest legal logical client size.
++        minimum: Size<Pixels>,
++        /// Largest legal logical client size.
++        maximum: Size<Pixels>,
++        /// Nearest legal logical client size, or refusal.
++        select: Rc<dyn Fn(Size<Pixels>) -> Option<Size<Pixels>>>,
++    },
++}
++
+ #[expect(missing_docs)]
+ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+     fn bounds(&self) -> Bounds<Pixels>;
+@@ -1247,6 +1269,9 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+         false
+     }
+     fn resize(&mut self, size: Size<Pixels>);
++    /// Replace the immutable native sizing policy; `None` restores platform defaults.
++    #[cfg(windows)]
++    fn set_native_resize_constraint(&self, _constraint: Option<NativeResizeConstraint>) {}
+     fn scale_factor(&self) -> f32;
+     fn appearance(&self) -> WindowAppearance;
+     fn display(&self) -> Option<Rc<dyn PlatformDisplay>>;
+@@ -1365,6 +1390,15 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+         false
+     }
+     fn start_window_resize(&self, _edge: ResizeEdge) {}
++    fn set_resizable(&self, _resizable: bool) {}
++    fn set_minimizable(&self, _minimizable: bool) {}
++    #[cfg(windows)]
++    fn set_maximizable(&self, _maximizable: bool) {}
++    #[cfg(windows)]
++    fn set_maximized(&self, _maximized: bool) {}
++    fn is_in_live_resize(&self) -> bool {
++        false
++    }
+     fn set_exclusive_zone(&self, _zone: Pixels) {}
+     #[cfg(all(target_os = "linux", feature = "wayland"))]
+     fn set_exclusive_edge(&self, _edge: layer_shell::Anchor) {}
+@@ -2640,7 +2674,9 @@ pub struct WindowOptions {
+     /// Window minimum size
+     pub window_min_size: Option<Size<Pixels>>,
+ 
+-    /// Whether to use client or server-side decorations on X11 and Wayland.
++    /// Whether to use client or server-side decorations on X11, Wayland and Windows.
++    /// On Windows, Client gives the app the whole window's drawable area and
++    /// retains native resize hit testing and maximized work-area bounds.
+     /// The platform may ignore requests it cannot satisfy.
+     pub window_decorations: Option<WindowDecorations>,
+ 
+@@ -2665,6 +2701,8 @@ pub struct WindowOptions {
+ )]
+ #[allow(missing_docs)]
+ pub struct WindowParams {
++    #[cfg(windows)]
++    pub window_decorations: WindowDecorations,
+     pub bounds: Bounds<Pixels>,
+ 
+     /// The titlebar configuration of the window
+diff --git a/src/platform/test/window.rs b/src/platform/test/window.rs
+index 3907129..9b6c9c8 100644
+--- a/src/platform/test/window.rs
++++ b/src/platform/test/window.rs
+@@ -313,6 +313,11 @@ impl TestWindow {
+ }
+ 
+ impl PlatformWindow for TestWindow {
++    #[cfg(windows)]
++    fn set_native_resize_constraint(&self, _: Option<crate::NativeResizeConstraint>) {
++        // This backend has no HWND or native sizing loop.
++    }
++
+     fn visual_viewport_bounds(&self) -> Bounds<Pixels> {
+         let state = self.0.lock();
+         state
+diff --git a/src/window.rs b/src/window.rs
+index 18fb7f3..fce257e 100644
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -1230,6 +1230,8 @@ pub struct Window {
+     pub(crate) display_observers: SubscriberSet<(), AnyObserver>,
+     is_resizable: bool,
+     is_minimizable: bool,
++    #[cfg(windows)]
++    maximizable: Option<bool>,
+     sprite_atlas: Arc<dyn PlatformAtlas>,
+     text_system: Arc<WindowTextSystem>,
+     text_rendering_mode: Rc<Cell<TextRenderingMode>>,
+@@ -1619,6 +1621,8 @@ impl Window {
+         let mut platform_window = cx.platform.open_window(
+             handle,
+             WindowParams {
++                #[cfg(windows)]
++                window_decorations: window_decorations.unwrap_or(WindowDecorations::Server),
+                 bounds: window_bounds.get_bounds(),
+                 titlebar,
+                 kind,
+@@ -2142,6 +2146,8 @@ impl Window {
+             display_observers: SubscriberSet::new(),
+             is_resizable,
+             is_minimizable,
++            #[cfg(windows)]
++            maximizable: None,
+             sprite_atlas,
+             text_system,
+             text_rendering_mode: cx.text_rendering_mode.clone(),
+@@ -2491,7 +2497,8 @@ impl Window {
+         self.platform_window.is_maximized()
+     }
+ 
+-    /// request a certain window decoration (Wayland)
++    /// Request client or server decorations on platforms that support them.
++    /// Windows applies runtime frame changes after the current update.
+     pub fn request_decorations(&self, decorations: WindowDecorations) {
+         self.platform_window.request_decorations(decorations);
+     }
+@@ -3006,6 +3013,16 @@ impl Window {
+         }
+     }
+ 
++    /// Replace the Windows native resize policy synchronously.
++    ///
++    /// The selector runs inside Win32 sizing messages and must not access GPUI
++    /// or native windows. The HWND releases the snapshot when replaced or closed.
++    #[cfg(windows)]
++    pub fn set_native_resize_constraint(&self, constraint: Option<crate::NativeResizeConstraint>) {
++        self.platform_window
++            .set_native_resize_constraint(constraint);
++    }
++
+     /// Toggle zoom on the window.
+     pub fn zoom_window(&self) {
+         self.platform_window.zoom();
+@@ -3016,7 +3033,7 @@ impl Window {
+         self.platform_window.show_window_menu(position)
+     }
+ 
+-    /// Handle window movement for Linux and macOS.
++    /// Start native window movement.
+     /// Tells the compositor to take control of window movement (Wayland and X11)
+     ///
+     /// Events may not be received during a move operation.
+@@ -3045,11 +3062,59 @@ impl Window {
+         self.is_resizable
+     }
+ 
++    /// Update resize permission and the platform's native window controls.
++    #[cfg(target_os = "windows")]
++    pub fn set_resizable(&mut self, resizable: bool) {
++        if self.is_resizable != resizable {
++            self.is_resizable = resizable;
++            self.platform_window.set_resizable(resizable);
++        }
++    }
++
+     /// Returns whether this window is minimizable.
+     pub fn is_minimizable(&self) -> bool {
+         self.is_minimizable
+     }
+ 
++    /// Update minimize permission and the platform's native window controls.
++    #[cfg(target_os = "windows")]
++    pub fn set_minimizable(&mut self, minimizable: bool) {
++        if self.is_minimizable != minimizable {
++            self.is_minimizable = minimizable;
++            self.platform_window.set_minimizable(minimizable);
++        }
++    }
++
++    /// Set Windows maximize permission independently from resize permission.
++    /// Until explicitly set, maximize permission follows resize permission.
++    #[cfg(windows)]
++    pub fn set_maximizable(&mut self, maximizable: bool) {
++        if self.maximizable != Some(maximizable) {
++            self.maximizable = Some(maximizable);
++            self.platform_window.set_maximizable(maximizable);
++        }
++    }
++
++    /// Whether Windows offers maximize through its native controls.
++    #[cfg(windows)]
++    pub fn is_maximizable(&self) -> bool {
++        self.maximizable.unwrap_or(self.is_resizable)
++    }
++
++    /// Request an absolute Windows maximize state without toggling a pending request.
++    /// Fullscreen, minimized, and interactively resizing windows retain their
++    /// state; callers defer until restored. Visible restore does not activate.
++    #[cfg(windows)]
++    pub fn set_maximized(&self, maximized: bool) {
++        self.platform_window.set_maximized(maximized);
++    }
++
++    /// Whether the platform is running an interactive window move or resize.
++    #[cfg(target_os = "windows")]
++    pub fn is_in_live_resize(&self) -> bool {
++        self.platform_window.is_in_live_resize()
++    }
++
+     /// Returns the controls supported by the platform.
+     pub fn window_controls(&self) -> WindowControls {
+         self.platform_window.window_controls()

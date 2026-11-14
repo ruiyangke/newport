@@ -4,7 +4,6 @@
 //! Native notifications are hints; atomic saves still verify the content hash.
 use super::{Listing, Operations};
 use crate::{manager::Shared, query::Registry, remote::sftp, server_session::ServerSession};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -44,12 +43,10 @@ impl Default for Vfs {
         }
     }
 }
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Request {
     pub(crate) id: Uuid,
     pub(crate) operation: Uuid,
-    pub(crate) expected_connection: Vec<Value>,
+    pub(crate) expected_connection: newport_protocol::desktop::configuration::ConnectionScope,
     pub(crate) root: String,
     pub(crate) watch: Uuid,
     pub(crate) directories: BTreeSet<String>,
@@ -277,7 +274,7 @@ pub(crate) async fn dispatch(
             state,
             request.id,
             request.operation,
-            Some(&Value::Array(request.expected_connection.clone())),
+            Some(&request.expected_connection),
             async |_, owner| {
                 tokio::time::timeout(Duration::from_secs(30), owner.files.poll(&owner, &request))
                     .await
@@ -344,11 +341,15 @@ mod tests {
         let owner = sessions.session(&server, 0);
         owner.files.fallback.lock().await.native_retry =
             Some(Instant::now() + Duration::from_secs(300));
-        let mut request: Request = serde_json::from_value(
-            json!({"id":server.id,"operation":Uuid::new_v4(),"expectedConnection":[],
-            "root":"/","watch":Uuid::new_v4(),"directories":["/"],"cursor":null}),
-        )
-        .unwrap();
+        let mut request = Request {
+            id: server.id,
+            operation: Uuid::new_v4(),
+            expected_connection: server.connection_scope(0, Uuid::nil()),
+            root: "/".into(),
+            watch: Uuid::new_v4(),
+            directories: ["/".to_owned()].into(),
+            cursor: None,
+        };
         let first = owner.files.poll(&owner, &request).await.unwrap();
         assert_eq!(first["mode"], "poll");
         assert_eq!(first["reset"], true);
@@ -405,11 +406,15 @@ mod tests {
         let (_directory, state, owner, server) = super::super::integration_tests::app();
         owner.files.fallback.lock().await.native_retry =
             Some(Instant::now() + Duration::from_secs(300));
-        let mut request: Request = serde_json::from_value(
-            json!({"id":server.id,"operation":Uuid::new_v4(),"expectedConnection":[],
-            "root":"/","watch":Uuid::new_v4(),"directories":["/"],"cursor":null}),
-        )
-        .unwrap();
+        let mut request = Request {
+            id: server.id,
+            operation: Uuid::new_v4(),
+            expected_connection: server.connection_scope(0, Uuid::nil()),
+            root: "/".into(),
+            watch: Uuid::new_v4(),
+            directories: ["/".to_owned()].into(),
+            cursor: None,
+        };
         let watched = owner.files.poll(&owner, &request).await.unwrap();
         request.cursor = watched["cursor"].as_str().map(str::to_owned);
         let lost = owner.files.remote(&owner).sftp.shared().await.unwrap();
@@ -472,8 +477,18 @@ mod tests {
     }
     #[test]
     fn watch_paths_cannot_escape_project_or_exceed_budget() {
-        let mut r:Request=serde_json::from_value(json!({"id":Uuid::new_v4(),"operation":Uuid::new_v4(),
-            "expectedConnection":[],"root":"/repo","watch":Uuid::new_v4(),"directories":["/repo","/repo/src"]})).unwrap();
+        let server: crate::model::Server = serde_json::from_value(json!({"id":Uuid::new_v4(),
+            "name":"Watch","sshHost":"host","sshUser":"user","sshPort":22}))
+        .unwrap();
+        let mut r = Request {
+            id: server.id,
+            operation: Uuid::new_v4(),
+            expected_connection: server.connection_scope(0, Uuid::nil()),
+            root: "/repo".into(),
+            watch: Uuid::new_v4(),
+            directories: BTreeSet::from(["/repo".into(), "/repo/src".into()]),
+            cursor: None,
+        };
         assert!(validate(&r).is_ok());
         for bad in ["/repo/../etc", "/repository", "/repo//src", "relative"] {
             r.directories = BTreeSet::from([bad.into()]);

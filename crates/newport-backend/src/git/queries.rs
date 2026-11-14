@@ -2,6 +2,7 @@
 //! Keys include the exact repository, cursor, snapshot token and query arguments.
 use super::*;
 use crate::query::{Policy, Registry};
+use newport_protocol::git::code;
 
 #[derive(Clone, Debug)]
 struct ReadError(Error);
@@ -69,10 +70,12 @@ impl Queries {
         request: &Request,
         result: Result<GitResult, Error>,
     ) -> Result<GitResult, Error> {
-        if result
-            .as_ref()
-            .is_err_and(|error| matches!(error.code.as_str(), "STALE_SNAPSHOT" | "STALE_ENTRY"))
-        {
+        if result.as_ref().is_err_and(|error| {
+            matches!(
+                error.code.as_str(),
+                code::STALE_SNAPSHOT | code::STALE_ENTRY
+            )
+        }) {
             let value = serde_json::to_value(request).unwrap_or(Value::Null);
             if let Some(repo) = value["params"]["repoId"]
                 .as_str()

@@ -189,6 +189,8 @@ pub enum TerminalEvent {
     Active(Box<crate::desktop::stream::Active>),
     DisplayLost(Box<crate::common::Present>),
     NotHeld(Box<crate::desktop::stream::NotHeld>),
+    /// The held shell's size, which every tab with it open draws it at.
+    Size(Box<crate::desktop::stream::Resize>),
 }
 
 #[derive(Clone, Debug)]

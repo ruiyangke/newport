@@ -1,44 +1,46 @@
 //! Staging changes the index snapshot, not the workspace the user is viewing.
 //! Assemble a replacement for the loaded status window before displaying it.
 use super::*;
-use newport_protocol::{
-    desktop,
-    git::{Request as GitRequest, StatusFilter},
-};
+use git_listing::{Listing, StatusPage};
+use newport_protocol::git::{Request as GitRequest, StatusFilter};
 
 pub(super) struct Refresh {
-    page: Value,
+    page: Option<StatusPage>,
     count: usize,
     repo_id: String,
     filter: StatusFilter,
 }
 impl Refresh {
-    fn new(page: &Value, repo_id: &str, filter: StatusFilter) -> Self {
+    fn new(page: Option<&Listing>, repo_id: &str, filter: StatusFilter) -> Self {
         Self {
-            page: Value::Null,
-            count: page["entries"].as_array().map_or(100, Vec::len).max(100),
+            page: None,
+            count: page.map_or(100, Listing::len).max(100),
             repo_id: repo_id.into(),
             filter,
         }
     }
-    fn accept(&mut self, incoming: Value) -> Result<bool, String> {
-        self.page = if let Some(cursor) = self.page["nextCursor"].as_str() {
-            newport_client::git_page::merge(&self.page, incoming, cursor)?
-        } else {
-            newport_client::git_page::validate(&incoming)?;
-            incoming
+    fn accept(&mut self, incoming: StatusPage) -> Result<bool, String> {
+        let page = match self
+            .page
+            .as_ref()
+            .and_then(|page| Some((page, page.next_cursor.as_deref()?)))
+        {
+            Some((page, cursor)) => newport_client::git_page::merge_pages(page, incoming, cursor)?,
+            None => {
+                newport_client::git_page::validate_page(&incoming)?;
+                incoming
+            }
         };
-        Ok(
-            self.page["entries"].as_array().map_or(0, Vec::len) >= self.count
-                || self.page["nextCursor"].is_null(),
-        )
+        let done = page.entries.len() >= self.count || page.next_cursor.is_none();
+        self.page = Some(page);
+        Ok(done)
     }
     fn request(&self) -> GitRequest {
         GitRequest::Status {
             repo_id: self.repo_id.clone(),
             filter: Some(self.filter.clone()),
             page_size: 200,
-            cursor: self.page["nextCursor"].as_str().map(str::to_owned),
+            cursor: self.page.as_ref().and_then(|page| page.next_cursor.clone()),
         }
     }
 }
@@ -56,7 +58,7 @@ impl Newport {
             return;
         };
         self.git.index_refresh = Some(Refresh::new(
-            &self.git.page,
+            self.git.page.as_ref(),
             &self.git_repository_id(),
             self.git.changes.filter(),
         ));
@@ -72,15 +74,7 @@ impl Newport {
         }
         self.git.continuation = None;
         self.git.diff_recovery.reset();
-        self.request_refresh(
-            "git-index-refresh",
-            desktop::Operation::Git(Box::new(desktop::git::Operation::RefreshRepository(
-                Box::new(desktop::git::RefreshRepositoryArgs {
-                    server,
-                    repo_id: self.git_repository_id(),
-                }),
-            ))),
-        );
+        self.request_repository_refresh("git-index-refresh", server);
         self.git_index_refresh_error("git-index-refresh");
     }
     fn git_index_refresh_error(&mut self, key: &str) -> bool {
@@ -101,19 +95,28 @@ impl Newport {
             return;
         }
         if key == "git-index-refresh" {
-            if self.value(key)["repoId"] != self.git.repo["repoId"] {
+            if self.git.refreshed.get(key).map(String::as_str) != self.git.repo_id() {
                 self.git_cancel_index_refresh();
                 self.git.error = Some("Repository changed. Refresh before staging.".into());
                 return;
             }
         } else {
-            let incoming = self.value(key);
+            let Some(incoming) = self.git_status(key).cloned() else {
+                self.git_cancel_index_refresh();
+                self.git.error = Some("Invalid repository page. Refresh to retry.".into());
+                return;
+            };
             match self.git.index_refresh.as_mut().unwrap().accept(incoming) {
                 Ok(true) => {
                     let refresh = self.git.index_refresh.take().unwrap();
-                    if let Some(generation) = self.resources.begin_refresh("git-list", false) {
-                        self.resources
-                            .complete("git-list", generation, Ok(refresh.page));
+                    if let Some(generation) = self.resources.begin_refresh("git-list", false)
+                        && let Some(page) = refresh.page
+                    {
+                        self.resources.complete_git(
+                            "git-list",
+                            generation,
+                            Ok(newport_protocol::git::Reply::Status(Box::new(page))),
+                        );
                         self.git_listing_completed(true);
                     }
                     return;
@@ -127,26 +130,31 @@ impl Newport {
             }
         }
         let request = self.git.index_refresh.as_ref().unwrap().request();
-        self.request_git_refresh("git-index-status", request);
+        let generation = self.resources.begin_refresh("git-index-status", false);
+        self.dispatch_git_typed("git-index-status", request, generation);
         self.git_index_refresh_error("git-index-status");
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Refresh, StatusFilter};
-    fn params(refresh: &Refresh) -> Value {
+    use super::{Listing, Refresh, StatusFilter, StatusPage};
+    use crate::git_fixture::{status_entry, status_page};
+    fn params(refresh: &Refresh) -> serde_json::Value {
         serde_json::to_value(refresh.request()).unwrap()["params"].clone()
     }
-    use serde_json::{Value, json};
 
-    fn page(snapshot: &str, count: usize, cursor: Option<&str>) -> Value {
-        json!({"snapshot":snapshot,"entries":vec![json!({"entryId":"file"});count],"nextCursor":cursor,"metadata":{}})
+    fn page(snapshot: &str, count: usize, cursor: Option<&str>) -> StatusPage {
+        status_page(snapshot, vec![status_entry("file", "file"); count], cursor)
     }
     #[test]
     fn index_refresh_preserves_the_loaded_window_until_replacement_is_complete() {
         let mut refresh = Refresh::new(
-            &page("old", 350, Some("old-cursor")),
+            Some(&Listing::Status(Box::new(page(
+                "old",
+                350,
+                Some("old-cursor"),
+            )))),
             "repo",
             StatusFilter {
                 text: String::new(),
@@ -158,15 +166,16 @@ mod tests {
         assert_eq!(params(&refresh)["cursor"], "next");
         assert_eq!(params(&refresh)["filter"]["group"], "all");
         assert!(refresh.accept(page("new", 160, None)).unwrap());
-        assert_eq!(refresh.page["entries"].as_array().unwrap().len(), 360);
+        assert_eq!(refresh.page.as_ref().unwrap().entries.len(), 360);
     }
     #[test]
     fn shrinking_lists_finish_and_mixed_snapshots_are_rejected() {
-        let mut refresh = Refresh::new(&page("old", 350, None), "repo", StatusFilter::default());
+        let old = Listing::Status(Box::new(page("old", 350, None)));
+        let mut refresh = Refresh::new(Some(&old), "repo", StatusFilter::default());
         assert!(refresh.accept(page("new", 2, None)).unwrap());
-        let mut refresh = Refresh::new(&page("old", 350, None), "repo", StatusFilter::default());
+        let mut refresh = Refresh::new(Some(&old), "repo", StatusFilter::default());
         assert!(!refresh.accept(page("new", 200, Some("next"))).unwrap());
         assert!(refresh.accept(page("changed-again", 150, None)).is_err());
-        assert_eq!(refresh.page["entries"].as_array().unwrap().len(), 200);
+        assert_eq!(refresh.page.as_ref().unwrap().entries.len(), 200);
     }
 }

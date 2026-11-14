@@ -139,12 +139,69 @@ pub fn write(output: &mut impl Write, reply: &Reply) -> Result<(), Error> {
 }
 
 #[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug))]
 enum Shape {
     Frame,
     Catalogue,
     Application,
     Action,
     Error,
+}
+
+/// How a shape reads one field.
+enum Field {
+    /// Text, bytes or a message, up to `maximum` times and `limit` bytes;
+    /// `exclusive` fields exclude each other.
+    Bytes {
+        maximum: usize,
+        limit: usize,
+        child: Option<Shape>,
+        exclusive: bool,
+    },
+    /// A `newport.wire.Retry`.
+    Retry,
+}
+
+fn rule(shape: Shape, number: u32) -> Option<Field> {
+    let bytes = |maximum, limit, child| Field::Bytes {
+        maximum,
+        limit,
+        child,
+        exclusive: false,
+    };
+    Some(match (shape, number) {
+        (Shape::Frame, 1 | 2) => Field::Bytes {
+            maximum: 1,
+            limit: SERVER_LIMITS.message,
+            child: Some(if number == 1 {
+                Shape::Catalogue
+            } else {
+                Shape::Error
+            }),
+            exclusive: true,
+        },
+        (Shape::Catalogue, 1) => bytes(
+            super::MAX_APPLICATIONS,
+            SERVER_LIMITS.message,
+            Some(Shape::Application),
+        ),
+        (Shape::Application, 1) => bytes(1, super::MAX_ID, None),
+        (Shape::Application, 2) => bytes(1, super::MAX_NAME, None),
+        (Shape::Application, 3) => bytes(1, super::MAX_DESCRIPTION, None),
+        (Shape::Application, 4) => bytes(super::MAX_KEYWORDS, super::MAX_KEYWORD, None),
+        (Shape::Application, 5) => bytes(1, super::MAX_CATALOGUE_BYTES, None),
+        (Shape::Application, 6) => bytes(
+            super::MAX_ACTIONS,
+            SERVER_LIMITS.message,
+            Some(Shape::Action),
+        ),
+        (Shape::Action, 1) => bytes(1, super::MAX_ACTION_ID, None),
+        (Shape::Action, 2) => bytes(1, super::MAX_NAME, None),
+        (Shape::Error, 1) => bytes(1, 64, None),
+        (Shape::Error, 2) => bytes(1, super::MAX_ERROR_MESSAGE, None),
+        (Shape::Error, 3) => Field::Retry,
+        _ => return None,
+    })
 }
 
 fn scan(mut body: &[u8], shape: Shape, remaining: &mut usize) -> Result<(), Error> {
@@ -155,49 +212,29 @@ fn scan(mut body: &[u8], shape: Shape, remaining: &mut usize) -> Result<(), Erro
             .ok_or(Invalid("Too many catalogue fields"))?;
         let field = fields::field(&mut body)?;
         let number = field.number;
-        let (maximum, limit, child) = match (shape, number) {
-            (Shape::Frame, 1 | 2) => {
-                counts[0] += 1;
-                if counts[0] > 1 {
-                    return Err(Invalid("Duplicate catalogue result").into());
+        let (maximum, limit, child) = match rule(shape, number) {
+            Some(Field::Bytes {
+                maximum,
+                limit,
+                child,
+                exclusive,
+            }) => {
+                if exclusive {
+                    counts[0] += 1;
+                    if counts[0] > 1 {
+                        return Err(Invalid("Duplicate catalogue result").into());
+                    }
                 }
-                (
-                    1,
-                    SERVER_LIMITS.message,
-                    Some(if number == 1 {
-                        Shape::Catalogue
-                    } else {
-                        Shape::Error
-                    }),
-                )
+                (maximum, limit, child)
             }
-            (Shape::Catalogue, 1) => (
-                super::MAX_APPLICATIONS,
-                SERVER_LIMITS.message,
-                Some(Shape::Application),
-            ),
-            (Shape::Application, 1) => (1, super::MAX_ID, None),
-            (Shape::Application, 2) => (1, super::MAX_NAME, None),
-            (Shape::Application, 3) => (1, super::MAX_DESCRIPTION, None),
-            (Shape::Application, 4) => (super::MAX_KEYWORDS, super::MAX_KEYWORD, None),
-            (Shape::Application, 5) => (1, super::MAX_CATALOGUE_BYTES, None),
-            (Shape::Application, 6) => (
-                super::MAX_ACTIONS,
-                SERVER_LIMITS.message,
-                Some(Shape::Action),
-            ),
-            (Shape::Action, 1) => (1, super::MAX_ACTION_ID, None),
-            (Shape::Action, 2) => (1, super::MAX_NAME, None),
-            (Shape::Error, 1) => (1, 64, None),
-            (Shape::Error, 2) => (1, super::MAX_ERROR_MESSAGE, None),
-            (Shape::Error, 3) => {
+            Some(Field::Retry) => {
                 counts[3] += 1;
                 if counts[3] > 1 || field.u32()? > 2 {
                     return Err(Invalid("Invalid catalogue retry value").into());
                 }
                 continue;
             }
-            _ => continue,
+            None => continue,
         };
         counts[number as usize] += 1;
         if counts[number as usize] > maximum {
@@ -212,4 +249,37 @@ fn scan(mut body: &[u8], shape: Shape, remaining: &mut usize) -> Result<(), Erro
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+use crate::desktop::wire::wire_tables::{Row, Table, Wire, numbers};
+
+#[cfg(test)]
+pub(crate) fn tables() -> Vec<(Table, &'static str)> {
+    vec![(table(Shape::Frame), "newport.remote.catalogue.ServerFrame")]
+}
+
+#[cfg(test)]
+#[track_caller]
+fn table(shape: Shape) -> Table {
+    Table::new(format!("catalogue {shape:?}"), move || {
+        numbers()
+            .filter_map(|number| {
+                Some(match rule(shape, number)? {
+                    Field::Bytes {
+                        maximum,
+                        child,
+                        exclusive,
+                        ..
+                    } => Row::new(
+                        number,
+                        child.map_or(Wire::Len, |child| Wire::Message(table(child))),
+                    )
+                    .repeated(maximum > 1)
+                    .oneof(exclusive),
+                    Field::Retry => Row::new(number, Wire::Enum { min: 0, max: 2 }),
+                })
+            })
+            .collect()
+    })
 }

@@ -6,6 +6,8 @@ mod convert;
 mod scan;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use convert::enum_maps;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]

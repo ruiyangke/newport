@@ -1548,6 +1548,14 @@ impl From<lifecycle::Stage> for pb::lifecycle::Stage {
         }
     }
 }
+#[cfg(test)]
+pub(crate) fn enum_maps() -> Vec<crate::desktop::wire::wire_tables::EnumMap> {
+    vec![crate::desktop::wire::wire_tables::enum_map(
+        "newport.remote.apps.Lifecycle.Stage",
+        |value| from_stage(value).ok(),
+        |value| stage(*value),
+    )]
+}
 fn stage(value: lifecycle::Stage) -> i32 {
     pb::lifecycle::Stage::from(value).into()
 }

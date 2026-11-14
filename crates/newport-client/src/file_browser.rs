@@ -1,22 +1,19 @@
 //! Scoped Files reads, independent of rendering and media preparation.
 //! Each slot retains one physical read and only its newest desired replacement.
-use crate::{backend::Backend, desktop_inputs, file_result};
-use newport_protocol::desktop::{self, files};
-use serde_json::Value;
-#[cfg(test)]
-use serde_json::json;
+use crate::{backend::Backend, desktop_inputs};
+use newport_protocol::desktop::{self, configuration::ConnectionScope, files};
 use std::{sync::mpsc, thread, time::Duration};
 
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
-type Reply = Result<Value, String>;
+type Reply = Result<files::Reply, String>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Preview {
     /// Selection identity, including repeated selections of the same path.
     pub token: u64,
     pub path: String,
-    pub data: Option<Value>,
+    pub data: Option<files::Preview>,
     pub error: Option<String>,
     pub pending: bool,
 }
@@ -35,10 +32,10 @@ pub struct Update {
 pub struct Browser {
     backend: Backend,
     server: String,
-    connection: Value,
+    connection: Option<ConnectionScope>,
     retired: bool,
     changed: bool,
-    listing: Option<Value>,
+    listing: Option<files::Listing>,
     attempted: Option<String>,
     canonical: Option<String>,
     listing_pending: bool,
@@ -53,7 +50,7 @@ pub struct Browser {
 }
 impl Browser {
     /// Construction never dispatches a request. The host decides when to read.
-    pub fn new(backend: Backend, server: String, connection: Value) -> Self {
+    pub fn new(backend: Backend, server: String, connection: Option<ConnectionScope>) -> Self {
         Self {
             backend,
             server,
@@ -77,13 +74,13 @@ impl Browser {
     pub fn server(&self) -> &str {
         &self.server
     }
-    pub fn connection(&self) -> &Value {
-        &self.connection
+    pub fn connection(&self) -> Option<&ConnectionScope> {
+        self.connection.as_ref()
     }
     pub fn retired(&self) -> bool {
         self.retired
     }
-    pub fn listing(&self) -> Option<&Value> {
+    pub fn listing(&self) -> Option<&files::Listing> {
         self.listing.as_ref()
     }
     pub fn attempted_path(&self) -> Option<&str> {
@@ -188,7 +185,7 @@ impl Browser {
     }
     /// Move a large raw payload into media preparation once, without changing
     /// the selection's successful state or implicitly refetching it.
-    pub fn take_preview_data(&mut self, token: u64) -> Option<Value> {
+    pub fn take_preview_data(&mut self, token: u64) -> Option<files::Preview> {
         self.preview
             .as_mut()
             .filter(|preview| preview.token == token && !preview.pending)?
@@ -224,7 +221,7 @@ impl Browser {
             self.listing_pending = false;
             match result.and_then(valid_listing) {
                 Ok(value) => {
-                    let canonical = value["path"].as_str().unwrap().to_owned();
+                    let canonical = value.path.clone();
                     update.folder_changed = self.canonical.as_ref() != Some(&canonical);
                     self.canonical = Some(canonical);
                     self.listing_revision = next(self.listing_revision);
@@ -264,9 +261,9 @@ impl Browser {
             return;
         }
         self.listing_reads
-            .launch(&self.backend, &self.server, &self.connection, false);
+            .launch(&self.backend, &self.server, self.connection.as_ref(), false);
         self.preview_reads
-            .launch(&self.backend, &self.server, &self.connection, true);
+            .launch(&self.backend, &self.server, self.connection.as_ref(), true);
     }
 }
 impl Drop for Browser {
@@ -326,7 +323,13 @@ impl ReadSlot {
             active.cancel(backend);
         }
     }
-    fn launch(&mut self, backend: &Backend, server: &str, connection: &Value, preview: bool) {
+    fn launch(
+        &mut self,
+        backend: &Backend,
+        server: &str,
+        connection: Option<&ConnectionScope>,
+        preview: bool,
+    ) {
         if self.active.is_some() {
             return;
         }
@@ -336,7 +339,7 @@ impl ReadSlot {
         let operation = uuid::Uuid::new_v4();
         let request = (|| {
             let server = desktop_inputs::identity(server, "file server identity")?;
-            let expected = Some(desktop_inputs::connection_scope(connection)?);
+            let expected = Some(desktop_inputs::captured(connection)?);
             Ok(if preview {
                 files::Operation::Preview(Box::new(files::PreviewArgs {
                     server,
@@ -413,7 +416,7 @@ fn dispatch(
                     .map_err(|error| error.to_string())
             })
             .and_then(|reply| match reply {
-                desktop::Reply::Files(value) => file_result::project(*value),
+                desktop::Reply::Files(value) => Ok(*value),
                 _ => Err("Unexpected file response".into()),
             });
         let _ = send.send(result);
@@ -429,30 +432,36 @@ fn ready(receiver: &mpsc::Receiver<Reply>) -> Option<Reply> {
         )),
     }
 }
-fn valid_listing(value: Value) -> Reply {
-    if value["path"]
-        .as_str()
-        .is_some_and(|path| !path.is_empty() && path.len() <= 16_384 && !path.contains('\0'))
-        && value["entries"]
-            .as_array()
-            .is_some_and(|entries| entries.len() <= 20_000)
-    {
-        Ok(value)
-    } else {
-        Err("Invalid folder listing from the backend.".into())
+/// The folder a listing reply names, within the sizes the page can show.
+fn valid_listing(reply: files::Reply) -> Result<files::Listing, String> {
+    match reply {
+        files::Reply::List(listing)
+            if !listing.path.is_empty()
+                && listing.path.len() <= 16_384
+                && !listing.path.contains('\0')
+                && listing.entries.len() <= 20_000 =>
+        {
+            Ok(*listing)
+        }
+        _ => Err("Invalid folder listing from the backend.".into()),
     }
 }
-fn valid_preview(value: Value) -> Reply {
-    let supported = (value["kind"] == "text" && value["mime"] == "text/plain")
-        || (value["kind"] == "image"
-            && matches!(
-                value["mime"].as_str(),
-                Some("image/png" | "image/jpeg" | "image/gif" | "image/webp")
-            ));
-    if supported && value["content"].is_string() {
-        Ok(value)
-    } else {
-        Err("Invalid file preview from the backend.".into())
+/// A preview reply the page can draw: plain text or a supported image.
+fn valid_preview(reply: files::Reply) -> Result<files::Preview, String> {
+    match reply {
+        files::Reply::Preview(preview)
+            if match (&preview.kind, &preview.content) {
+                (files::PreviewKind::Text, files::Content::Text(_)) => preview.mime == "text/plain",
+                (files::PreviewKind::Image, files::Content::Binary(_)) => matches!(
+                    preview.mime.as_str(),
+                    "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+                ),
+                _ => false,
+            } =>
+        {
+            Ok(*preview)
+        }
+        _ => Err("Invalid file preview from the backend.".into()),
     }
 }
 

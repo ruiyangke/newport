@@ -1,6 +1,7 @@
 //! Typed desktop account contracts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Phase {
+    #[default]
     Loading,
     SignedOut,
     Waiting,
@@ -32,7 +33,7 @@ pub enum RefusalReason {
     Offline,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Notice {
     pub id: u64,
     pub kind: crate::desktop::account::NoticeKind,
@@ -40,7 +41,7 @@ pub struct Notice {
     pub action: Option<crate::desktop::account::NoticeAction>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct License {
     pub state: Option<String>,
     pub plan: Option<String>,
@@ -53,7 +54,7 @@ pub struct License {
     pub trial_used_here: Option<bool>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Status {
     pub state: crate::desktop::account::Phase,
     pub email: Option<String>,
@@ -62,6 +63,15 @@ pub struct Status {
     pub signing_out: bool,
     pub notice: Option<crate::desktop::account::Notice>,
     pub license_revision: u64,
+}
+
+impl License {
+    /// Whether this computer runs Newport Pro: a paid, complimentary or trial
+    /// plan, on a seat that isn't free.
+    pub fn holds_pro(&self) -> bool {
+        matches!(self.state.as_deref(), Some("active" | "grace" | "trial"))
+            && self.seat.as_deref() != Some("free")
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -46,6 +46,8 @@ pub struct Limits {
     /// A connection with no channels for this long closes.
     pub idle: Duration,
     pub probe: Duration,
+    /// How often a ready link times a ping for [`Link::latency`].
+    pub latency: Duration,
     pub backoff_min: Duration,
     pub backoff_max: Duration,
     pub keepalive: Duration,
@@ -66,6 +68,7 @@ impl Default for Limits {
             open: Duration::from_secs(10),
             idle: Duration::from_secs(60),
             probe: Duration::from_secs(3),
+            latency: Duration::from_secs(5),
             backoff_min: Duration::from_secs(2),
             backoff_max: Duration::from_secs(30),
             keepalive: Duration::from_secs(15),
@@ -108,6 +111,7 @@ impl Want {
 pub struct Link {
     commands: mpsc::UnboundedSender<Command>,
     status: watch::Receiver<Status>,
+    latency: watch::Receiver<Option<Duration>>,
     pressure: watch::Receiver<u64>,
     requests: Arc<AtomicU64>,
 }
@@ -185,6 +189,12 @@ impl Link {
 
     pub fn status(&self) -> watch::Receiver<Status> {
         self.status.clone()
+    }
+
+    /// The round trip of the latest ping on the oldest ready connection, while
+    /// one is ready and the system is awake.
+    pub fn latency(&self) -> watch::Receiver<Option<Duration>> {
+        self.latency.clone()
     }
 
     /// Bumped once for each session request that has to wait for a slot on
@@ -342,6 +352,7 @@ pub(crate) enum Event {
     },
     OpenTimedOut,
     ProbeFailed(ConnectionId),
+    Latency(ConnectionId, Duration),
 }
 
 enum State {
@@ -409,6 +420,9 @@ struct Actor {
     events: mpsc::UnboundedSender<Event>,
     event_receiver: mpsc::UnboundedReceiver<Event>,
     status: watch::Sender<Status>,
+    latency: watch::Sender<Option<Duration>>,
+    /// When the next latency ping is due; unset while none is ready.
+    next_latency: Option<Instant>,
     /// In the order they were opened: the oldest first.
     connections: Vec<Connection>,
     next_connection: ConnectionId,
@@ -444,6 +458,7 @@ impl Actor {
         let (pressure, pressure_receiver) = watch::channel(0);
         let (events, event_receiver) = mpsc::unbounded_channel();
         let (status, status_receiver) = watch::channel(Status::default());
+        let (latency, latency_receiver) = watch::channel(None);
         let host_key = Arc::new(HostKey::new(target.clone(), parts.host_keys));
         let actor = Actor {
             target,
@@ -456,6 +471,8 @@ impl Actor {
             events,
             event_receiver,
             status,
+            latency,
+            next_latency: None,
             connections: Vec::new(),
             next_connection: 0,
             queue: VecDeque::new(),
@@ -478,6 +495,7 @@ impl Actor {
         let link = Link {
             commands,
             status: status_receiver,
+            latency: latency_receiver,
             pressure: pressure_receiver,
             requests: Arc::default(),
         };
@@ -603,6 +621,11 @@ impl Actor {
                 // A failed handshake also disconnects; its attempt reports it.
                 if self.connection(id).is_some_and(|c| c.ready().is_some()) {
                     self.lose(id, Error::Lost(cause));
+                }
+            }
+            Event::Latency(id, rtt) => {
+                if !self.sleeping && self.connection(id).is_some_and(|c| c.ready().is_some()) {
+                    self.latency.send_replace(Some(rtt));
                 }
             }
             Event::ProbeFailed(id) => {
@@ -924,7 +947,45 @@ impl Actor {
             self.start_attempt();
         }
         self.close_idle();
+        self.time_latency();
         self.publish();
+    }
+
+    /// Pings the oldest ready connection when a reading is due.
+    fn time_latency(&mut self) {
+        let sleeping = self.sleeping;
+        let Some(connection) = self
+            .connections
+            .iter_mut()
+            .find(|c| c.ready().is_some())
+            .filter(|_| !sleeping)
+        else {
+            self.next_latency = None;
+            self.latency
+                .send_if_modified(|latency| latency.take().is_some());
+            return;
+        };
+        let now = Instant::now();
+        if self.next_latency.is_some_and(|due| due > now) {
+            return;
+        }
+        self.next_latency = Some(now + self.limits.latency);
+        let Some(handle) = connection.ready().cloned() else {
+            return;
+        };
+        let id = connection.id;
+        let events = self.events.clone();
+        let limit = self.limits.probe;
+        connection.tasks.retain(|task| !task.is_finished());
+        connection.tasks.push(tokio::spawn(async move {
+            let sent = Instant::now();
+            // A ping also returns when the connection drops; a slow or lost
+            // reply is the probe's business, not a reading.
+            let answered = tokio::time::timeout(limit, handle.send_ping()).await;
+            if matches!(answered, Ok(Ok(()))) && !handle.is_closed() {
+                let _ = events.send(Event::Latency(id, sent.elapsed()));
+            }
+        }));
     }
 
     /// Counts each session request that starts waiting while connections are
@@ -1198,6 +1259,9 @@ impl Actor {
                     wake = wake.min(healthy);
                 }
             }
+        }
+        if let Some(due) = self.next_latency {
+            wake = wake.min(due.max(now));
         }
         for connection in &self.connections {
             if let Some(since) = connection.idle_since.filter(|_| connection.leases() == 0) {

@@ -1,11 +1,13 @@
 //! Production onboarding: inspection, explicit consent, then optional integrations.
 use crate::*;
 use gpui_kit::component::spinner::Spinner;
+use newport_protocol::desktop::connection::code as ssh;
 
 pub(super) struct Flow {
-    connection: Value,
+    connection: configuration::ConnectionSettings,
     pub phase: u8,
-    specs: Value,
+    /// What inspecting the server found, once it succeeds.
+    specs: Option<desktop::connection::SetupInspection>,
     browser: bool,
     clipboard: bool,
     pub dismissed: bool,
@@ -27,7 +29,6 @@ pub(super) struct Flow {
 const LOOKUP: &str = "setup-ssh-lookup";
 /// Saving the proxy command the SSH config uses.
 const USE_PROXY: &str = "setup-use-proxy";
-use newport_domain::connection_scope::settings as connection_settings;
 /// Shown before the sharing switches, which start on.
 const SHARING_NOTE: &str =
     "Browser and clipboard sharing are on. Turn off any you don’t want in the next step.";
@@ -42,10 +43,13 @@ impl Newport {
     /// snapshot: the backend checks Needle in the background, never while the
     /// window draws. An unchecked server (`installed` null) is not treated as
     /// missing.
-    pub(super) fn needs_setup(&self, server: &Value) -> bool {
-        server["setupComplete"] != true
-            || server["agentInstallApproved"] == true
-                && self.snapshot["runtime"]["agentStatus"][text(server, "id")]["installed"] == false
+    pub(super) fn needs_setup(&self, server: &configuration::Server) -> bool {
+        !server.setup_complete
+            || server.agent_install_approved
+                && self
+                    .runtime()
+                    .and_then(|runtime| runtime.agent_status(server.id))
+                    .is_some_and(|status| status.installed == Some(false))
     }
     /// A server whose setup is unfinished shows only its setup, whichever
     /// page was open when it was added or selected, Settings included.
@@ -61,7 +65,7 @@ impl Newport {
         let Some(server) = self.selected_server().cloned() else {
             return false;
         };
-        let connection = connection_settings(&server);
+        let connection = server.connection_settings();
         if self
             .setup_flow
             .as_ref()
@@ -74,6 +78,10 @@ impl Newport {
             return true;
         }
         let suggested = self.poll_setup_suggestion(&server);
+        let inspected = match self.connection_reply(&format!("setup-inspect:{}", self.server)) {
+            Some(desktop::connection::Reply::SetupInspect(specs)) => Some((**specs).clone()),
+            _ => None,
+        };
         let Some(flow) = self.setup_flow.as_mut() else {
             return suggested;
         };
@@ -105,7 +113,7 @@ impl Newport {
         }
         if flow.error.is_none() {
             if flow.phase == 0 {
-                flow.specs = resource.value.clone();
+                flow.specs = inspected;
             }
             flow.phase += 1;
             let finished = flow.phase == 3;
@@ -119,50 +127,57 @@ impl Newport {
     /// When connecting fails in a way the SSH config may explain, asks OpenSSH
     /// which proxy command the config uses for the host, and keeps it when it
     /// differs from the saved one.
-    fn poll_setup_suggestion(&mut self, server: &Value) -> bool {
+    fn poll_setup_suggestion(&mut self, server: &configuration::Server) -> bool {
         let Some(flow) = self.setup_flow.as_ref() else {
             return false;
         };
-        let saved = server["proxy"]["command"].as_str();
+        let saved = match &server.proxy {
+            Some(configuration::Proxy::Command(command)) => Some(command.as_str()),
+            _ => None,
+        };
         let relevant = flow.phase == 0
             && !flow.pending
             && match flow.error_code.as_deref() {
-                Some("SSH_PROXY_FAILED" | "SSH_INVALID_PROXY") => saved.is_some(),
-                Some("SSH_UNREACHABLE" | "SSH_TIMED_OUT") => server["proxy"].is_null(),
+                Some(ssh::SSH_PROXY_FAILED | ssh::SSH_INVALID_PROXY) => saved.is_some(),
+                Some(ssh::SSH_UNREACHABLE | ssh::SSH_TIMED_OUT) => server.proxy.is_none(),
                 _ => false,
             };
         if !relevant {
             return false;
         }
-        let host = text(server, "sshHost");
+        let host = server.ssh_host.clone();
         if flow.lookup.as_ref() != Some(&host) {
-            self.request(
+            self.request_typed(
                 LOOKUP,
-                desktop::Operation::Connection(Box::new(
+                Ok(desktop::Operation::Connection(Box::new(
                     desktop::connection::Operation::SshResolve(Box::new(
                         desktop::connection::SshResolveArgs { host: host.clone() },
                     )),
-                )),
+                ))),
             );
             let flow = self.setup_flow.as_mut().expect("checked above");
             flow.lookup = Some(host);
             flow.suggestion = None;
             return true;
         }
-        let Some((value, ok, revision)) = self
+        let Some((ok, revision)) = self
             .resources
             .get(LOOKUP)
             .filter(|r| !r.pending && r.finished_at != flow.lookup_revision)
-            .map(|r| (r.value.clone(), r.error.is_none(), r.finished_at))
+            .map(|r| (r.error.is_none(), r.finished_at))
         else {
             return false;
         };
+        let suggestion = match self.connection_reply(LOOKUP) {
+            Some(desktop::connection::Reply::SshResolve(resolved)) => resolved
+                .proxy_command
+                .clone()
+                .filter(|command| ok && Some(command.as_str()) != saved),
+            _ => None,
+        };
         let flow = self.setup_flow.as_mut().expect("checked above");
         flow.lookup_revision = revision;
-        flow.suggestion = value["proxyCommand"]
-            .as_str()
-            .filter(|command| ok && Some(*command) != saved)
-            .map(str::to_owned);
+        flow.suggestion = suggestion;
         true
     }
     /// Saves the proxy command the SSH config uses; the changed connection
@@ -174,28 +189,26 @@ impl Newport {
         ) else {
             return;
         };
-        server["proxy"] = json!({ "command": command });
-        self.request_result(
+        server.proxy = Some(configuration::Proxy::Command(Box::new(command)));
+        self.request_typed(
             USE_PROXY,
-            desktop_server_record(&server).map(|server| {
-                desktop::Operation::Configuration(Box::new(
-                    desktop::configuration::Operation::SaveServer(Box::new(
-                        desktop::configuration::SaveServerArgs {
-                            server,
-                            password: None,
-                        },
-                    )),
-                ))
-            }),
+            Ok(desktop::Operation::Configuration(Box::new(
+                desktop::configuration::Operation::SaveServer(Box::new(
+                    desktop::configuration::SaveServerArgs {
+                        server,
+                        password: None,
+                    },
+                )),
+            ))),
         );
         cx.notify();
     }
     /// Starts setup on `server` from its inspection.
-    pub(super) fn start_setup(&mut self, server: Value) {
+    pub(super) fn start_setup(&mut self, server: configuration::Server) {
         self.setup_flow = Some(Flow {
-            connection: connection_settings(&server),
+            connection: server.connection_settings(),
             phase: 0,
-            specs: Value::Null,
+            specs: None,
             browser: true,
             clipboard: true,
             dismissed: false,
@@ -208,15 +221,15 @@ impl Newport {
             lookup_revision: None,
             suggestion: None,
         });
-        self.request_result(
+        self.request_typed(
             &format!("setup-inspect:{}", self.server),
-            desktop_server_record(&server).map(|expected_server| {
-                desktop::Operation::Connection(Box::new(
-                    desktop::connection::Operation::SetupInspect(Box::new(
-                        desktop::connection::SetupInspectArgs { expected_server },
-                    )),
-                ))
-            }),
+            Ok(desktop::Operation::Connection(Box::new(
+                desktop::connection::Operation::SetupInspect(Box::new(
+                    desktop::connection::SetupInspectArgs {
+                        expected_server: server,
+                    },
+                )),
+            ))),
         );
     }
     /// Choosing integrations is the last step: close the setup and show the
@@ -225,19 +238,20 @@ impl Newport {
         if let Some(flow) = &mut self.setup_flow {
             flow.dismissed = true;
         }
-        let note = self
-            .resources
-            .get(&format!("setup-finish:{}", self.server))
-            .and_then(|r| r.value.as_str())
-            .filter(|note| !note.is_empty())
-            .map(str::to_owned);
+        let note = match self.connection_reply(&format!("setup-finish:{}", self.server)) {
+            Some(desktop::connection::Reply::SetupFinish(finish)) => {
+                finish.notice.clone().filter(|note| !note.is_empty())
+            }
+            _ => None,
+        };
         self.notification = Some(match note {
             Some(note) => Notification::warning(note),
             None => Notification::success("Server is set up."),
         });
-        self.resources.invalidate("page");
-        self.request_result(
-            "page",
+        self.resources.invalidate("overview");
+        let generation = self.resources.begin("overview");
+        self.dispatch_typed(
+            "overview",
             desktop_server(&self.server).map(|server| {
                 desktop::Operation::Metrics(Box::new(desktop::metrics::Operation::Collect(
                     Box::new(desktop::metrics::CollectArgs {
@@ -247,6 +261,7 @@ impl Newport {
                     }),
                 )))
             }),
+            generation,
         );
         self.refresh();
     }
@@ -257,16 +272,14 @@ impl Newport {
             return;
         };
         flow.dismissed = true;
-        if let Some(server) = self.selected_server().cloned() {
-            self.request_result(
+        if let Some(expected_server) = self.selected_server().cloned() {
+            self.request_typed(
                 &format!("setup-skip:{}", self.server),
-                desktop_server_record(&server).map(|expected_server| {
-                    desktop::Operation::Connection(Box::new(
-                        desktop::connection::Operation::SetupSkip(Box::new(
-                            desktop::connection::SetupSkipArgs { expected_server },
-                        )),
-                    ))
-                }),
+                Ok(desktop::Operation::Connection(Box::new(
+                    desktop::connection::Operation::SetupSkip(Box::new(
+                        desktop::connection::SetupSkipArgs { expected_server },
+                    )),
+                ))),
             );
         }
     }
@@ -277,7 +290,7 @@ impl Newport {
         let Some(flow) = self.setup_flow.as_mut() else {
             return;
         };
-        if flow.pending || flow.connection != connection_settings(&server) || flow.dismissed {
+        if flow.pending || flow.connection != server.connection_settings() || flow.dismissed {
             return;
         }
         let operation = match flow.phase {
@@ -286,7 +299,8 @@ impl Newport {
             2 => "finish",
             _ => return,
         };
-        let request = desktop_server_record(&server).map(|expected_server| match flow.phase {
+        let expected_server = server;
+        let request = match flow.phase {
             0 => desktop::Operation::Connection(Box::new(
                 desktop::connection::Operation::SetupInspect(Box::new(
                     desktop::connection::SetupInspectArgs { expected_server },
@@ -306,7 +320,7 @@ impl Newport {
                     },
                 )),
             )),
-        });
+        };
         flow.pending = true;
         // A retry keeps the failed step on screen, with the button busy, so
         // the page doesn't swap to a spinner and back. Installation shows
@@ -315,7 +329,7 @@ impl Newport {
             flow.error = None;
             flow.error_code = None;
         }
-        self.request_result(&format!("setup-{operation}:{}", self.server), request);
+        self.request_typed(&format!("setup-{operation}:{}", self.server), Ok(request));
         cx.notify();
     }
     pub(super) fn render_server_setup(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -326,28 +340,31 @@ impl Newport {
                 .into_any_element();
         };
         let phase = flow.phase;
-        let specs = &flow.specs;
+        let specs = flow.specs.as_ref();
         let spec_text = format!(
             "{} · {}\n{} CPU cores · {} memory · {} free",
-            specs["os"]
-                .as_str()
+            specs
+                .map(|specs| specs.os.as_str())
                 .filter(|s| !s.is_empty())
                 .unwrap_or("Linux"),
-            specs["arch"].as_str().unwrap_or("Unknown architecture"),
-            specs["cores"]
-                .as_u64()
+            specs.map_or("Unknown architecture", |specs| specs.architecture.as_str()),
+            specs
+                .and_then(|specs| specs.cores)
                 .map(|n| n.to_string())
                 .unwrap_or("—".into()),
-            gib(&specs["memoryKiB"]),
-            gib(&specs["freeKiB"])
+            gib(specs.and_then(|specs| specs.memory_kib)),
+            gib(specs.and_then(|specs| specs.free_kib))
         );
-        let server = self.selected_server().cloned().unwrap_or_default();
-        let name = server["name"].as_str().unwrap_or("this server").to_owned();
+        let total = specs.map(|specs| specs.total as f64);
+        let server = self.selected_server();
+        let name = server
+            .map_or("this server", |server| server.name.as_str())
+            .to_owned();
         let address = format!(
             "{}@{}{}",
-            server["sshUser"].as_str().unwrap_or_default(),
-            server["sshHost"].as_str().unwrap_or_default(),
-            match server["sshPort"].as_u64() {
+            server.map_or("", |server| server.ssh_user.as_str()),
+            server.map_or("", |server| server.ssh_host.as_str()),
+            match server.map(|server| server.ssh_port) {
                 Some(22) | None => String::new(),
                 Some(port) => format!(":{port}"),
             }
@@ -438,13 +455,17 @@ impl Newport {
             if active {
                 let mut body = div().mt(px(8.)).min_w_0().flex().flex_col().gap(px(16.));
                 if flow.pending && !retrying {
-                    let progress = &self.snapshot["runtime"]["agentInstallation"][&self.server];
+                    use configuration::InstallStage;
+                    let progress = self
+                        .server_id()
+                        .and_then(|server| self.runtime()?.agent_installation(server));
+                    let stage = progress.map(|progress| progress.stage);
                     let title = match phase {
                         0 => "Inspecting your server…",
                         1 => {
-                            if progress["stage"] == "uploading" {
+                            if stage == Some(InstallStage::Uploading) {
                                 "Copying the helper…"
-                            } else if progress["stage"] == "verifying" {
+                            } else if stage == Some(InstallStage::Verifying) {
                                 "Checking the helper…"
                             } else {
                                 "Installing the helper…"
@@ -460,16 +481,18 @@ impl Newport {
                             .child(Spinner::new().small())
                             .child(div().text_size(px(crate::ui::FONT_SIZE)).child(title)),
                     );
-                    if phase == 1 && progress["stage"] == "uploading" {
-                        let sent = progress["sent"].as_f64().unwrap_or(0.) / 1048576.;
-                        let total = progress["total"]
-                            .as_f64()
+                    if phase == 1
+                        && let Some(progress) =
+                            progress.filter(|progress| progress.stage == InstallStage::Uploading)
+                    {
+                        let sent = progress.sent as f64 / 1048576.;
+                        let total = Some(progress.total as f64)
                             .filter(|n| *n > 0.)
-                            .or_else(|| specs["total"].as_f64())
+                            .or(total)
                             .unwrap_or(0.)
                             / 1048576.;
-                        let speed = progress["bytesPerSecond"]
-                            .as_f64()
+                        let speed = progress
+                            .bytes_per_second
                             .map(|n| format!("{:.1} KiB/s", n / 1024.))
                             .unwrap_or("Measuring speed…".into());
                         body = body.child(
@@ -486,7 +509,7 @@ impl Newport {
                         } else {
                             "Needle, a small tool for server metrics, Git, and optional browser and clipboard integration. It keeps terminals running after you quit Newport."
                         }))
-                        .child(div().text_size(px(crate::ui::FONT_SIZE)).text_color(cx.theme().muted_foreground).child(format!("{:.1} MiB · copied over SSH",specs["total"].as_f64().unwrap_or(0.)/1048576.)))
+                        .child(div().text_size(px(crate::ui::FONT_SIZE)).text_color(cx.theme().muted_foreground).child(format!("{:.1} MiB · copied over SSH",total.unwrap_or(0.)/1048576.)))
                         .child(div().text_size(px(crate::ui::FONT_SIZE)).text_color(cx.theme().muted_foreground).child(SHARING_NOTE));
                 } else if flow.error.is_none() && phase == 2 {
                     for (browser, label, checked) in [
@@ -862,87 +885,87 @@ fn error_copy(phase: u8, code: Option<&str>) -> ErrorCopy {
         );
     }
     match code {
-        Some("SSH_HOST_KEY_CHANGED") => copy(
+        Some(ssh::SSH_HOST_KEY_CHANGED) => copy(
             "This server’s identity changed.",
             "Its SSH host key doesn’t match the one saved on this computer. Make sure it’s the server you expect before you trust it:",
             None,
         ),
-        Some("SSH_HOST_KEY_REJECTED") => copy(
+        Some(ssh::SSH_HOST_KEY_REJECTED) => copy(
             "Newport can’t trust this server’s identity.",
             "Its SSH host key was refused:",
             None,
         ),
-        Some("SSH_UNREACHABLE") => copy(
+        Some(ssh::SSH_UNREACHABLE) => copy(
             "The server couldn’t be reached.",
             "Check the server address and SSH port, and that SSH is running.",
             Some(server_form::Fix::Address),
         ),
-        Some("SSH_TIMED_OUT") => copy(
+        Some(ssh::SSH_TIMED_OUT) => copy(
             "The server isn’t responding.",
             "Check that it’s online and reachable from your network, then try again.",
             None,
         ),
-        Some("SSH_AUTH_REFUSED") => copy(
+        Some(ssh::SSH_AUTH_REFUSED) => copy(
             "Newport couldn’t sign in.",
             "Check the SSH username and key or password.",
             Some(server_form::Fix::SignIn),
         ),
-        Some("SSH_CREDENTIALS") => copy(
+        Some(ssh::SSH_CREDENTIALS) => copy(
             "Newport couldn’t use this server’s SSH credentials.",
             "Check the key file or saved password for this server.",
             Some(server_form::Fix::SignIn),
         ),
-        Some("SSH_APPROVAL_REQUIRED") => copy(
+        Some(ssh::SSH_APPROVAL_REQUIRED) => copy(
             "The SSH key wasn’t approved.",
             "Try again and approve the request in your SSH agent.",
             None,
         ),
-        Some("SSH_AGENT_UNAVAILABLE") => copy(
+        Some(ssh::SSH_AGENT_UNAVAILABLE) => copy(
             "The SSH agent isn’t available.",
             "Unlock or start your SSH agent, then try again.",
             Some(server_form::Fix::SignIn),
         ),
-        Some("SSH_PROXY_FAILED") => copy(
+        Some(ssh::SSH_PROXY_FAILED) => copy(
             "Newport couldn’t connect through the proxy command.",
             "Check the proxy command in the connection settings. It reported:",
             Some(server_form::Fix::Proxy),
         ),
-        Some("SSH_INVALID_PROXY") => copy(
+        Some(ssh::SSH_INVALID_PROXY) => copy(
             "Newport couldn’t run the proxy command.",
             "Check the proxy command in the connection settings:",
             Some(server_form::Fix::Proxy),
         ),
-        Some("SSH_INVALID_JUMP") => copy(
+        Some(ssh::SSH_INVALID_JUMP) => copy(
             "Newport couldn’t connect through the jump host.",
             "Check which server this one connects through in the connection settings:",
             Some(server_form::Fix::Proxy),
         ),
-        Some("SSH_LOST") => copy(
+        Some(ssh::SSH_LOST) => copy(
             "The connection to the server was lost.",
             "Check your network, then try again.",
             None,
         ),
-        Some("SSH_SESSIONS_DISABLED") => copy(
+        Some(ssh::SSH_SESSIONS_DISABLED) => copy(
             "The server doesn’t allow SSH sessions.",
             "Allow sessions in its SSH settings (MaxSessions), then try again.",
             None,
         ),
-        Some("SSH_CHANNEL_REFUSED") => copy(
+        Some(ssh::SSH_CHANNEL_REFUSED) => copy(
             "The server refused a request from Newport.",
             "Its SSH settings may not allow it. Check them, then try again.",
             None,
         ),
-        Some("SSH_REQUEST_DENIED") => copy(
+        Some(ssh::SSH_REQUEST_DENIED) => copy(
             "The server refused to forward a port.",
             "Another connection may still hold the port. Try again in a moment.",
             None,
         ),
-        Some("SSH_BUSY") => copy(
+        Some(ssh::SSH_BUSY) => copy(
             "Too many requests are waiting for this server.",
             "Wait a moment, then try again.",
             None,
         ),
-        Some("SSH_CLOSED") => copy(
+        Some(ssh::SSH_CLOSED) => copy(
             "The connection closed before setup finished.",
             "Try again.",
             None,
@@ -955,10 +978,8 @@ fn error_copy(phase: u8, code: Option<&str>) -> ErrorCopy {
     }
 }
 
-fn gib(value: &Value) -> String {
-    value
-        .as_f64()
-        .map(|n| format!("{:.1} GiB", n / 1048576.))
+fn gib(kib: Option<u64>) -> String {
+    kib.map(|n| format!("{:.1} GiB", n as f64 / 1048576.))
         .unwrap_or("Unavailable".into())
 }
 
@@ -969,31 +990,19 @@ mod tests {
         self as gpui, AppContext, Context, Entity, IntoElement, Render, TestAppContext, Window,
         div, prelude::*, px, size,
     };
-    use serde_json::json;
+    use newport_protocol::desktop::configuration;
+
+    const ID: uuid::Uuid = uuid::Uuid::from_u128(0x11111111_1111_4111_8111_111111111111);
+    const INSTANCE: uuid::Uuid = uuid::Uuid::from_u128(0x22222222_2222_4222_8222_222222222222);
+    fn command(command: &str) -> Option<configuration::Proxy> {
+        Some(configuration::Proxy::Command(Box::new(command.into())))
+    }
 
     fn typed_owner(
         window: &mut gpui_kit::Window,
         cx: &mut gpui_kit::Context<crate::Newport>,
     ) -> crate::Newport {
-        let mut view = crate::page_perf_tests::owner(window, cx);
-        let old = view.server.clone();
-        let id = "11111111-1111-4111-8111-111111111111";
-        view.server = id.into();
-        view.snapshot["instanceId"] = json!("22222222-2222-4222-8222-222222222222");
-        view.snapshot["config"]["servers"][0]["id"] = json!(id);
-        view.snapshot["config"]["servers"][0]["sshPort"] = json!(22);
-        view.snapshot["config"]["servers"][0]["authMethod"] = json!("publicKey");
-        if let Some(runtime) = view.snapshot["runtime"].as_object_mut() {
-            for values in runtime.values_mut() {
-                if let Some(map) = values.as_object_mut()
-                    && let Some(value) = map.remove(&old)
-                {
-                    map.insert(id.into(), value);
-                }
-            }
-        }
-        view.snapshot["runtime"]["connectionRevisions"][id] = json!(1);
-        view
+        crate::page_perf_tests::owner_at(window, cx, ID, INSTANCE)
     }
     #[gpui::test]
     fn a_failed_proxy_command_offers_the_one_the_ssh_config_uses(cx: &mut TestAppContext) {
@@ -1008,10 +1017,10 @@ mod tests {
             let view = cx.new(|cx| {
                 let mut v = typed_owner(window, cx);
                 v.page = Page::Overview;
-                let server = &mut v.snapshot["config"]["servers"][0];
-                server["setupComplete"] = json!(false);
-                server["sshHost"] = json!("app.box.me.gw");
-                server["proxy"] = json!({"command": "gateway ssh --stdio --prefix gw. %h"});
+                let server = &mut v.snapshot_mut().config.servers[0];
+                server.setup_complete = false;
+                server.ssh_host = "app.box.me.gw".into();
+                server.proxy = command("gateway ssh --stdio --prefix gw. %h");
                 v
             });
             owner = Some(view.clone());
@@ -1054,10 +1063,11 @@ mod tests {
         assert_eq!(args.host, "app.box.me.gw");
         let suffix = "gateway ssh --stdio --suffix gw %h";
         view.update(visual, |v, _| {
-            v.resources.complete(
+            crate::snapshot_fixture::settle_connection(
+                v,
                 &lookup.key,
                 lookup.generation,
-                Ok(json!({"proxyCommand": suffix})),
+                connection::Reply::SshResolve(Box::new(crate::snapshot_fixture::resolved(suffix))),
             );
             assert!(v.poll_setup());
             assert_eq!(
@@ -1102,9 +1112,9 @@ mod tests {
             let view = cx.new(|cx| {
                 let mut v = typed_owner(window, cx);
                 v.page = Page::Overview;
-                let server = &mut v.snapshot["config"]["servers"][0];
-                server["setupComplete"] = json!(false);
-                server["proxy"] = json!({ "command": command });
+                let server = &mut v.snapshot_mut().config.servers[0];
+                server.setup_complete = false;
+                server.proxy = self::command(command);
                 v
             });
             owner = Some(view.clone());
@@ -1139,10 +1149,13 @@ mod tests {
             .find(|r| operation(r).kind() == Kind::ConnectionSshResolve)
             .unwrap();
         view.update(visual, |v, _| {
-            v.resources.complete(
+            crate::snapshot_fixture::settle_connection(
+                v,
                 &lookup.key,
                 lookup.generation,
-                Ok(json!({ "proxyCommand": command })),
+                newport_protocol::desktop::connection::Reply::SshResolve(Box::new(
+                    crate::snapshot_fixture::resolved(command),
+                )),
             );
             v.poll_setup();
             assert!(v.setup_flow.as_ref().unwrap().suggestion.is_none());
@@ -1150,10 +1163,7 @@ mod tests {
     }
 
     fn operation(work: &crate::Work) -> &newport_protocol::desktop::Operation {
-        let crate::request_dispatch::Request::Desktop(operation) = &work.request else {
-            panic!("typed desktop request");
-        };
-        operation
+        work.request.operation().expect("typed desktop request")
     }
     struct Host(Entity<Newport>);
     impl Render for Host {
@@ -1176,9 +1186,9 @@ mod tests {
                 let mut view = typed_owner(window, cx);
                 view.page = Page::Overview;
                 view.setup_flow = Some(super::Flow {
-                    connection: super::connection_settings(view.selected_server().unwrap()),
+                    connection: view.selected_server().unwrap().connection_settings(),
                     phase: 1,
-                    specs: json!({"cores":8,"total":1000}),
+                    specs: Some(crate::snapshot_fixture::inspection(1000)),
                     browser: true,
                     clipboard: true,
                     dismissed: false,
@@ -1199,10 +1209,9 @@ mod tests {
         let view = owner.unwrap();
         view.update(visual, |view, _| {
             assert!(!view.poll_setup() || view.setup_flow.as_ref().is_some_and(|f| f.phase == 1));
-            let id = view.server.clone();
-            let servers = view.snapshot["config"]["servers"].as_array_mut().unwrap();
-            let server = servers.iter_mut().find(|s| s["id"] == id.as_str()).unwrap();
-            server["proxy"] = json!({"command": "nc %h %p"});
+            let servers = &mut view.snapshot_mut().config.servers;
+            let server = servers.iter_mut().find(|s| s.id == ID).unwrap();
+            server.proxy = command("nc %h %p");
             view.poll_setup();
             assert!(
                 view.setup_flow.as_ref().is_none_or(|flow| flow.phase == 0),
@@ -1226,9 +1235,9 @@ mod tests {
                 let mut view = typed_owner(window, cx);
                 view.page = Page::Overview;
                 view.setup_flow = Some(super::Flow {
-                    connection: super::connection_settings(view.selected_server().unwrap()),
+                    connection: view.selected_server().unwrap().connection_settings(),
                     phase: 1,
-                    specs: json!({"cores":8,"total":1000}),
+                    specs: Some(crate::snapshot_fixture::inspection(1000)),
                     browser: true,
                     clipboard: true,
                     dismissed: false,
@@ -1252,9 +1261,8 @@ mod tests {
         view.update(visual, |view, _| {
             view.work = work.into();
             view.replies = inbox;
-            let generation = view.resources.begin("snapshot").unwrap();
-            view.resources
-                .complete("snapshot", generation, Ok(view.snapshot.clone()));
+            let snapshot = view.snapshot.clone().unwrap();
+            crate::snapshot_fixture::accept(view, snapshot);
         });
         page_perf_tests::settle_update_check(&view, visual);
         let notices = visual.new(|cx: &mut Context<usize>| {
@@ -1265,22 +1273,23 @@ mod tests {
             let (generation, mut snapshot) = view.update(visual, |view, _| {
                 (
                     view.resources.begin_refresh("snapshot", false).unwrap(),
-                    view.snapshot.clone(),
+                    view.snapshot.clone().unwrap(),
                 )
             });
-            snapshot["runtime"]["agentInstallation"]["11111111-1111-4111-8111-111111111111"] =
-                json!({"stage":"uploading","sent":sent,"total":1000,"bytesPerSecond":100});
+            crate::snapshot_fixture::set(
+                &mut snapshot.runtime.agent_installation,
+                ID,
+                configuration::InstallProgress {
+                    bytes_per_second: Some(100.),
+                    ..crate::snapshot_fixture::install(
+                        configuration::InstallStage::Uploading,
+                        sent,
+                        1000,
+                    )
+                },
+            );
             replies
-                .send(crate::Completion {
-                    discovery: None,
-                    pdf: None,
-                    pdf_text: None,
-                    image: None,
-                    server: "11111111-1111-4111-8111-111111111111".into(),
-                    key: "snapshot".into(),
-                    generation,
-                    result: Ok(snapshot),
-                })
+                .send(crate::snapshot_fixture::completion(generation, snapshot))
                 .unwrap();
             view.update(visual, |view, cx| view.tick(cx));
             page_perf_tests::frame(visual);
@@ -1289,11 +1298,13 @@ mod tests {
         view.read_with(visual, |view, _| {
             let flow = view.setup_flow.as_ref().unwrap();
             assert_eq!(flow.phase, 1);
-            assert_eq!(flow.specs["cores"], 8);
+            assert_eq!(flow.specs.as_ref().unwrap().cores, Some(8));
             assert!(flow.pending);
             assert_eq!(
-                view.snapshot["runtime"]["agentInstallation"]["11111111-1111-4111-8111-111111111111"]["sent"],
-                300
+                view.runtime()
+                    .and_then(|runtime| runtime.agent_installation(ID))
+                    .map(|progress| progress.sent),
+                Some(300)
             );
         });
     }
@@ -1309,9 +1320,9 @@ mod tests {
                 let mut v = typed_owner(window, cx);
                 v.page = Page::Overview;
                 v.setup_flow = Some(super::Flow {
-                    connection: super::connection_settings(v.selected_server().unwrap()),
+                    connection: v.selected_server().unwrap().connection_settings(),
                     phase: 0,
-                    specs: serde_json::Value::Null,
+                    specs: None,
                     browser: true,
                     clipboard: true,
                     dismissed: false,
@@ -1469,7 +1480,7 @@ mod tests {
                 let mut v = typed_owner(window, cx);
                 // A server just added while another server's Ports page was open.
                 v.page = Page::Ports;
-                v.snapshot["config"]["servers"][0]["setupComplete"] = json!(false);
+                v.snapshot_mut().config.servers[0].setup_complete = false;
                 v
             });
             owner = Some(view.clone());
@@ -1494,17 +1505,23 @@ mod tests {
             // A finished server keeps whatever page was open.
             v.page = Page::Ports;
             v.setup_flow = None;
-            v.snapshot["config"]["servers"][0]["setupComplete"] = json!(true);
+            v.snapshot_mut().config.servers[0].setup_complete = true;
             v.sync_setup_page(cx);
             assert!(v.page == Page::Ports);
             // Not yet checked: no reason to interrupt.
-            v.snapshot["runtime"]["agentStatus"]["11111111-1111-4111-8111-111111111111"] =
-                json!({"installed": null});
+            crate::snapshot_fixture::set(
+                &mut v.snapshot_mut().runtime.agent_status,
+                ID,
+                crate::snapshot_fixture::installation(),
+            );
             v.sync_setup_page(cx);
             assert!(v.page == Page::Ports);
             // Needle found missing on a finished server: setup again.
-            v.snapshot["runtime"]["agentStatus"]["11111111-1111-4111-8111-111111111111"] =
-                json!({"installed": false});
+            crate::snapshot_fixture::set(
+                &mut v.snapshot_mut().runtime.agent_status,
+                ID,
+                crate::snapshot_fixture::installed(false),
+            );
             v.sync_setup_page(cx);
             assert!(v.page == Page::Overview);
             assert!(v.setup_visible());
@@ -1522,10 +1539,13 @@ mod tests {
             let view = cx.new(|cx| {
                 let mut v = typed_owner(window, cx);
                 v.page = Page::Overview;
-                v.snapshot["config"]["servers"][0]["setupComplete"] = json!(false);
-                v.snapshot["config"]["servers"][0]["agentInstallApproved"] = json!(false);
-                v.snapshot["runtime"]["agentStatus"]["11111111-1111-4111-8111-111111111111"] =
-                    json!({"installed": false});
+                v.snapshot_mut().config.servers[0].setup_complete = false;
+                v.snapshot_mut().config.servers[0].agent_install_approved = false;
+                crate::snapshot_fixture::set(
+                    &mut v.snapshot_mut().runtime.agent_status,
+                    ID,
+                    crate::snapshot_fixture::installed(false),
+                );
                 v
             });
             owner = Some(view.clone());
@@ -1549,7 +1569,7 @@ mod tests {
             // Saved: a later window, or a return to this server, has no
             // setup to show, and its pages say Needle isn't set up.
             v.setup_flow = None;
-            v.snapshot["config"]["servers"][0]["setupComplete"] = json!(true);
+            v.snapshot_mut().config.servers[0].setup_complete = true;
             v.sync_setup_page(cx);
             assert!(!v.poll_setup());
             assert!(!v.setup_visible());
@@ -1573,8 +1593,8 @@ mod tests {
             let view = cx.new(|cx| {
                 let mut v = typed_owner(window, cx);
                 v.page = Page::Overview;
-                v.snapshot["config"]["servers"][0]["setupComplete"] = json!(false);
-                v.snapshot["config"]["servers"][0]["agentInstallApproved"] = json!(false);
+                v.snapshot_mut().config.servers[0].setup_complete = false;
+                v.snapshot_mut().config.servers[0].agent_install_approved = false;
                 v
             });
             owner = Some(view.clone());
@@ -1594,9 +1614,25 @@ mod tests {
             operation(&inspect).kind(),
             newport_protocol::desktop::Kind::ConnectionSetupInspect
         );
-        view.update(visual,|v,_| {
-            v.resources.complete(&inspect.key,inspect.generation,Ok(json!({"os":"Ubuntu","arch":"x86_64","cores":4,"memoryKiB":8388608,"freeKiB":44040192,"total":5242880})));
-            v.poll_setup();assert_eq!(v.setup_flow.as_ref().unwrap().phase,1);
+        view.update(visual, |v, _| {
+            crate::snapshot_fixture::settle_connection(
+                v,
+                &inspect.key,
+                inspect.generation,
+                newport_protocol::desktop::connection::Reply::SetupInspect(Box::new(
+                    newport_protocol::desktop::connection::SetupInspection {
+                        os: "Ubuntu".into(),
+                        architecture: "x86_64".into(),
+                        cores: Some(4),
+                        memory_kib: Some(8388608),
+                        free_kib: Some(44040192),
+                        installed: false,
+                        total: 5242880,
+                    },
+                )),
+            );
+            v.poll_setup();
+            assert_eq!(v.setup_flow.as_ref().unwrap().phase, 1);
             // The install step describes the switches as they start.
             let flow = v.setup_flow.as_ref().unwrap();
             assert!(flow.browser && flow.clipboard);
@@ -1642,7 +1678,7 @@ mod tests {
             let flow = v.setup_flow.as_ref().unwrap();
             assert_eq!(flow.phase, 1);
             assert!(flow.pending);
-            assert_eq!(flow.specs["total"], 5242880);
+            assert_eq!(flow.specs.as_ref().unwrap().total, 5242880);
         });
         assert!(requests.try_iter().all(|r| operation(&r).kind()
             != newport_protocol::desktop::Kind::ConnectionSetupInspect
@@ -1651,27 +1687,18 @@ mod tests {
         // Saving consent emits a snapshot before the installation reply arrives.
         // It must not reset the timeline or discard the pending operation/specs.
         view.update(visual, |v, cx| {
-            let mut snapshot = v.snapshot.clone();
-            snapshot["config"]["servers"][0]["agentInstallApproved"] = json!(true);
+            let mut snapshot = v.snapshot.clone().unwrap();
+            snapshot.config.servers[0].agent_install_approved = true;
             v.resources.invalidate("snapshot");
             let generation = v.resources.begin("snapshot").unwrap();
             replies
-                .send(crate::Completion {
-                    discovery: None,
-                    pdf: None,
-                    pdf_text: None,
-                    image: None,
-                    server: v.server.clone(),
-                    key: "snapshot".into(),
-                    generation,
-                    result: Ok(snapshot),
-                })
+                .send(crate::snapshot_fixture::completion(generation, snapshot))
                 .unwrap();
             v.tick(cx);
             let flow = v.setup_flow.as_ref().unwrap();
             assert_eq!(flow.phase, 1);
             assert!(flow.pending);
-            assert_eq!(flow.specs["total"], 5242880);
+            assert_eq!(flow.specs.as_ref().unwrap().total, 5242880);
             assert!(v.resources.get(&install.key).unwrap().pending);
         });
         requests.try_iter().for_each(drop);
@@ -1690,8 +1717,14 @@ mod tests {
         view.update(visual, |v, cx| v.setup_request(cx));
         let retry = requests.try_recv().unwrap();
         view.update(visual, |v, _| {
-            v.resources
-                .complete(&retry.key, retry.generation, Ok(json!(null)));
+            crate::snapshot_fixture::settle_connection(
+                v,
+                &retry.key,
+                retry.generation,
+                newport_protocol::desktop::connection::Reply::SetupInstall(Box::new(
+                    newport_protocol::common::Present {},
+                )),
+            );
             v.poll_setup();
             let f = v.setup_flow.as_ref().unwrap();
             assert_eq!(f.phase, 2);
@@ -1712,22 +1745,13 @@ mod tests {
         );
         requests.try_iter().for_each(drop);
         view.update(visual, |v, cx| {
-            let mut snapshot = v.snapshot.clone();
-            snapshot["config"]["servers"][0]["setupComplete"] = json!(true);
-            snapshot["config"]["servers"][0]["browserEnabled"] = json!(true);
+            let mut snapshot = v.snapshot.clone().unwrap();
+            snapshot.config.servers[0].setup_complete = true;
+            snapshot.config.servers[0].browser_enabled = true;
             v.resources.invalidate("snapshot");
             let generation = v.resources.begin("snapshot").unwrap();
             replies
-                .send(crate::Completion {
-                    discovery: None,
-                    pdf: None,
-                    pdf_text: None,
-                    image: None,
-                    server: v.server.clone(),
-                    key: "snapshot".into(),
-                    generation,
-                    result: Ok(snapshot),
-                })
+                .send(crate::snapshot_fixture::completion(generation, snapshot))
                 .unwrap();
             v.tick(cx);
             assert_eq!(v.setup_flow.as_ref().unwrap().phase, 2);
@@ -1735,11 +1759,16 @@ mod tests {
         });
 
         view.update(visual, |v, _| {
-            v.resources.complete(
+            crate::snapshot_fixture::settle_connection(
+                v,
                 &finish.key,
                 finish.generation,
-                Ok(json!(
-                    "Manual shell setup needed. /home/fixture/.bashrc is a symlink."
+                newport_protocol::desktop::connection::Reply::SetupFinish(Box::new(
+                    newport_protocol::desktop::connection::OptionalNotice {
+                        notice: Some(
+                            "Manual shell setup needed. /home/fixture/.bashrc is a symlink.".into(),
+                        ),
+                    },
                 )),
             );
             v.poll_setup();

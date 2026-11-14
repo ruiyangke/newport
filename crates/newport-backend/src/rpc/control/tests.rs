@@ -174,10 +174,24 @@ async fn skipping_setup_is_saved_without_approving_needle() {
         (false, false),
         "a stale skip changes nothing"
     );
-    fixture
-        .call("setup_skip", json!({"expectedConnection":server}))
-        .await
-        .unwrap();
+    let endpoint = fixture.endpoint.clone();
+    let current = json!({"expectedConnection":server});
+    let reply = tokio::task::spawn_blocking(move || {
+        rpc::test_fixture::execute(
+            endpoint,
+            "setup_skip",
+            current,
+            std::time::Duration::from_secs(60),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        reply,
+        newport_protocol::desktop::Reply::Connection(reply)
+            if matches!(*reply, connection::Reply::SetupSkip(_))
+    ));
     assert_eq!(flags().await, (false, true));
 }
 #[tokio::test]
@@ -355,14 +369,7 @@ impl Fixture {
         .unwrap()
     }
     async fn connection(&self, id: Uuid) -> Value {
-        let snapshot = serde_json::to_value(self.manager.lock().await.snapshot()).unwrap();
-        let server = snapshot["config"]["servers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|server| server["id"] == id.to_string())
-            .unwrap();
-        newport_domain::connection_scope::connection(server, &snapshot)
+        crate::rpc::test_fixture::tuple(&self.manager.lock().await.connection_scope(id).unwrap())
     }
     async fn stop(self) {
         self.manager.lock().await.shutdown().await;
@@ -799,7 +806,10 @@ async fn integration_routes_reject_obsolete_connection_identity_before_any_side_
         let mut manager = fixture.manager.lock().await;
         manager.config.servers.push(server.clone());
         let owner = manager.sessions.session(&server, 0);
-        (manager.connection_scope(server.id).unwrap(), owner)
+        (
+            crate::rpc::test_fixture::tuple(&manager.connection_scope(server.id).unwrap()),
+            owner,
+        )
     };
     let permissions = serde_json::to_value(owner.permissions.snapshot()).unwrap();
     let before = serde_json::to_value(fixture.manager.lock().await.config.clone()).unwrap();
@@ -897,7 +907,7 @@ async fn integration_off_revokes_before_manager_lock_and_supersedes_waiting_enab
     let before = owner.permissions.preference_revisions();
     let mut enable = Box::pin(fixture.call(
         "set_integration_enabled",
-        json!({"id":server.id,"feature":"clipboard","enabled":true,"expectedConnection":expected}),
+        json!({"id":server.id,"feature":"clipboard","enabled":true,"expectedConnection":crate::rpc::test_fixture::tuple(&expected)}),
     ));
     tokio::select! {
         result = &mut enable => panic!("save must wait for manager: {result:?}"),
@@ -908,7 +918,7 @@ async fn integration_off_revokes_before_manager_lock_and_supersedes_waiting_enab
     assert_ne!(owner.permissions.preference_revisions(), before);
     let mut disable = Box::pin(fixture.call(
         "set_clipboard_enabled",
-        json!({"id":server.id,"enabled":false,"expectedConnection":expected}),
+        json!({"id":server.id,"enabled":false,"expectedConnection":crate::rpc::test_fixture::tuple(&expected)}),
     ));
     tokio::select! {
         result = &mut disable => panic!("persistence must wait for manager: {result:?}"),
@@ -969,7 +979,7 @@ async fn server_editor_cannot_replay_old_integration_choices_or_transfer_consent
     fixture
         .call(
             "set_clipboard_enabled",
-            json!({"id":server.id,"enabled":false,"expectedConnection":expected}),
+            json!({"id":server.id,"enabled":false,"expectedConnection":crate::rpc::test_fixture::tuple(&expected)}),
         )
         .await
         .unwrap();

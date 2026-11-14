@@ -94,6 +94,8 @@ pub struct TerminalView {
     /// Text a program copied (tmux, an editor), for the clipboard.
     copied: Option<String>,
     pub status: TerminalStatus,
+    /// What a coding agent running here says it is doing.
+    agent: crate::terminal_agent::AgentStatus,
     pub input_error: Option<String>,
     /// Why Needle couldn't hold this tab's shell, while the ordinary shell
     /// that runs instead does: it ends when the connection does.
@@ -136,9 +138,16 @@ pub struct TerminalView {
     engine: Engine,
     cell: Size<Pixels>,
     bounds: Bounds<Pixels>,
-    /// Top-left of the cell grid: centered in `bounds`, inside the padding.
+    /// Top-left of the cell grid: centered in `bounds`, inside the padding;
+    /// a grid wider or taller than the view starts at its left, or ends at its
+    /// bottom, so the prompt stays in sight.
     grid_origin: Point<Pixels>,
+    /// The size that fits this tab's view, which it asks the shell for.
     dimensions: (u16, u16),
+    /// A held shell's size, which every tab with it open draws it at: the
+    /// size of the computer last used, as tmux's `window-size latest`. Its
+    /// output is drawn for that size, so this tab's grid takes it too.
+    shell: Option<(u16, u16)>,
     resize_pending: bool,
     input: VecDeque<Vec<u8>>,
     input_bytes: usize,
@@ -199,6 +208,7 @@ impl TerminalView {
             focus_subscriptions: Vec::new(),
             focused: false,
             visible: false,
+            agent: Default::default(),
             focus_reporter: FocusReporter::default(),
             title: "Terminal".into(),
             pending_title: None,
@@ -225,6 +235,7 @@ impl TerminalView {
             bounds: Bounds::default(),
             grid_origin: Point::default(),
             dimensions: (80, 24),
+            shell: None,
             resize_pending: false,
             input: VecDeque::new(),
             input_bytes: 0,
@@ -309,13 +320,25 @@ impl TerminalView {
             .is_some_and(|session| !session.is_closed())
     }
     /// State consumed outside the terminal's visible output surface.
-    pub(super) fn tab_presentation(&self) -> (String, TerminalStatus, Option<String>, bool) {
+    pub(super) fn tab_presentation(
+        &self,
+    ) -> (
+        String,
+        TerminalStatus,
+        Option<String>,
+        bool,
+        Option<crate::terminal_agent::AgentPresentation>,
+    ) {
         (
             self.title.clone(),
             self.status.clone(),
             self.input_error.clone(),
             self.active(),
+            self.agent.presentation(),
         )
+    }
+    pub(crate) fn agent(&self) -> Option<crate::terminal_agent::AgentPresentation> {
+        self.agent.presentation()
     }
     /// Detaches from a held shell, which keeps running; ends any other.
     pub fn disconnect(&mut self, cx: &mut Context<Self>) {
@@ -371,6 +394,35 @@ impl TerminalView {
         self.end_acknowledged = false;
         self.held = Some(held);
     }
+    /// What the shell's agent reported, from the server's list, for a tab
+    /// that hasn't attached yet. Returns whether the tab's mark changed.
+    pub(crate) fn show_listed_agent(&mut self, report: Option<&str>) -> bool {
+        if self.session.is_some() {
+            return false;
+        }
+        let before = self.agent.presentation();
+        let status = report.and_then(newport_terminal::ProgramStatus::from_report);
+        self.agent.update(status.as_ref(), false);
+        self.agent.presentation() != before
+    }
+    /// The agent's status as this tab's own terminal last saw it.
+    fn follow_agent(&mut self) {
+        self.agent
+            .update(self.engine.program_statuses().most_urgent(), self.focused);
+    }
+    /// This Mac already saw `report`, its agent's finish, before Newport
+    /// last quit: the tab shows it as seen if the shell still reports it.
+    pub(crate) fn remember_seen(&mut self, report: String) {
+        self.agent.remember_seen(report);
+    }
+    #[cfg(test)]
+    pub(crate) fn see_for_test(&mut self) {
+        self.agent.see();
+    }
+    /// The agent's finish this Mac has seen, as its report, to remember.
+    pub(crate) fn seen_finish(&self) -> Option<String> {
+        self.agent.seen_finish()
+    }
     /// Its held shell's title as the server lists it. Once connected, the
     /// tab hears the title from the shell itself.
     pub(crate) fn show_listed_title(&mut self, title: Option<&str>) -> bool {
@@ -394,6 +446,7 @@ impl TerminalView {
         self.clear_find(cx);
         self.close();
         self.prompted = false;
+        self.shell = None;
         self.engine =
             Engine::new(self.dimensions.0, self.dimensions.1).expect("validated PTY size");
         self.engine
@@ -418,6 +471,8 @@ impl TerminalView {
     }
     fn open(&mut self, cx: &mut Context<Self>) {
         self.open_on_show = false;
+        // A held shell says its size again as the tab attaches.
+        self.shell = None;
         self.command_eligible = false;
         // terminal_open already carries the measured size. Only later layout
         // changes (or recovery) require a separate resize request.
@@ -524,7 +579,13 @@ impl TerminalView {
     }
     fn accept_effects(&mut self, result: newport_terminal::Result<Effects>) -> bool {
         if let Some(effects) = self.engine_result(result) {
-            let changed = effects.redraw || effects.title.is_some() || !effects.replies.is_empty();
+            let changed = effects.redraw
+                || effects.title.is_some()
+                || !effects.replies.is_empty()
+                || effects.program_statuses;
+            if effects.program_statuses {
+                self.follow_agent();
+            }
             self.effects(effects);
             changed
         } else {
@@ -711,6 +772,7 @@ impl TerminalView {
                 self.not_held = None;
             }
             Event::NotHeld(reason) => self.not_held = Some(reason),
+            Event::Size { columns, rows } => self.take_shell_size((columns, rows)),
             Event::Active(active) => {
                 self.holder_active = Some(active);
                 self.activate_pending &= !active || !self.shows_display || !self.used_in_focus;
@@ -721,6 +783,8 @@ impl TerminalView {
                 // showed: what it missed while detached, or a fresh tab's start.
                 let result = self.engine.restore(&state);
                 self.accept_effects(result);
+                // The shell's own terminal replaces what the list said.
+                self.follow_agent();
                 self.selecting = false;
                 self.scroll_remainder = 0.;
                 // The server saw the prompt this tab may never have seen.
@@ -800,7 +864,7 @@ impl TerminalView {
         self.composition.clear();
         self.composition_selection = 0..0;
     }
-    /// Someone used this tab: a key, a paste or a click in it. Its Mac becomes
+    /// Someone used this tab: a key, a paste, a click or a scroll in it. Its Mac becomes
     /// the shell's active one and shows the account's display, which takes
     /// what programs copy. Focus,
     /// visibility and output the tab sends by itself, such as focus or mouse
@@ -841,6 +905,9 @@ impl TerminalView {
         }
         self.focused = focused;
         self.report_focus();
+        if focused && self.agent.see() {
+            cx.notify();
+        }
     }
     /// Another tab, server or page took this tab's place. Its focus is
     /// dropped here, since the window draws the new view before the blur
@@ -903,35 +970,76 @@ impl TerminalView {
                 .floor()
                 .clamp(1., 300.) as u16,
         );
-        // Center the grid: the padding and the space left over by whole
-        // cells are shared equally between opposite edges.
-        let grid = size(
-            cell.width * f32::from(dimensions.0),
-            cell.height * f32::from(dimensions.1),
-        );
-        self.grid_origin = bounds.origin
-            + point(
-                ((bounds.size.width - grid.width) / 2.).floor(),
-                ((bounds.size.height - grid.height) / 2.).floor(),
-            );
         if dimensions != self.dimensions || self.cell != cell {
             self.dimensions = dimensions;
             self.cell = cell;
+            // A held shell takes this size when this computer is used; until
+            // then the grid stays at the shell's.
             self.resize_pending = true;
-            let result = self.engine.resize(
-                dimensions.0,
-                dimensions.1,
-                f32::from(cell.width).ceil().max(1.) as u16,
-                f32::from(cell.height).ceil().max(1.) as u16,
-            );
-            self.accept_effects(result);
+            self.resize_engine();
             self.refresh_find(false, false, cx);
             cx.notify();
         }
+        self.place_grid();
         if self.open_on_show {
             self.open(cx);
             cx.notify();
         }
+    }
+    /// The grid's size: the held shell's, else what fits the view.
+    fn grid(&self) -> (u16, u16) {
+        self.shell.unwrap_or(self.dimensions)
+    }
+    /// The grid differs from the view: the shell has another computer's size.
+    pub(crate) fn sized_elsewhere(&self) -> bool {
+        self.shell.is_some_and(|shell| shell != self.dimensions)
+    }
+    fn resize_engine(&mut self) {
+        let (columns, rows) = self.grid();
+        let result = self.engine.resize(
+            columns,
+            rows,
+            f32::from(self.cell.width).ceil().max(1.) as u16,
+            f32::from(self.cell.height).ceil().max(1.) as u16,
+        );
+        self.accept_effects(result);
+    }
+    /// The held shell's size, from the holder.
+    fn take_shell_size(&mut self, size: (u16, u16)) {
+        if self.shell == Some(size) {
+            return;
+        }
+        self.shell = Some(size);
+        self.resize_engine();
+        self.place_grid();
+    }
+    /// Places the grid in the view. One that fits this computer's size is
+    /// centred: the padding and the space left over by whole cells are shared
+    /// between opposite edges. A shell with another computer's size starts at
+    /// the top left, inside the padding, as tmux draws a window from its
+    /// client's corner; one taller than the view ends at its bottom, where the
+    /// prompt is.
+    fn place_grid(&mut self) {
+        let (columns, rows) = self.grid();
+        let bounds = self.bounds;
+        let grid = size(
+            self.cell.width * f32::from(columns),
+            self.cell.height * f32::from(rows),
+        );
+        let (x, y) = if self.sized_elsewhere() {
+            let y = if grid.height <= bounds.size.height - PADDING.height * 2. {
+                PADDING.height
+            } else {
+                (bounds.size.height - PADDING.height - grid.height).floor()
+            };
+            (PADDING.width, y)
+        } else {
+            (
+                ((bounds.size.width - grid.width) / 2.).floor(),
+                ((bounds.size.height - grid.height) / 2.).floor(),
+            )
+        };
+        self.grid_origin = bounds.origin + point(x, y);
     }
     fn cursor_bounds(&self) -> Bounds<Pixels> {
         let cursor = self
@@ -963,11 +1071,8 @@ impl TerminalView {
             x: position
                 .column
                 .floor()
-                .clamp(0., f64::from(self.dimensions.0 - 1)) as u16,
-            y: position
-                .row
-                .floor()
-                .clamp(0., f64::from(self.dimensions.1 - 1)) as u32,
+                .clamp(0., f64::from(self.grid().0 - 1)) as u16,
+            y: position.row.floor().clamp(0., f64::from(self.grid().1 - 1)) as u32,
         })
     }
     fn link_at(&mut self, position: Point<Pixels>) -> Option<String> {
@@ -1015,7 +1120,7 @@ impl TerminalView {
             return false;
         };
         let top = self.grid_origin.y;
-        let bottom = top + self.cell.height * f32::from(self.dimensions.1);
+        let bottom = top + self.cell.height * f32::from(self.grid().1);
         let distance = if position.y < top {
             f32::from(top - position.y)
         } else if position.y >= bottom {
@@ -1220,6 +1325,12 @@ impl TerminalView {
             f32::from(event.delta.pixel_delta(self.cell.height).y) / f32::from(self.cell.height);
         let lines = self.scroll_remainder.trunc() as i32;
         self.scroll_remainder -= lines as f32;
+        // Scrolling a tab uses it, as tmux counts the wheel: the shell takes
+        // this computer's size.
+        if lines != 0 {
+            self.used();
+            self.flush_input();
+        }
         if self.mouse_reporting(event.modifiers) {
             let action = if lines > 0 {
                 MouseAction::WheelUp
@@ -1459,6 +1570,11 @@ impl Render for TerminalView {
             .then(|| self.link_at(window.mouse_position()))
             .flatten();
         self.visible = true;
+        // A finish on a tab in front of the person is seen, wherever the
+        // window's focus is.
+        if window.is_window_active() && self.agent.see() {
+            cx.notify();
+        }
         if self.focus_subscriptions.is_empty() {
             let focus = self.focus.clone();
             self.focus_subscriptions = vec![
@@ -1480,6 +1596,7 @@ impl Render for TerminalView {
         // The painter owns its draw data. Build it while borrowing the cached
         // frame so normal repaints don't clone every cell and hyperlink twice.
         let alternate_screen = self.alternate_screen();
+        let sized_elsewhere = self.sized_elsewhere();
         let paint = self.engine.frame().map(|frame| {
             let lines = frame.visible_lines();
             let grid = crate::terminal_paint::render_grid(
@@ -1487,7 +1604,8 @@ impl Render for TerminalView {
                 self.dark,
                 cell,
                 self.grid_origin - self.bounds.origin,
-                alternate_screen,
+                alternate_screen && !sized_elsewhere,
+                sized_elsewhere,
                 self.find
                     .as_ref()
                     .map(|find| find.results.matches.as_slice())
@@ -1850,6 +1968,46 @@ mod tests {
             // Never render/open: these tests inspect delivery bytes without a PTY.
             cx.new(|cx| TerminalView::new("unconnected-fixture".into(), cx))
         })
+    }
+
+    #[gpui::test]
+    fn a_held_shell_is_drawn_at_its_own_size_whatever_this_tabs_size(cx: &mut TestAppContext) {
+        let view = fixture(cx);
+        view.update(cx, |view, _| {
+            let own = view.dimensions;
+            view.bounds = gpui::Bounds::new(
+                gpui::point(gpui::px(0.), gpui::px(0.)),
+                gpui::size(
+                    view.cell.width * f32::from(own.0) + super::PADDING.width * 2.,
+                    view.cell.height * f32::from(own.1) + super::PADDING.height * 2.,
+                ),
+            );
+            assert!(!view.sized_elsewhere());
+            // Another computer set the shell's size: its output is drawn for
+            // that size, so the grid takes it, as tmux draws one window size.
+            let other = (own.0 + 20, own.1 - 4);
+            view.receive(Event::Size {
+                columns: other.0,
+                rows: other.1,
+            });
+            assert!(view.sized_elsewhere());
+            assert_eq!(view.grid(), other);
+            // It starts at the top left, inside the padding, not centred.
+            assert_eq!(
+                view.grid_origin,
+                view.bounds.origin + gpui::point(super::PADDING.width, super::PADDING.height)
+            );
+            let frame = view.engine.frame().unwrap();
+            assert_eq!((frame.columns, frame.rows.len() as u16), other);
+            // This computer used it: the shell takes this tab's size again.
+            view.receive(Event::Size {
+                columns: own.0,
+                rows: own.1,
+            });
+            assert!(!view.sized_elsewhere());
+            let frame = view.engine.frame().unwrap();
+            assert_eq!((frame.columns, frame.rows.len() as u16), own);
+        });
     }
 
     fn draft(shell: bool) -> CommandDraft {

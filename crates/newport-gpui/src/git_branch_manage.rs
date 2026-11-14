@@ -4,8 +4,8 @@ use gpui_kit::component::{
     IndexPath,
     select::{SelectDelegate, SelectEvent, SelectItem, SelectState},
 };
-use newport_client::git_branch::{BranchChoices, BranchReview};
-use newport_protocol::git::{Action, Request};
+use newport_client::git_branch::{BranchChoices, BranchPage, BranchReview};
+use newport_protocol::git::{Action, Branch, Request};
 use std::{cell::RefCell, rc::Rc};
 
 const CHOICES: &str = "git-branch-upstreams";
@@ -79,7 +79,7 @@ pub(super) struct Form {
     query_input: Rc<RefCell<String>>,
     query: String,
     search_pending: Option<Instant>,
-    selected_target: Option<Value>,
+    selected_target: Option<Branch>,
     selector_dirty: bool,
     last_page_offset: Option<Pixels>,
     pub(super) needs_review: bool,
@@ -140,7 +140,7 @@ impl Form {
                     .or_else(|| {
                         self.selected_target
                             .as_ref()
-                            .filter(|target| target["reference"]["display"] == self.upstream)
+                            .filter(|target| target.reference.display == self.upstream)
                     })
                     .ok_or("The selected upstream is not loaded or is unavailable.")?,
             )),
@@ -155,15 +155,11 @@ impl Form {
         if let Some(choices) = &self.choices {
             items.extend(choices.candidates(&self.review).map(|entry| {
                 Choice {
-                    reference: text(&entry["reference"], "display"),
+                    reference: entry.reference.display.clone(),
                     title: format!(
                         "{} · {}",
-                        text(&entry["name"], "display"),
-                        if entry["remote"] == true {
-                            "remote"
-                        } else {
-                            "local"
-                        }
+                        entry.name.display,
+                        if entry.remote { "remote" } else { "local" }
                     )
                     .into(),
                     unavailable: false,
@@ -176,7 +172,7 @@ impl Form {
             let cached = self
                 .selected_target
                 .as_ref()
-                .filter(|target| target["reference"]["display"] == self.upstream);
+                .filter(|target| target.reference.display == self.upstream);
             items.insert(
                 1,
                 Choice {
@@ -187,12 +183,8 @@ impl Form {
                             |target| {
                                 format!(
                                     "{} · {}",
-                                    text(&target["name"], "display"),
-                                    if target["remote"] == true {
-                                        "remote"
-                                    } else {
-                                        "local"
-                                    }
+                                    target.name.display,
+                                    if target.remote { "remote" } else { "local" }
                                 )
                             },
                         )
@@ -229,7 +221,7 @@ impl Form {
             }
         });
     }
-    fn settle_choices(&mut self, key: &str, result: Result<Value, String>) {
+    fn settle_choices(&mut self, key: &str, result: Result<BranchPage, String>) {
         let cursor = self.cursor.take();
         let result = result.and_then(|data| {
             if key == CHOICES {
@@ -252,8 +244,8 @@ impl Newport {
         }
         BranchReview::from_entry(
             &self.git_repository_id(),
-            &text(&self.value("git-branch-status"), "snapshot"),
-            &self.git.branches.selected,
+            &self.branch_status_snapshot(),
+            self.git.branches.selected.as_ref()?,
         )
         .ok()
     }
@@ -311,7 +303,7 @@ impl Newport {
                     .or_else(|| {
                         form.selected_target
                             .as_ref()
-                            .filter(|target| target["reference"]["display"] == *value)
+                            .filter(|target| target.reference.display == *value)
                     })
                     .cloned();
                 if !value.is_empty() && target.is_none() {
@@ -440,7 +432,7 @@ impl Newport {
         }
         form.error = None;
         let key = if more { MORE } else { CHOICES };
-        self.request_git(
+        self.request_git_typed(
             key,
             Request::Branches {
                 repo_id,
@@ -461,15 +453,18 @@ impl Newport {
         }
     }
     pub(super) fn branch_choices_completed(&mut self, key: &str) {
-        let data = self.value(key);
-        let error = self
-            .resources
-            .get(key)
-            .and_then(|resource| resource.error.clone());
+        let result = match self.resources.get(key) {
+            Some(resource) => match (&resource.error, resource.git()) {
+                (Some(error), _) => Err(error.clone()),
+                (None, Some(newport_protocol::git::Reply::Branches(page))) => Ok((**page).clone()),
+                (None, _) => Err("Invalid branch listing.".into()),
+            },
+            None => Err("Invalid branch listing.".into()),
+        };
         let Some(form) = self.git.branch_manage.as_mut() else {
             return;
         };
-        form.settle_choices(key, error.map_or(Ok(data), Err));
+        form.settle_choices(key, result);
     }
     fn submit_branch_manage(&mut self, cx: &mut Context<Self>) {
         if !self.git_can_write_branch() {
@@ -478,10 +473,10 @@ impl Newport {
         let Some(form) = &self.git.branch_manage else {
             return;
         };
-        if !form.review.matches(
-            &self.git_repository_id(),
-            &text(&self.value("git-branch-status"), "snapshot"),
-        ) {
+        if !form
+            .review
+            .matches(&self.git_repository_id(), &self.branch_status_snapshot())
+        {
             return;
         }
         let Ok(action) = form.action() else {
@@ -516,10 +511,9 @@ impl Newport {
         };
         let busy = self.git_mutation_blocks_write();
         let stale = form.needs_review
-            || !form.review.matches(
-                &self.git_repository_id(),
-                &text(&self.value("git-branch-status"), "snapshot"),
-            );
+            || !form
+                .review
+                .matches(&self.git_repository_id(), &self.branch_status_snapshot());
         let ready = self.git_can_write_branch() && !stale && form.action().is_ok();
         let loading = [CHOICES, MORE]
             .iter()
@@ -561,20 +555,38 @@ impl Newport {
 #[cfg(test)]
 mod tests {
     use super::{CHOICES, Choices, Form, Kind, MORE};
-    use base64::Engine as _;
     use gpui::component::select::{SelectItem as _, SelectState};
     use gpui::{App, AppContext as _, TestAppContext, Window};
     use gpui_kit as gpui;
-    use newport_client::git_branch::{BranchChoices, BranchReview};
-    use serde_json::{Value, json};
+    use newport_client::git_branch::{BranchChoices, BranchPage, BranchReview};
+    use newport_protocol::git::{
+        Branch, Page, Path, TotalEntries, Tracking, TrackingConfiguration,
+    };
     use std::{cell::RefCell, rc::Rc};
-    fn path(value: &str) -> Value {
-        json!({"display":value,"bytesB64":base64::engine::general_purpose::STANDARD.encode(value)})
+    fn entry(name: &str, remote: bool) -> Branch {
+        let mut branch = crate::git_fixture::branch(name, &"a".repeat(40));
+        branch.reference = Path::new(
+            format!("refs/{}/{name}", if remote { "remotes" } else { "heads" }).as_bytes(),
+        );
+        branch.remote = remote;
+        branch.upstream = Some(Path::new(b"refs/remotes/origin/late"));
+        branch.tracking = Some(Tracking {
+            token: "reviewed".into(),
+            editable: true,
+            configuration: TrackingConfiguration {
+                remote: vec![],
+                merge: vec![],
+            },
+        });
+        branch
     }
-    fn entry(name: &str, remote: bool) -> Value {
-        json!({"name":path(name),"reference":path(&format!("refs/{}/{name}", if remote { "remotes" } else { "heads" })),
-            "oid":{"algorithm":"sha1","hex":"a".repeat(40)},"current":false,"remote":remote,
-            "upstream":path("refs/remotes/origin/late"),"tracking":{"editable":true,"token":"reviewed"}})
+    fn page(snapshot: &str, entries: Vec<Branch>, next: Option<&str>) -> BranchPage {
+        Page {
+            snapshot: snapshot.into(),
+            entries,
+            next_cursor: next.map(Into::into),
+            metadata: TotalEntries { total_entries: 2 },
+        }
     }
     fn fixture(kind: Kind, window: &mut Window, cx: &mut App) -> Form {
         let query_input = Rc::<RefCell<String>>::default();
@@ -613,21 +625,40 @@ mod tests {
         cx.update(gpui_kit::init);
         cx.add_empty_window().update(|window, cx| {
             let mut form = fixture(Kind::Upstream, window, cx);
-            form.settle_choices(CHOICES, Ok(json!({"snapshot":"branches","metadata":{},"entries":[entry("origin/late",true)],"nextCursor":"next"})));
+            form.settle_choices(
+                CHOICES,
+                Ok(page(
+                    "branches",
+                    vec![entry("origin/late", true)],
+                    Some("next"),
+                )),
+            );
             form.cursor = Some("next".into());
             *form.query_input.borrow_mut() = "other".into();
             assert!(form.update_query());
             assert!(form.choices.is_none());
             assert!(form.cursor.is_none());
             assert!(form.search_pending.is_some());
-            assert_eq!(serde_json::to_value(form.action().unwrap()).unwrap()["upstream"], "refs/remotes/origin/late");
+            assert_eq!(
+                serde_json::to_value(form.action().unwrap()).unwrap()["upstream"],
+                "refs/remotes/origin/late"
+            );
             let selected = &form.items()[1];
             assert_eq!(selected.reference, "refs/remotes/origin/late");
             assert_eq!(selected.title.as_ref(), "origin/late · remote");
             assert!(!selected.disabled());
-            assert!(!form.update_query(), "an unchanged query must not restart loading");
-            form.settle_choices(CHOICES, Ok(json!({"snapshot":"filtered","metadata":{},"entries":[entry("origin/other",true)],"nextCursor":null})));
-            assert_eq!(serde_json::to_value(form.action().unwrap()).unwrap()["upstream"], "refs/remotes/origin/late");
+            assert!(
+                !form.update_query(),
+                "an unchanged query must not restart loading"
+            );
+            form.settle_choices(
+                CHOICES,
+                Ok(page("filtered", vec![entry("origin/other", true)], None)),
+            );
+            assert_eq!(
+                serde_json::to_value(form.action().unwrap()).unwrap()["upstream"],
+                "refs/remotes/origin/late"
+            );
             *form.query_input.borrow_mut() = "bad\0query".into();
             assert!(form.update_query());
             assert!(form.error.is_some());
@@ -642,17 +673,46 @@ mod tests {
             form.sync_selector(window, cx);
             assert!(form.action().is_err());
             assert!(form.items().last().unwrap().disabled());
-            assert_eq!(form.selector.read(cx).selected_value(), Some(&form.upstream));
-            form.choices = Some(BranchChoices::from_page(&json!({"snapshot":"branches","metadata":{},"entries":[entry("origin/main",true)],"nextCursor":"next"})).unwrap());
+            assert_eq!(
+                form.selector.read(cx).selected_value(),
+                Some(&form.upstream)
+            );
+            form.choices = Some(
+                BranchChoices::from_page(&page(
+                    "branches",
+                    vec![entry("origin/main", true)],
+                    Some("next"),
+                ))
+                .unwrap(),
+            );
             form.selector_dirty = true;
             form.sync_selector(window, cx);
-            assert_eq!(form.selector.read(cx).selected_value(), Some(&form.upstream));
-            assert!(form.action().is_err(), "the unloaded upstream must not become None");
-            form.choices.as_mut().unwrap().append(&json!({"snapshot":"branches","metadata":{},"entries":[entry("origin/late",true)],"nextCursor":null}),"next").unwrap();
+            assert_eq!(
+                form.selector.read(cx).selected_value(),
+                Some(&form.upstream)
+            );
+            assert!(
+                form.action().is_err(),
+                "the unloaded upstream must not become None"
+            );
+            form.choices
+                .as_mut()
+                .unwrap()
+                .append(
+                    &page("branches", vec![entry("origin/late", true)], None),
+                    "next",
+                )
+                .unwrap();
             form.selector_dirty = true;
             form.sync_selector(window, cx);
-            assert_eq!(form.selector.read(cx).selected_value(), Some(&form.upstream));
-            assert_eq!(serde_json::to_value(form.action().unwrap()).unwrap()["upstream"], "refs/remotes/origin/late");
+            assert_eq!(
+                form.selector.read(cx).selected_value(),
+                Some(&form.upstream)
+            );
+            assert_eq!(
+                serde_json::to_value(form.action().unwrap()).unwrap()["upstream"],
+                "refs/remotes/origin/late"
+            );
             assert!(!form.items().last().unwrap().disabled());
             form.upstream.clear();
             assert!(serde_json::to_value(form.action().unwrap()).unwrap()["upstream"].is_null());
@@ -700,13 +760,26 @@ mod tests {
             form.settle_choices(CHOICES, Err("Queue is full".into()));
             assert_eq!(form.error.as_deref(), Some("Queue is full"));
             assert!(form.cursor.is_none());
-            form.settle_choices(CHOICES, Ok(json!({"snapshot":"branches","metadata":{},"entries":[entry("origin/main",true)],"nextCursor":"next"})));
+            form.settle_choices(
+                CHOICES,
+                Ok(page(
+                    "branches",
+                    vec![entry("origin/main", true)],
+                    Some("next"),
+                )),
+            );
             form.cursor = Some("next".into());
             form.settle_choices(MORE, Err("Queue is full".into()));
-            assert!(form.cursor.is_none(), "a rejected dispatch must permit another page request");
+            assert!(
+                form.cursor.is_none(),
+                "a rejected dispatch must permit another page request"
+            );
             assert_eq!(form.choices.as_ref().unwrap().next_cursor(), Some("next"));
             form.cursor = Some("next".into());
-            form.settle_choices(MORE, Ok(json!({"snapshot":"branches","metadata":{},"entries":[entry("origin/late",true)],"nextCursor":null})));
+            form.settle_choices(
+                MORE,
+                Ok(page("branches", vec![entry("origin/late", true)], None)),
+            );
             assert!(form.error.is_none());
             assert!(form.action().is_ok());
         });

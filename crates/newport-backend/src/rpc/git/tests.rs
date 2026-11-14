@@ -1,6 +1,6 @@
 use super::*;
 use crate::{git::pending::ReceiptState, manager::Manager, model::Server, profile::Store, rpc};
-use newport_protocol::git::Request;
+use newport_protocol::{desktop, git::Request};
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
 use uuid::Uuid;
@@ -113,6 +113,29 @@ impl Fixture {
         .await
         .unwrap()
     }
+    async fn reply(
+        &self,
+        method: &'static str,
+        args: Value,
+    ) -> Result<desktop::git::Reply, String> {
+        let endpoint = self.endpoint.clone();
+        let reply = tokio::task::spawn_blocking(move || {
+            rpc::test_fixture::execute(endpoint, method, args, std::time::Duration::from_secs(30))
+        })
+        .await
+        .unwrap()?;
+        match reply {
+            desktop::Reply::Git(reply) => Ok(*reply),
+            _ => Err("Not a Git reply".into()),
+        }
+    }
+    /// The outcome receipts the backend keeps for `args`' server.
+    async fn receipts(&self, args: Value) -> Result<Vec<desktop::git::Receipt>, String> {
+        match self.reply("git_pending_operations", args).await? {
+            desktop::git::Reply::PendingOperations(receipts) => Ok(receipts.receipts),
+            _ => Err("Not a receipts reply".into()),
+        }
+    }
     async fn request(&self, request: Request) -> Result<Value, String> {
         self.call(
             "git_request",
@@ -158,13 +181,11 @@ async fn oversized_request_is_rejected_before_connection_and_journaling() {
     assert_eq!(error.code, "INVALID_REQUEST");
     assert_eq!(
         fixture
-            .call(
-                "git_pending_operations",
-                json!({"serverId":fixture.server.id})
-            )
+            .receipts(json!({"serverId":fixture.server.id}))
             .await
-            .unwrap(),
-        json!([])
+            .unwrap()
+            .len(),
+        0
     );
     assert!(
         !fixture
@@ -225,7 +246,7 @@ async fn repository_refresh_is_local_and_does_not_wait_for_configuration_storage
     // Invalidating a closed cache must still succeed under a held writer.
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        fixture.call(
+        fixture.reply(
             "git_refresh_repository",
             json!({"serverId":fixture.server.id,"repoId":"checkout-one"}),
         ),
@@ -233,13 +254,16 @@ async fn repository_refresh_is_local_and_does_not_wait_for_configuration_storage
     .await
     .expect("refresh queued behind configuration")
     .unwrap();
-    assert_eq!(result, json!({"repoId":"checkout-one"}));
+    let desktop::git::Reply::RefreshRepository(refreshed) = result else {
+        panic!("not a refresh reply");
+    };
+    assert_eq!(refreshed.repo_id, "checkout-one");
     for args in [
         json!({"serverId":fixture.server.id,"repoId":""}),
         json!({"serverId":fixture.server.id}),
         json!({"serverId":Uuid::new_v4(),"repoId":"checkout-one"}),
     ] {
-        assert!(fixture.call("git_refresh_repository", args).await.is_err());
+        assert!(fixture.reply("git_refresh_repository", args).await.is_err());
     }
     drop(writer);
     fixture.stop().await;
@@ -255,23 +279,14 @@ async fn native_git_receipts_preserve_server_scope_and_require_confirmed_outcome
         .unwrap();
     let args = json!({"serverId":fixture.server.id,"operationId":id});
     let stranger = json!({"serverId":Uuid::new_v4(),"operationId":id});
-    assert_eq!(
-        fixture
-            .call("git_pending_operations", stranger.clone())
-            .await
-            .unwrap(),
-        json!([])
-    );
+    assert!(fixture.receipts(stranger.clone()).await.unwrap().is_empty());
     fixture
         .call("git_acknowledge_operation", stranger)
         .await
         .unwrap();
-    let rows = fixture
-        .call("git_pending_operations", args.clone())
-        .await
-        .unwrap();
-    assert_eq!(rows[0]["operationId"], id.to_string());
-    assert_eq!(rows[0]["state"], "pending");
+    let rows = fixture.receipts(args.clone()).await.unwrap();
+    assert_eq!(rows[0].operation_id, id);
+    assert_eq!(rows[0].state, desktop::git::ReceiptState::Pending);
     assert!(
         fixture
             .call("git_acknowledge_operation", args.clone())
@@ -294,10 +309,7 @@ async fn native_git_receipts_preserve_server_scope_and_require_confirmed_outcome
         .call("git_acknowledge_operation", args.clone())
         .await
         .unwrap();
-    assert_eq!(
-        fixture.call("git_pending_operations", args).await.unwrap(),
-        json!([])
-    );
+    assert!(fixture.receipts(args).await.unwrap().is_empty());
     fixture.stop().await;
 }
 
@@ -488,23 +500,38 @@ mod remote_tests {
                         .all(|i| !i.retiring)
                 );
             }
-            let events = fixture.call("$events", json!({"after":0})).await.unwrap();
-            let events = events["entries"].as_array().unwrap();
+            let endpoint = fixture.endpoint.clone();
+            let batch = tokio::task::spawn_blocking(move || {
+                newport_client::backend::Backend::at_path(endpoint).execute(
+                    desktop::Operation::Events(Box::new(desktop::events::Operation::Poll(
+                        Box::new(desktop::events::PollArgs { after: 0 }),
+                    ))),
+                )
+            })
+            .await
+            .unwrap()
+            .map_err(Into::into)
+            .and_then(newport_client::backend::events_reply)
+            .unwrap();
             assert!(
-                !events.is_empty(),
+                !batch.entries.is_empty(),
                 "Git command output must reach native RPC"
             );
+            let commands: Vec<_> = batch
+                .entries
+                .iter()
+                .map(|desktop::events::Event::GitCommand(command)| command)
+                .collect();
             assert!(
-                events
+                commands
                     .iter()
-                    .all(|event| event["serverId"] == fixture.server.id.to_string())
+                    .all(|command| command.server == fixture.server.id)
             );
             assert!(
-                events
+                commands
                     .iter()
-                    .any(|event| event["operationId"] == commit_id.to_string()
-                        && event["repoId"] == repo_id
-                        && event["entry"].is_object())
+                    .any(|command| command.operation_id == Some(commit_id)
+                        && command.repo_id.as_deref() == Some(repo_id.as_str()))
             );
 
             crate::git::git_disconnect(&fixture.manager, fixture.server.id)
@@ -528,16 +555,11 @@ mod remote_tests {
                     .trim(),
                 "1"
             );
-            let rows = fixture
-                .call("git_pending_operations", args.clone())
-                .await
-                .unwrap();
-            assert_eq!(rows.as_array().unwrap().len(), 3);
+            let rows = fixture.receipts(args.clone()).await.unwrap();
+            assert_eq!(rows.len(), 3);
             assert!(
-                rows.as_array()
-                    .unwrap()
-                    .iter()
-                    .all(|row| row["state"] == "succeeded")
+                rows.iter()
+                    .all(|row| row.state == desktop::git::ReceiptState::Succeeded)
             );
             for id in [init_id, stage_id, commit_id] {
                 fixture
@@ -548,10 +570,7 @@ mod remote_tests {
                     .await
                     .unwrap();
             }
-            assert_eq!(
-                fixture.call("git_pending_operations", args).await.unwrap(),
-                json!([])
-            );
+            assert!(fixture.receipts(args).await.unwrap().is_empty());
             assert!(
                 fixture.request(status_request).await.unwrap()["entries"]
                     .as_array()

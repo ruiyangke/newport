@@ -2,7 +2,7 @@
 //! commands; this module only presents choices and retains unsent form state.
 use super::*;
 use gpui_kit::component::input::InputEvent;
-use newport_domain::compose::{ComposeProject, service_replicas, service_rows};
+use newport_domain::compose::{service_replicas, service_rows};
 use newport_protocol::monitor::compose::Action as ComposeAction;
 
 #[cfg(test)]
@@ -130,8 +130,8 @@ impl ContainersPanel {
         let Some(group) = groups.projects.iter().find(|p| p.name == project) else {
             return;
         };
-        let detail: Option<ComposeProject> = serde_json::from_value(self.compose_value()).ok();
-        if !service_rows(group, detail.as_ref())
+        let detail = self.client.compose_project();
+        if !service_rows(group, detail)
             .iter()
             .any(|row| row.service == service)
         {
@@ -320,12 +320,11 @@ impl ContainersPanel {
         let Some(group) = groups.projects.iter().find(|p| p.name == project) else {
             return div().into_any_element();
         };
-        let detail: Option<ComposeProject> = serde_json::from_value(self.compose_value()).ok();
-        let cli = detail.as_ref().and_then(|p| p.cli.as_ref());
+        let detail = self.client.compose_project();
+        let cli = detail.and_then(|p| p.cli.as_ref());
         let blocked = !self.client.can_compose_run(&project);
-        let missing = compose_services::missing_count(group, detail.as_ref()) > 0;
+        let missing = compose_services::missing_count(group, detail) > 0;
         let builds = detail
-            .as_ref()
             .and_then(|p| p.services.as_ref())
             .is_some_and(|s| s.iter().any(|s| s.build));
         let ids: Vec<_> = group.services.iter().map(|c| c.id.clone()).collect();
@@ -482,7 +481,6 @@ impl ContainersPanel {
             format!(
                 "These act on the project’s existing containers. Up, Pull, Rebuild and Down need the Compose CLI on the server{}",
                 detail
-                    .as_ref()
                     .and_then(|p| p.cli_error.as_deref())
                     .or_else(|| self
                         .client

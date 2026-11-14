@@ -46,6 +46,12 @@ pub enum Event {
     /// The account's display stopped showing on this Mac while the tab is
     /// its shell's active one: the tab's next use shows it again.
     DisplayLost,
+    /// The held shell's size, which every tab with it open draws it at:
+    /// the size of the computer last used, as tmux's `window-size latest`.
+    Size {
+        columns: u16,
+        rows: u16,
+    },
     /// Needle couldn't hold a new tab's shell, for this reason: an ordinary
     /// shell follows, and ends when the connection does.
     NotHeld(String),

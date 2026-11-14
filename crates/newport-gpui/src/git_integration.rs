@@ -1,6 +1,7 @@
 //! Reviewed branch integration and recovery, using the agent's managed-operation flags.
 use super::*;
 use base64::Engine as _;
+use git_listing::StatusPage;
 use gpui_kit::component::input::TextareaState;
 use newport_client::git_conflict::{recovery_allowed, recovery_supported};
 use newport_protocol::git::{Action, ResetMode};
@@ -57,22 +58,29 @@ impl Review {
         self.origin == ReviewOrigin::BranchPicker
     }
 }
-fn branch_target(entry: &Value) -> Option<(String, String)> {
-    let name = entry["name"]["display"].as_str()?;
-    let oid = entry["oid"]["hex"].as_str()?;
-    (entry["current"] == false
-        && !name.is_empty()
+/// The name and tip of a branch other than the current one, when its name
+/// is lossless.
+fn branch_target(entry: Option<&newport_protocol::git::Branch>) -> Option<(String, String)> {
+    let entry = entry.filter(|entry| !entry.current)?;
+    let name = entry.name.display.as_str();
+    let oid = entry.oid.hex.as_str();
+    (!name.is_empty()
         && !oid.is_empty()
-        && entry["name"]["bytesB64"] == base64::engine::general_purpose::STANDARD.encode(name))
+        && entry.name.bytes_b64 == base64::engine::general_purpose::STANDARD.encode(name))
     .then(|| (name.to_owned(), oid.to_owned()))
 }
 impl Newport {
-    fn integration_status(&self, origin: ReviewOrigin) -> Value {
+    fn integration_status(&self, origin: ReviewOrigin) -> Option<&StatusPage> {
         if origin == ReviewOrigin::Changes {
-            self.git.page.clone()
+            self.git.status_page()
         } else {
-            self.value(origin.resource_key())
+            self.git_status(origin.resource_key())
         }
+    }
+    /// The snapshot of `origin`'s status, or nothing before one loads.
+    fn integration_snapshot(&self, origin: ReviewOrigin) -> String {
+        self.integration_status(origin)
+            .map_or_else(|| "—".into(), |status| status.snapshot.clone())
     }
     pub(super) fn integration_ready(&self) -> bool {
         ReviewOrigin::workspace(self.git.tab)
@@ -81,8 +89,8 @@ impl Newport {
     fn integration_ready_from(&self, origin: ReviewOrigin) -> bool {
         origin.active(self.git.tab, self.git.branches.open)
             && !self.git_mutation_blocks_write()
-            && self.git.repo["capabilities"]["readOnly"] == false
-            && self.git.repo["capabilities"]["workingTree"] == true
+            && self.git.writable()
+            && self.git.has_working_tree()
             && if origin == ReviewOrigin::BranchPicker {
                 self.git.branches.error.is_none()
             } else {
@@ -92,33 +100,37 @@ impl Newport {
                 .resources
                 .get(origin.resource_key())
                 .is_some_and(|r| !r.pending && r.error.is_none())
-            && self.integration_status(origin)["snapshot"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty())
+            && self
+                .integration_status(origin)
+                .is_some_and(|status| !status.snapshot.is_empty())
     }
     pub(super) fn can_integrate_branch(&self) -> bool {
         self.git.branches.open
             && !self.git_branch_review_open()
             && self.git.integration_review.is_none()
             && self.integration_ready_from(ReviewOrigin::BranchPicker)
-            && self.value("git-branch-status")["metadata"]["integration"].is_null()
-            && self.value("git-branch-status")["metadata"]["head"]["detached"] == false
-            && self.value("git-branch-status")["metadata"]["head"]["oid"]["hex"].is_string()
+            && self.git_status("git-branch-status").is_some_and(|status| {
+                status.metadata.integration.is_none()
+                    && !status.metadata.head.detached
+                    && status.metadata.head.oid.is_some()
+            })
             && self
                 .resources
                 .get("git-branches")
                 .is_some_and(|r| !r.pending && r.error.is_none())
-            && branch_target(&self.git.branches.selected).is_some()
+            && branch_target(self.git.branches.selected.as_ref()).is_some()
     }
     pub(super) fn prepare_branch_integration(&mut self, kind: &str, cx: &mut Context<Self>) {
         if !self.can_integrate_branch() {
             return;
         }
-        let Some((name, oid)) = branch_target(&self.git.branches.selected) else {
+        let Some((name, oid)) = branch_target(self.git.branches.selected.as_ref()) else {
             return;
         };
-        let status = self.integration_status(ReviewOrigin::BranchPicker);
-        let current = text(&status["metadata"]["head"]["name"], "display");
+        let current = self
+            .integration_status(ReviewOrigin::BranchPicker)
+            .and_then(|status| status.metadata.head.name.as_ref())
+            .map_or_else(|| "—".into(), |name| name.display.clone());
         let (title, detail, action) = match kind {
             "merge" => (
                 format!("Merge {name} into {current}"),
@@ -149,7 +161,7 @@ impl Newport {
             id: uuid::Uuid::new_v4(),
             origin: ReviewOrigin::BranchPicker,
             action,
-            snapshot: text(&status, "snapshot"),
+            snapshot: self.integration_snapshot(ReviewOrigin::BranchPicker),
             title,
             detail: format!("{detail} Reviewed target: {oid}"),
             reset_confirmed: false,
@@ -168,8 +180,11 @@ impl Newport {
         let Some(origin) = ReviewOrigin::workspace(self.git.tab) else {
             return;
         };
-        let status = self.integration_status(origin);
-        if !self.integration_ready() || !recovery_allowed(&status, kind) {
+        if !self.integration_ready()
+            || !self
+                .integration_status(origin)
+                .is_some_and(|status| recovery_allowed(status, kind))
+        {
             return;
         }
         let (title, detail) = match kind {
@@ -205,7 +220,7 @@ impl Newport {
                 "integration.skip" => Action::IntegrationSkip {},
                 _ => return,
             },
-            snapshot: text(&status, "snapshot"),
+            snapshot: self.integration_snapshot(origin),
             title: title.into(),
             detail: detail.into(),
             reset_confirmed: false,
@@ -221,7 +236,7 @@ impl Newport {
         };
         let status = self.integration_status(review.origin);
         if !self.integration_ready_from(review.origin)
-            || review.snapshot != text(&status, "snapshot")
+            || review.snapshot != self.integration_snapshot(review.origin)
         {
             return;
         }
@@ -233,7 +248,10 @@ impl Newport {
         {
             return;
         }
-        let expected_head = status["metadata"]["head"]["oid"]["hex"].as_str();
+        let expected_head = status
+            .and_then(|status| status.metadata.head.oid.as_ref())
+            .map(|oid| oid.hex.clone());
+        let expected_head = expected_head.as_deref();
         match &action {
             Action::Reset { expected_oid, .. }
                 if !git_reset::ready(&action, review.reset_confirmed)
@@ -308,7 +326,7 @@ impl Newport {
                     if !this.integration_ready_from(review.origin) {
                         return;
                     }
-                    let snapshot = text(&this.integration_status(review.origin), "snapshot");
+                    let snapshot = this.integration_snapshot(review.origin);
                     if let Some(review) = this.git.integration_review.as_mut()
                         && review.select_mainline(id, &snapshot, index)
                     {
@@ -323,24 +341,25 @@ impl Newport {
             return div().into_any_element();
         }
         let status = self.integration_status(origin);
-        let state = &status["metadata"]["integration"];
         let review = self
             .git
             .integration_review
             .as_ref()
             .filter(|review| review.origin == origin);
-        let show_recovery = origin != ReviewOrigin::BranchPicker && state.is_object();
-        if review.is_none() && !show_recovery {
+        let recovery = status.filter(|status| {
+            origin != ReviewOrigin::BranchPicker && status.metadata.integration.is_some()
+        });
+        if review.is_none() && recovery.is_none() {
             return div().into_any_element();
         }
         let mut view = div().flex().flex_col().gap_2().px_4().py_2();
-        if show_recovery {
+        if let Some(status) = recovery {
             let weak = cx.entity().downgrade();
-            let snapshot = text(&status, "snapshot");
+            let snapshot = status.snapshot.clone();
             let server = self.server.clone();
             let repo = self.git_repository_id();
             view = view.child(recovery_banner(
-                &status,
+                status,
                 !self.integration_ready(),
                 self.git.integration_review.is_none(),
                 move |kind, window, cx| {
@@ -348,7 +367,7 @@ impl Newport {
                         if this.server == server
                             && this.git_repository_id() == repo
                             && origin.active(this.git.tab, this.git.branches.open)
-                            && text(&this.integration_status(origin), "snapshot") == snapshot
+                            && this.integration_snapshot(origin) == snapshot
                         {
                             this.prepare_integration_recovery(kind, window, cx);
                         }
@@ -357,7 +376,7 @@ impl Newport {
             ));
         }
         if let Some(review) = review.filter(|_| self.project_dialog_rendering) {
-            let stale = review.snapshot != text(&status, "snapshot");
+            let stale = review.snapshot != self.integration_snapshot(origin);
             view = view
                 .child(
                     div()
@@ -460,8 +479,13 @@ impl Newport {
         view.into_any_element()
     }
 }
-fn recovery_name(status: &Value) -> &'static str {
-    match status["metadata"]["integration"]["kind"].as_str() {
+fn recovery_name(status: &StatusPage) -> &'static str {
+    match status
+        .metadata
+        .integration
+        .as_ref()
+        .map(|state| state.kind.as_str())
+    {
         Some("merge") => "Merge",
         Some("cherry_pick") => "Cherry-pick",
         Some("revert") => "Revert",
@@ -469,27 +493,21 @@ fn recovery_name(status: &Value) -> &'static str {
         _ => "Git operation",
     }
 }
-fn recovery_heading(status: &Value) -> String {
-    let state = &status["metadata"]["integration"];
-    let mut title = format!("{} in progress", recovery_name(status));
-    if let (Some(position), Some(total)) = (state["position"].as_u64(), state["total"].as_u64())
-        && total > 0
-        && position <= total
-    {
-        title.push_str(&format!(" · {position} of {total}"));
-    }
-    title
+fn recovery_heading(status: &StatusPage) -> String {
+    format!("{} in progress", recovery_name(status))
 }
 fn recovery_banner(
-    status: &Value,
+    status: &StatusPage,
     disabled: bool,
     show_controls: bool,
     on_action: impl Fn(&'static str, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    let managed = status["metadata"]["integration"]["managed"] == true;
-    let conflicts = rows(&status["entries"])
-        .iter()
-        .any(|entry| entry["conflicted"] == true);
+    let managed = status
+        .metadata
+        .integration
+        .as_ref()
+        .is_some_and(|state| state.managed);
+    let conflicts = status.entries.iter().any(|entry| entry.conflicted);
     let detail = if !managed {
         "This operation cannot be managed by Newport. Finish it with the tool that started it, then refresh."
     } else if conflicts {
@@ -588,8 +606,29 @@ mod tests {
         Styled as _, TestAppContext, Window, div, px,
     };
 
+    use crate::git_fixture::{commit, object, status_entry, status_page};
+    use newport_protocol::git::IntegrationState;
+    fn integration(kind: &str) -> IntegrationState {
+        IntegrationState {
+            kind: kind.into(),
+            managed: true,
+            can_continue: true,
+            can_abort: true,
+            can_skip: false,
+        }
+    }
+    fn conflicted(conflicted: bool) -> newport_protocol::git::StatusEntry {
+        let mut entry = status_entry("file", "file");
+        entry.conflicted = conflicted;
+        entry
+    }
+    fn merge_commit(oid: &str) -> newport_protocol::git::Commit {
+        let mut detail = commit(oid, "Merge");
+        detail.parents = vec![object(&"b".repeat(40)), object(&"c".repeat(40))];
+        detail
+    }
     struct RecoveryHost {
-        status: serde_json::Value,
+        status: crate::git_listing::StatusPage,
         actions: Vec<&'static str>,
     }
     impl Render for RecoveryHost {
@@ -617,7 +656,11 @@ mod tests {
         let mut host = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|_| RecoveryHost {
-                status: serde_json::json!({"metadata":{"integration":{"kind":"merge","managed":true,"canContinue":true,"canAbort":true,"canSkip":false}},"entries":[{"conflicted":true}]}),
+                status: {
+                    let mut status = status_page("s", vec![conflicted(true)], None);
+                    status.metadata.integration = Some(integration("merge"));
+                    status
+                },
                 actions: Vec::new(),
             });
             host = Some(view.clone());
@@ -654,7 +697,7 @@ mod tests {
             host.read_with(cx, |view, _| assert_eq!(view.actions, expected));
         }
         host.update(cx, |view, cx| {
-            view.status["entries"] = serde_json::json!([{"conflicted":false}]);
+            view.status.entries = vec![conflicted(false)];
             cx.notify();
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -672,7 +715,7 @@ mod tests {
             assert_eq!(view.actions, ["integration.abort", "integration.continue"])
         });
         host.update(cx, |view, cx| {
-            view.status["metadata"]["integration"]["managed"] = serde_json::json!(false);
+            view.status.metadata.integration.as_mut().unwrap().managed = false;
             cx.notify();
         });
         cx.update(|window, cx| {
@@ -686,17 +729,13 @@ mod tests {
     }
 
     #[test]
-    fn recovery_title_uses_readable_names_and_valid_progress() {
-        let mut status = serde_json::json!({"metadata":{"integration":{"kind":"rebase","position":2,"total":5}}});
-        assert_eq!(
-            super::recovery_heading(&status),
-            "Rebase in progress · 2 of 5"
-        );
-        status["metadata"]["integration"]["position"] = serde_json::json!(6);
+    fn recovery_title_uses_readable_names() {
+        let mut status = status_page("s", vec![], None);
+        status.metadata.integration = Some(integration("rebase"));
         assert_eq!(super::recovery_heading(&status), "Rebase in progress");
-        status["metadata"]["integration"]["kind"] = serde_json::json!("cherry_pick");
+        status.metadata.integration = Some(integration("cherry_pick"));
         assert_eq!(super::recovery_heading(&status), "Cherry-pick in progress");
-        status["metadata"]["integration"]["kind"] = serde_json::json!("unknown");
+        status.metadata.integration = Some(integration("unknown"));
         assert_eq!(
             super::recovery_heading(&status),
             "Git operation in progress"
@@ -735,7 +774,7 @@ mod tests {
             cx.set_reduce_motion(true);
         });
         let oid = "a".repeat(40);
-        let detail = serde_json::json!({"oid":{"hex":oid},"parents":[{"hex":"b".repeat(40)},{"hex":"c".repeat(40)}]});
+        let detail = merge_commit(&oid);
         let mut host = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|_| ReplayHost {
@@ -805,7 +844,7 @@ mod tests {
     #[test]
     fn parent_menu_cannot_edit_a_replaced_or_stale_review() {
         let oid = "a".repeat(40);
-        let detail = serde_json::json!({"oid":{"hex":oid},"parents":[{"hex":"b".repeat(40)},{"hex":"c".repeat(40)}]});
+        let detail = merge_commit(&oid);
         let id = uuid::Uuid::new_v4();
         let mut review = super::Review {
             id,
@@ -833,18 +872,21 @@ mod tests {
         );
     }
     use super::{ReviewOrigin, branch_target, recovery_allowed};
-    use serde_json::json;
     #[test]
     fn recovery_obeys_agent_flags_and_conflicts() {
-        let mut status = json!({"metadata":{"integration":{"managed":true,"canContinue":true,"canAbort":true,"canSkip":false}},"entries":[]});
+        let mut status = status_page("s", vec![], None);
+        status.metadata.integration = Some(integration("merge"));
         assert!(recovery_allowed(&status, "integration.continue"));
         assert!(recovery_allowed(&status, "integration.abort"));
         assert!(!recovery_allowed(&status, "integration.skip"));
-        status["entries"] = json!([{"conflicted":true}]);
+        status.entries = vec![conflicted(true)];
         assert!(!recovery_allowed(&status, "integration.continue"));
-        status["metadata"]["integration"]["managed"] = json!(false);
+        status.metadata.integration.as_mut().unwrap().managed = false;
         assert!(!recovery_allowed(&status, "integration.abort"));
-        assert!(branch_target(&json!({"name":{"display":"topic","bytesB64":"/w=="},"oid":{"hex":"abc"},"current":false})).is_none());
+        let mut lossy = crate::git_fixture::branch("topic", "abc");
+        lossy.name.bytes_b64 = "/w==".into();
+        assert!(branch_target(Some(&lossy)).is_none());
+        assert!(branch_target(Some(&crate::git_fixture::branch("topic", "abc"))).is_some());
     }
     #[test]
     fn opening_picker_does_not_retarget_workspace_review_status() {

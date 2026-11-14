@@ -1,6 +1,5 @@
 //! Snapshot-bound immutable Git blob pages, independent of presentation.
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde_json::Value;
+use newport_protocol::git::{BlobFragment, BlobMetadata, Page};
 use std::sync::Arc;
 #[derive(Default)]
 pub struct Content {
@@ -14,41 +13,33 @@ pub struct Content {
     pub text: Option<Arc<String>>,
 }
 impl Content {
-    pub fn append(&mut self, value: &Value) -> Result<(), String> {
+    pub fn append(&mut self, page: &Page<BlobFragment, BlobMetadata>) -> Result<(), String> {
         let invalid =
             || "Conflict preview response does not match the requested content.".to_owned();
-        let snapshot = value["snapshot"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(invalid)?;
-        let size = value["metadata"]["size"].as_u64().ok_or_else(invalid)?;
-        if (self.size.is_some() && self.cursor.is_none())
-            || value["metadata"]["oid"]["hex"] != self.oid
+        let snapshot = page.snapshot.as_str();
+        let size = page.metadata.size;
+        if snapshot.is_empty()
+            || (self.size.is_some() && self.cursor.is_none())
+            || page.metadata.oid.hex != self.oid
             || (!self.snapshot.is_empty() && self.snapshot != snapshot)
             || self.size.is_some_and(|n| n != size)
         {
             return Err(invalid());
         }
-        let entries = value["entries"].as_array().ok_or_else(invalid)?;
         let mut chunk = Vec::new();
-        for entry in entries {
-            if entry["offset"].as_u64() != Some((self.bytes.len() + chunk.len()) as u64) {
+        for entry in &page.entries {
+            if entry.offset != (self.bytes.len() + chunk.len()) as u64 {
                 return Err(invalid());
             }
-            let encoded = entry["bytesB64"]
-                .as_str()
-                .filter(|s| s.len() <= 87384)
-                .ok_or_else(invalid)?;
-            let bytes = STANDARD.decode(encoded).map_err(|_| invalid())?;
-            chunk.extend(bytes);
+            chunk.extend_from_slice(&entry.bytes_b64.0);
             if chunk.len() > 65536 {
                 return Err(invalid());
             }
         }
-        let next = match &value["nextCursor"] {
-            Value::Null => None,
-            Value::String(s) if !s.is_empty() => Some(s.clone()),
-            _ => return Err(invalid()),
+        let next = match &page.next_cursor {
+            None => None,
+            Some(s) if !s.is_empty() => Some(s.clone()),
+            Some(_) => return Err(invalid()),
         };
         let end = (self.bytes.len() + chunk.len()) as u64;
         if end > size
@@ -108,9 +99,24 @@ impl Content {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-    fn page(oid: &str, bytes: &[u8], offset: usize, size: usize, cursor: Value) -> Value {
-        json!({"snapshot":"snapshot","metadata":{"oid":{"hex":oid},"size":size},"entries":[{"offset":offset,"bytesB64":STANDARD.encode(bytes)}],"nextCursor":cursor})
+    use newport_protocol::git::{Binary, ObjectId};
+    type BlobPage = Page<BlobFragment, BlobMetadata>;
+    fn page(oid: &str, bytes: &[u8], offset: usize, size: usize, cursor: Option<&str>) -> BlobPage {
+        Page {
+            snapshot: "snapshot".into(),
+            entries: vec![BlobFragment {
+                offset: offset as u64,
+                bytes_b64: Binary(bytes.to_vec()),
+            }],
+            next_cursor: cursor.map(Into::into),
+            metadata: BlobMetadata {
+                oid: ObjectId {
+                    algorithm: "sha1".into(),
+                    hex: oid.into(),
+                },
+                size: size as u64,
+            },
+        }
     }
     #[test]
     fn invalid_utf8_matches_text_decoder_but_nul_marks_binary() {
@@ -120,20 +126,18 @@ mod tests {
             ..Default::default()
         };
         value
-            .append(&page(&oid, b"a\xff\xe2", 0, 4, json!("next")))
+            .append(&page(&oid, b"a\xff\xe2", 0, 4, Some("next")))
             .unwrap();
         assert_eq!(value.text.as_ref().unwrap().as_str(), "a�");
-        value.append(&page(&oid, b"z", 3, 4, Value::Null)).unwrap();
+        value.append(&page(&oid, b"z", 3, 4, None)).unwrap();
         assert_eq!(value.text.as_ref().unwrap().as_str(), "a��z");
         assert!(!value.binary);
-        assert!(value.append(&page(&oid, b"", 4, 4, Value::Null)).is_err());
+        assert!(value.append(&page(&oid, b"", 4, 4, None)).is_err());
         let mut value = Content {
             oid: oid.clone(),
             ..Default::default()
         };
-        value
-            .append(&page(&oid, b"\xe2", 0, 1, Value::Null))
-            .unwrap();
+        value.append(&page(&oid, b"\xe2", 0, 1, None)).unwrap();
         assert_eq!(value.text.as_ref().unwrap().as_str(), "�");
     }
     #[test]
@@ -143,22 +147,18 @@ mod tests {
             oid: oid.clone(),
             ..Default::default()
         };
-        value
-            .append(&page(&oid, b"a", 0, 3, json!("next")))
-            .unwrap();
+        value.append(&page(&oid, b"a", 0, 3, Some("next"))).unwrap();
         let previous = value.text.clone().unwrap();
         for candidate in [
-            page(&oid, b"b", 1, 4, Value::Null),
-            page(&oid, b"b", 1, 3, json!("next")),
-            page(&oid, b"b", 1, 3, Value::Null),
+            page(&oid, b"b", 1, 4, None),
+            page(&oid, b"b", 1, 3, Some("next")),
+            page(&oid, b"b", 1, 3, None),
         ] {
             assert!(value.append(&candidate).is_err());
             assert_eq!(value.bytes, b"a");
             assert!(Arc::ptr_eq(&previous, value.text.as_ref().unwrap()));
         }
-        value
-            .append(&page(&oid, b"\0b", 1, 3, Value::Null))
-            .unwrap();
+        value.append(&page(&oid, b"\0b", 1, 3, None)).unwrap();
         assert!(value.binary && value.text.is_none());
     }
     #[test]
@@ -170,21 +170,21 @@ mod tests {
         };
         let bytes = "a😀z".as_bytes();
         preview
-            .append(&page(&oid, &bytes[..3], 0, bytes.len(), json!("next")))
+            .append(&page(&oid, &bytes[..3], 0, bytes.len(), Some("next")))
             .unwrap();
         assert!(!preview.binary);
         assert_eq!(preview.text.as_ref().unwrap().as_str(), "a");
-        let mut wrong = page(&oid, &bytes[3..], 3, bytes.len(), Value::Null);
-        wrong["metadata"]["oid"]["hex"] = json!("b".repeat(40));
+        let mut wrong = page(&oid, &bytes[3..], 3, bytes.len(), None);
+        wrong.metadata.oid.hex = "b".repeat(40);
         assert!(preview.append(&wrong).is_err());
         assert_eq!(preview.bytes, bytes[..3]);
         assert!(
             preview
-                .append(&page(&oid, &bytes[3..], 2, bytes.len(), Value::Null))
+                .append(&page(&oid, &bytes[3..], 2, bytes.len(), None))
                 .is_err()
         );
         preview
-            .append(&page(&oid, &bytes[3..], 3, bytes.len(), Value::Null))
+            .append(&page(&oid, &bytes[3..], 3, bytes.len(), None))
             .unwrap();
         assert_eq!(preview.text.as_ref().unwrap().as_str(), "a😀z");
         assert!(preview.cursor.is_none());
@@ -192,9 +192,7 @@ mod tests {
             oid: oid.clone(),
             ..Default::default()
         };
-        binary
-            .append(&page(&oid, b"a\0b", 0, 3, Value::Null))
-            .unwrap();
+        binary.append(&page(&oid, b"a\0b", 0, 3, None)).unwrap();
         assert!(binary.binary);
     }
 }

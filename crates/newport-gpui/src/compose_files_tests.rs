@@ -1,18 +1,19 @@
 use super::ContainersPanel;
 use crate::containers::tests::{
-    FakeBackend, click, compose_project, draw, fixture, select, settle, snapshot,
+    FakeBackend, click, compose_file, compose_project, draw, fixture, select, settle, snapshot,
 };
 use gpui_kit as gpui;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, point, px, size};
-use serde_json::{Value, json};
+use newport_protocol::monitor::compose;
 
 const FIRST: &str = "/srv/stack/compose.yml";
 const SECOND: &str = "/srv/override/compose.yml";
 
-fn files(items: Value) -> Value {
-    let mut project = compose_project();
-    project["files"] = items;
-    project
+fn files(files: Vec<compose::File>) -> compose::Project {
+    compose::Project {
+        files,
+        ..compose_project()
+    }
 }
 fn refresh(panel: &Entity<ContainersPanel>, cx: &mut VisualTestContext) {
     panel.update(cx, |p, _| p.client.retry_compose());
@@ -55,10 +56,10 @@ fn click_tab(cx: &mut VisualTestContext, path: &str) {
     draw(cx);
 }
 fn populate(backend: &FakeBackend) {
-    backend.set_compose_project(Ok(files(json!([
-        {"path":FIRST,"text":"services: first","error":null},
-        {"path":SECOND,"text":"services: second","error":null}
-    ]))));
+    backend.set_compose_project(Ok(files(vec![
+        compose_file(FIRST, Some("services: first"), None),
+        compose_file(SECOND, Some("services: second"), None),
+    ])));
 }
 
 #[gpui::test]
@@ -71,10 +72,10 @@ fn file_identity_survives_reorder_and_local_switch_does_not_fetch(cx: &mut TestA
     assert_eq!(text(&panel, cx), "services: second");
     assert_eq!(backend.count("compose_project"), reads);
     let editor = panel.read_with(cx, |p, _| p.files.editor.entity_id());
-    backend.set_compose_project(Ok(files(json!([
-        {"path":SECOND,"text":"services: second","error":null},
-        {"path":FIRST,"text":"services: first","error":null}
-    ]))));
+    backend.set_compose_project(Ok(files(vec![
+        compose_file(SECOND, Some("services: second"), None),
+        compose_file(FIRST, Some("services: first"), None),
+    ])));
     refresh(&panel, cx);
     assert_eq!(
         panel.read_with(cx, |p, _| p.files.editor.entity_id()),
@@ -84,9 +85,11 @@ fn file_identity_survives_reorder_and_local_switch_does_not_fetch(cx: &mut TestA
         panel.read_with(cx, |p, _| p.files.selected_path.clone()),
         Some(SECOND.into())
     );
-    backend.set_compose_project(Ok(files(json!([
-        {"path":FIRST,"text":"services: first","error":null}
-    ]))));
+    backend.set_compose_project(Ok(files(vec![compose_file(
+        FIRST,
+        Some("services: first"),
+        None,
+    )])));
     refresh(&panel, cx);
     assert_ne!(
         panel.read_with(cx, |p, _| p.files.editor.entity_id()),
@@ -105,14 +108,14 @@ fn many_file_tabs_reveal_keyboard_selection_without_extra_reads(cx: &mut TestApp
     let (panel, cx, backend) = fixture(cx);
     let items: Vec<_> = (0..20)
         .map(|i| {
-            json!({
-                "path":format!("/srv/project/compose-{i:02}-development.yml"),
-                "text":format!("services: {{service_{i}: {{}}}}"),
-                "error":null
-            })
+            compose_file(
+                &format!("/srv/project/compose-{i:02}-development.yml"),
+                Some(&format!("services: {{service_{i}: {{}}}}")),
+                None,
+            )
         })
         .collect();
-    backend.set_compose_project(Ok(files(json!(items))));
+    backend.set_compose_project(Ok(files(items)));
     open(&panel, cx);
     let reads = backend.count("compose_project");
     click_tab(cx, "/srv/project/compose-00-development.yml");
@@ -131,12 +134,16 @@ fn many_file_tabs_reveal_keyboard_selection_without_extra_reads(cx: &mut TestApp
 #[gpui::test]
 fn file_errors_keep_readable_content_and_never_leak_previous_text(cx: &mut TestAppContext) {
     let (panel, cx, backend) = fixture(cx);
-    let mut project = files(json!([
-        {"path":FIRST,"text":"services: truncated","error":"Preview truncated"},
-        {"path":SECOND,"text":null,"error":"Permission denied"}
-    ]));
-    project["configError"] = json!("Missing environment variable");
-    project["services"] = Value::Null;
+    let mut project = files(vec![
+        compose_file(
+            FIRST,
+            Some("services: truncated"),
+            Some("Preview truncated"),
+        ),
+        compose_file(SECOND, None, Some("Permission denied")),
+    ]);
+    project.config_error = Some("Missing environment variable".into());
+    project.services = None;
     backend.set_compose_project(Ok(project));
     open(&panel, cx);
     assert!(has_label(
@@ -153,9 +160,7 @@ fn file_errors_keep_readable_content_and_never_leak_previous_text(cx: &mut TestA
     assert_eq!(text(&panel, cx), "");
     assert!(has_label(cx, "Permission denied"));
     assert!(cx.debug_bounds("compose-file-editor").is_none());
-    backend.set_compose_project(Ok(files(json!([
-        {"path":SECOND,"text":"","error":null}
-    ]))));
+    backend.set_compose_project(Ok(files(vec![compose_file(SECOND, Some(""), None)])));
     click(cx, "Try reading files again");
     settle(&panel, cx);
     assert!(!has_label(cx, "Fixture connection unavailable"));
@@ -163,16 +168,16 @@ fn file_errors_keep_readable_content_and_never_leak_previous_text(cx: &mut TestA
         cx.debug_bounds("compose-file-editor").is_some(),
         "empty readable files still have an editor"
     );
-    backend.set_compose_project(Ok(files(json!([]))));
+    backend.set_compose_project(Ok(files(vec![])));
     refresh(&panel, cx);
     assert!(has_label(
         cx,
         "No compose file is recorded for this project."
     ));
     assert!(cx.debug_bounds("compose-file-editor").is_none());
-    let mut unavailable = files(json!([]));
-    unavailable["configError"] = json!("Permission denied");
-    unavailable["services"] = Value::Null;
+    let mut unavailable = files(vec![]);
+    unavailable.config_error = Some("Permission denied".into());
+    unavailable.services = None;
     backend.set_compose_project(Ok(unavailable));
     refresh(&panel, cx);
     assert!(has_label(
@@ -231,7 +236,7 @@ fn refresh_preserves_editor_viewport_and_resize_uses_remaining_height(cx: &mut T
     let content: String = (0..2000)
         .map(|i| format!("  service-{i}: {{image: example}}\n"))
         .collect();
-    let project = files(json!([{"path":FIRST,"text":content,"error":null}]));
+    let project = files(vec![compose_file(FIRST, Some(&content), None)]);
     backend.set_compose_project(Ok(project.clone()));
     open(&panel, cx);
     let editor = panel.read_with(cx, |p, _| p.files.editor.clone());
@@ -252,7 +257,7 @@ fn refresh_preserves_editor_viewport_and_resize_uses_remaining_height(cx: &mut T
         scroll
     );
     let mut changed = project;
-    changed["files"][0]["text"] = json!(format!("{content}  new-service: {{image: new}}\n"));
+    changed.files[0].text = Some(format!("{content}  new-service: {{image: new}}\n"));
     backend.set_compose_project(Ok(changed));
     refresh(&panel, cx);
     assert_eq!(

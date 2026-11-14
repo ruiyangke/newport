@@ -7,7 +7,6 @@ use newport_protocol::{
         applications::{Identity, Launched, Observation, Runtime},
     },
 };
-use serde_json::json;
 use std::{collections::BTreeSet, sync::Condvar, thread};
 
 fn observations(rows: Vec<Observation>) -> protocol::Reply {
@@ -41,15 +40,29 @@ fn interrupted(message: &str) -> Error {
     )
 }
 
+/// A connection scope of a new server reached through a jump host.
+fn connection_scope() -> desktop::configuration::ConnectionScope {
+    desktop::configuration::ConnectionScope {
+        settings: desktop::configuration::ConnectionSettings {
+            server_id: uuid::Uuid::new_v4(),
+            ssh_host: "host".into(),
+            ssh_user: "user".into(),
+            ssh_port: 22,
+            auth_method: desktop::configuration::AuthMethod::PublicKey,
+            identity_file: None,
+            agent_source: None,
+            agent_key_fingerprint: None,
+            proxy: Some(desktop::configuration::Proxy::Jump(Box::new(
+                uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap(),
+            ))),
+        },
+        connection_revision: 0,
+        backend_instance: uuid::Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap(),
+    }
+}
 fn scope() -> Scope {
-    let id = uuid::Uuid::new_v4().to_string();
-    // As the app makes it, including a server reached through a jump host.
-    let server = json!({"id":id,"sshHost":"host","sshUser":"user","sshPort":22,"authMethod":"publicKey","proxy":{"jump":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}});
-    let expected = newport_domain::connection_scope::connection(
-        &server,
-        &json!({"instanceId":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"}),
-    );
-    Scope::new(&id, expected).unwrap()
+    let expected = connection_scope();
+    Scope::new(&expected.settings.server_id.to_string(), expected).unwrap()
 }
 fn handle(request: u64) -> Handle {
     Handle {
@@ -384,7 +397,14 @@ fn known_admission_refusals_preserve_account_actions() {
         )),
         Status::Refused { .. }
     ));
-    assert!(Scope::new(&uuid::Uuid::new_v4().to_string(), Value::Null).is_err());
+    assert!(Scope::new(&uuid::Uuid::new_v4().to_string(), connection_scope()).is_err());
+    let mut invalid = connection_scope();
+    invalid.settings.ssh_host = "host\0".into();
+    let server = invalid.settings.server_id.to_string();
+    assert!(
+        Scope::new(&server, invalid).is_err(),
+        "an invalid scope is refused"
+    );
 }
 
 #[test]

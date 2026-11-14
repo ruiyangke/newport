@@ -363,10 +363,6 @@ fn exercise(installer: &Path, destination: &Path, variant: Variant) -> Result<()
         "Installed grammars failed"
     );
     let original = fingerprint(destination, variant)?;
-    ensure!(
-        wait(Command::new(destination.join("newport.exe")).arg("--check-pdf"))?.success(),
-        "Installed PDF renderer failed"
-    );
     // Locking the DLL fails after the old executable has already moved to the
     // backup. That case verifies actual rollback, not just refusal at entry.
     for name in ["newport.exe", "grammars/newport_grammar_json.dll"] {
@@ -420,7 +416,6 @@ fn exercise(installer: &Path, destination: &Path, variant: Variant) -> Result<()
         "Fonts",
         "agents",
         "grammars",
-        "pdfium",
         "Licenses",
         ".newport-install-stage",
         ".newport-install-backup",

@@ -39,7 +39,7 @@ pub struct StatusFilter {
     pub group: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Side {
     HeadToIndex,
@@ -453,7 +453,7 @@ pub enum Action {
     },
 }
 
-/// Presentation of diff line fragments in the desktop JSON projection.
+/// A compact representation the agent can page diff line fragments in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiffLineEncoding {
     #[serde(rename = "tuple_v1")]

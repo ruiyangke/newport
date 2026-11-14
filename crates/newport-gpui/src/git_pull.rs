@@ -1,7 +1,7 @@
 //! Explicit remote transfers, with reviewed configuration and status guards.
 use super::*;
 use base64::Engine as _;
-use newport_protocol::git::Request as GitRequest;
+use newport_protocol::git::{Head, Remote, Reply, Request as GitRequest};
 pub(super) struct Form {
     pub id: uuid::Uuid,
     pub needs_review: bool,
@@ -31,44 +31,51 @@ impl Form {
         &self.remote
     }
 }
-pub(super) fn push_source(head: &Value) -> Option<(String, String)> {
-    if head["detached"] != false {
+/// The local branch and commit a push sends: a named, attached HEAD whose
+/// name is lossless.
+pub(super) fn push_source(head: Option<&Head>) -> Option<(String, String)> {
+    let head = head.filter(|head| !head.detached)?;
+    let name = head.name.as_ref()?;
+    if name.bytes_b64 != base64::engine::general_purpose::STANDARD.encode(&name.display) {
         return None;
     }
-    let name = head["name"]["display"].as_str()?;
-    if head["name"]["bytesB64"] != base64::engine::general_purpose::STANDARD.encode(name) {
-        return None;
-    }
-    let branch = name.strip_prefix("refs/heads/")?;
-    let oid = head["oid"]["hex"].as_str()?;
+    let branch = name.display.strip_prefix("refs/heads/")?;
+    let oid = &head.oid.as_ref()?.hex;
     (!branch.is_empty() && !oid.is_empty()).then(|| (branch.to_owned(), oid.to_owned()))
 }
 impl Newport {
     pub(super) fn git_select_remote(&mut self) {
         self.resources.invalidate("git-remote-detail");
         self.git.pull_form = None;
-        let Some(name) = self.git.selected["name"].as_str() else {
+        let Some(name) = self.git.remote_name().map(str::to_owned) else {
             return;
         };
-        self.request_git(
+        self.request_git_typed(
             "git-remote-detail",
             GitRequest::Remote {
                 repo_id: self.git_repository_id(),
-                name: name.into(),
+                name,
             },
         );
     }
+    /// The remote configuration the last detail read returned.
+    pub(super) fn git_remote_detail(&self) -> Option<&Remote> {
+        match self.git_reply("git-remote-detail") {
+            Some(Reply::Remote(remote)) => Some(remote),
+            _ => None,
+        }
+    }
     fn can_prepare_pull(&self) -> bool {
-        let status = self.value("git-remote-status");
-        let remote = self.value("git-remote-detail");
+        let status = self.git_status("git-remote-status");
+        let remote = self.git_remote_detail();
         self.git.tab == 6
             && self.git.settings.is_none()
             && !self.git.settings_open
             && self.git.remote_edit.is_none()
             && !self.git_mutation_blocks_write()
-            && self.git.repo["capabilities"]["readOnly"] == false
-            && self.git.repo["capabilities"]["workingTree"] == true
-            && self.git.repo["bare"] == false
+            && self.git.writable()
+            && self.git.has_working_tree()
+            && self.git.bare() == Some(false)
             && ["git-remote-status", "git-remote-detail"]
                 .iter()
                 .all(|key| {
@@ -76,23 +83,35 @@ impl Newport {
                         .get(key)
                         .is_some_and(|r| !r.pending && r.error.is_none())
                 })
-            && status["snapshot"].as_str().is_some_and(|s| !s.is_empty())
-            && status["metadata"]["integration"].is_null()
-            && status["metadata"]["head"]["detached"] == false
-            && remote["name"] == self.git.selected["name"]
-            && remote["token"].as_str().is_some_and(|s| !s.is_empty())
+            && status.is_some_and(|status| {
+                !status.snapshot.is_empty()
+                    && status.metadata.integration.is_none()
+                    && !status.metadata.head.detached
+            })
+            && remote.is_some_and(|remote| {
+                Some(remote.name.as_str()) == self.git.remote_name() && !remote.token.is_empty()
+            })
     }
     fn prepare_pull(&mut self, push: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_prepare_pull() {
             return;
         }
-        let status = self.value("git-remote-status");
-        let remote = self.value("git-remote-detail");
-        let source = push_source(&status["metadata"]["head"]);
+        let (Some(status), Some(remote)) = (
+            self.git_status("git-remote-status").cloned(),
+            self.git_remote_detail().cloned(),
+        ) else {
+            return;
+        };
+        let source = push_source(Some(&status.metadata.head));
         if push && source.is_none() {
             return;
         }
-        let name = text(&status["metadata"]["head"]["name"], "display");
+        let name = status
+            .metadata
+            .head
+            .name
+            .as_ref()
+            .map_or_else(|| "—".into(), |name| name.display.clone());
         let branch = cx.new(|cx| InputState::new(window, cx).placeholder("Remote branch"));
         branch.update(cx, |input, cx| {
             input.set_value(
@@ -111,9 +130,9 @@ impl Newport {
             id: uuid::Uuid::new_v4(),
             needs_review: false,
             branch,
-            remote: text(&remote, "name"),
-            token: text(&remote, "token"),
-            snapshot: text(&status, "snapshot"),
+            remote: remote.name,
+            token: remote.token,
+            snapshot: status.snapshot,
             push: if push { source } else { None },
             _subscription: subscription,
         });
@@ -179,19 +198,23 @@ impl Newport {
         if !self.can_prepare_pull() {
             return;
         }
-        let status = self.value("git-remote-status");
-        let remote = self.value("git-remote-detail");
+        let (Some(status), Some(remote)) = (
+            self.git_status("git-remote-status").cloned(),
+            self.git_remote_detail().cloned(),
+        ) else {
+            return;
+        };
         let Some(form) = self.git.pull_form.as_mut() else {
             return;
         };
         if form.push.is_some() {
-            let Some(source) = push_source(&status["metadata"]["head"]) else {
+            let Some(source) = push_source(Some(&status.metadata.head)) else {
                 return;
             };
             form.push = Some(source);
         }
-        form.snapshot = text(&status, "snapshot");
-        form.token = text(&remote, "token");
+        form.snapshot = status.snapshot;
+        form.token = remote.token;
         form.needs_review = false;
         cx.notify();
     }
@@ -211,11 +234,11 @@ impl Newport {
                         reviewing
                             || self.git_selected_remote().is_none()
                             || self.git_mutation_blocks_write()
-                            || self.git.repo["capabilities"]["readOnly"] != false,
+                            || !self.git.writable(),
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(remote) = this.git.selected["name"].as_str() {
-                            this.git_fetch(this.git_repository_id(), remote.to_owned(), cx);
+                        if let Some(remote) = this.git.remote_name().map(str::to_owned) {
+                            this.git_fetch(this.git_repository_id(), remote, cx);
                         }
                     })),
             )
@@ -233,8 +256,11 @@ impl Newport {
                     .disabled(
                         !self.can_prepare_pull()
                             || reviewing
-                            || push_source(&self.value("git-remote-status")["metadata"]["head"])
-                                .is_none(),
+                            || push_source(
+                                self.git_status("git-remote-status")
+                                    .map(|status| &status.metadata.head),
+                            )
+                            .is_none(),
                     )
                     .on_click(
                         cx.listener(|this, _, window, cx| this.prepare_pull(true, window, cx)),
@@ -295,18 +321,22 @@ impl Newport {
 #[cfg(test)]
 mod tests {
     use super::push_source;
-    use serde_json::{Value, json};
     #[test]
     fn push_requires_attached_byte_safe_branch_and_tip() {
-        let mut head = json!({"detached":false,"name":{"display":"refs/heads/main","bytesB64":"cmVmcy9oZWFkcy9tYWlu"},"oid":{"hex":"abc"}});
-        assert_eq!(push_source(&head), Some(("main".into(), "abc".into())));
-        head["detached"] = json!(true);
-        assert!(push_source(&head).is_none());
-        head["detached"] = json!(false);
-        head["oid"] = Value::Null;
-        assert!(push_source(&head).is_none());
-        head["oid"] = json!({"hex":"abc"});
-        head["name"]["bytesB64"] = json!("/w==");
-        assert!(push_source(&head).is_none());
+        let mut head = crate::git_fixture::repository("repo").head;
+        head.oid = Some(crate::git_fixture::object("abc"));
+        assert_eq!(
+            push_source(Some(&head)),
+            Some(("main".into(), "abc".into()))
+        );
+        head.detached = true;
+        assert!(push_source(Some(&head)).is_none());
+        head.detached = false;
+        head.oid = None;
+        assert!(push_source(Some(&head)).is_none());
+        head.oid = Some(crate::git_fixture::object("abc"));
+        head.name.as_mut().unwrap().bytes_b64 = "/w==".into();
+        assert!(push_source(Some(&head)).is_none());
+        assert!(push_source(None).is_none());
     }
 }

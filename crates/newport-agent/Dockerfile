@@ -32,12 +32,19 @@ ARG TARGETARCH
 # scripts run again when the version changes.
 ARG NEWPORT_AGENT_VERSION
 ENV NEWPORT_AGENT_VERSION=$NEWPORT_AGENT_VERSION
+# Where in the cache, which every checkout shares, this build compiles. Cargo
+# goes by modification times, so a clean build empties its directory first and
+# after; the locked cache keeps any other build out meanwhile.
+ARG NEWPORT_AGENT_BUILD=shared
 RUN --mount=type=cache,id=newport-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=newport-agent-${TARGETARCH},target=/build/crates/newport-agent/target,sharing=locked \
+    export CARGO_TARGET_DIR="target/$NEWPORT_AGENT_BUILD" && \
+    if [ "$NEWPORT_AGENT_BUILD" = clean ]; then rm -rf "$CARGO_TARGET_DIR"; fi && \
     cargo build --release --locked --bin newport-agent && \
     mkdir /out && \
     case "$TARGETARCH" in amd64) arch=x86_64 ;; arm64) arch=aarch64 ;; *) exit 1 ;; esac && \
-    cp target/release/newport-agent /out/newport-agent-$arch && \
+    cp "$CARGO_TARGET_DIR/release/newport-agent" /out/newport-agent-$arch && \
+    if [ "$NEWPORT_AGENT_BUILD" = clean ]; then rm -rf "$CARGO_TARGET_DIR"; fi && \
     file /out/newport-agent-$arch | grep -E 'static(ally linked|-pie linked)' && \
     /out/newport-agent-$arch --help
 

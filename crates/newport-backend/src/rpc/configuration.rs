@@ -1,40 +1,12 @@
-//! Explicit model-to-contract conversions. Neither crate depends on the other.
+//! Explicit conversions between the backend's models and the desktop contract.
 use super::failure::invalid_result;
 use crate::model;
 use newport_protocol::desktop::{Failure, configuration as dto};
-use serde_json::{Value, json};
 
-pub(super) fn proxy(value: model::Proxy) -> dto::Proxy {
-    match value {
-        model::Proxy::Command(value) => dto::Proxy::Command(Box::new(value)),
-        model::Proxy::Jump(value) => dto::Proxy::Jump(Box::new(value)),
-    }
-}
 pub(super) fn model_proxy(value: &dto::Proxy) -> model::Proxy {
     match value {
         dto::Proxy::Command(value) => model::Proxy::Command(value.as_ref().clone()),
         dto::Proxy::Jump(value) => model::Proxy::Jump(**value),
-    }
-}
-pub(super) fn server(value: model::Server) -> dto::Server {
-    dto::Server {
-        id: value.id,
-        name: value.name,
-        ssh_user: value.ssh_user,
-        ssh_host: value.ssh_host,
-        ssh_port: value.ssh_port,
-        identity_file: value.identity_file,
-        agent_source: value.agent_source,
-        agent_key_fingerprint: value.agent_key_fingerprint,
-        auth_method: match value.auth_method {
-            model::AuthMethod::PublicKey => dto::AuthMethod::PublicKey,
-            model::AuthMethod::Password => dto::AuthMethod::Password,
-        },
-        clipboard_enabled: value.clipboard_enabled,
-        browser_enabled: value.browser_enabled,
-        agent_install_approved: value.agent_install_approved,
-        setup_complete: value.setup_complete,
-        proxy: value.proxy.map(proxy),
     }
 }
 pub(super) fn model_server(value: &dto::Server) -> model::Server {
@@ -57,71 +29,6 @@ pub(super) fn model_server(value: &dto::Server) -> model::Server {
         setup_complete: value.setup_complete,
         proxy: value.proxy.as_ref().map(model_proxy),
     }
-}
-pub(super) fn tunnel(value: model::Tunnel) -> dto::Tunnel {
-    dto::Tunnel {
-        id: value.id,
-        name: value.name,
-        server_id: value.server_id,
-        local_port: value.local_port,
-        local_port_end: value.local_port_end,
-        remote_host: value.remote_host,
-        remote_port: value.remote_port,
-        remote_port_end: value.remote_port_end,
-        auto_connect: value.auto_connect,
-        auto_reconnect: value.auto_reconnect,
-        direction: match value.direction {
-            model::Direction::Local => dto::Direction::Local,
-            model::Direction::Remote => dto::Direction::Remote,
-        },
-        project: value.project,
-    }
-}
-pub(super) fn model_tunnel(value: &dto::Tunnel) -> model::Tunnel {
-    model::Tunnel {
-        id: value.id,
-        name: value.name.clone(),
-        server_id: value.server_id,
-        local_port: value.local_port,
-        local_port_end: value.local_port_end,
-        remote_host: value.remote_host.clone(),
-        remote_port: value.remote_port,
-        remote_port_end: value.remote_port_end,
-        auto_connect: value.auto_connect,
-        auto_reconnect: value.auto_reconnect,
-        direction: match value.direction {
-            dto::Direction::Local => model::Direction::Local,
-            dto::Direction::Remote => model::Direction::Remote,
-        },
-        project: value.project.clone(),
-    }
-}
-
-/// Current business scope comparisons still use the established tuple read
-/// model. Its exact fields are projected here, never serialized generically.
-pub(crate) fn scope(value: &dto::ConnectionScope) -> Value {
-    let settings = &value.settings;
-    let proxy = match &settings.proxy {
-        None => Value::Null,
-        Some(dto::Proxy::Command(command)) => json!({"command": command.as_str()}),
-        Some(dto::Proxy::Jump(id)) => json!({"jump": id.to_string()}),
-    };
-    json!([
-        settings.server_id.to_string(),
-        settings.ssh_host,
-        settings.ssh_user,
-        settings.ssh_port,
-        match settings.auth_method {
-            dto::AuthMethod::PublicKey => "publicKey",
-            dto::AuthMethod::Password => "password",
-        },
-        settings.identity_file,
-        settings.agent_source,
-        settings.agent_key_fingerprint,
-        proxy,
-        value.connection_revision,
-        value.backend_instance.to_string()
-    ])
 }
 pub(super) fn connection_state(value: model::ConnectionState) -> dto::ConnectionState {
     dto::ConnectionState {
@@ -151,12 +58,24 @@ pub(super) fn destination_health(value: model::DestinationHealth) -> dto::Destin
         checked_at: value.checked_at,
     }
 }
-pub(super) fn update_outcome(value: crate::agent_lifecycle::UpdateOutcome) -> dto::UpdateOutcome {
+pub(crate) fn update_outcome(value: crate::agent_lifecycle::UpdateOutcome) -> dto::UpdateOutcome {
     dto::UpdateOutcome {
         at: value.at,
         from: value.from,
         to: value.to,
         error: value.error,
+    }
+}
+pub(crate) fn build_relation(value: crate::agent_lifecycle::BuildRelation) -> dto::BuildRelation {
+    use crate::agent_lifecycle::BuildRelation as Relation;
+    match value {
+        Relation::Unknown => dto::BuildRelation::Unknown,
+        Relation::Missing => dto::BuildRelation::Missing,
+        Relation::Bundled => dto::BuildRelation::Bundled,
+        Relation::Different => dto::BuildRelation::Different,
+        Relation::Older => dto::BuildRelation::Older,
+        Relation::Newer => dto::BuildRelation::Newer,
+        Relation::SameRelease => dto::BuildRelation::SameRelease,
     }
 }
 pub(super) fn installation_status(
@@ -165,15 +84,7 @@ pub(super) fn installation_status(
     dto::InstallationStatus {
         installed: value.installed,
         update_available: value.update_available,
-        build_relation: match value.build_relation {
-            crate::agent_lifecycle::BuildRelation::Unknown => dto::BuildRelation::Unknown,
-            crate::agent_lifecycle::BuildRelation::Missing => dto::BuildRelation::Missing,
-            crate::agent_lifecycle::BuildRelation::Bundled => dto::BuildRelation::Bundled,
-            crate::agent_lifecycle::BuildRelation::Different => dto::BuildRelation::Different,
-            crate::agent_lifecycle::BuildRelation::Older => dto::BuildRelation::Older,
-            crate::agent_lifecycle::BuildRelation::Newer => dto::BuildRelation::Newer,
-            crate::agent_lifecycle::BuildRelation::SameRelease => dto::BuildRelation::SameRelease,
-        },
+        build_relation: build_relation(value.build_relation),
         installed_hash: value.installed_hash,
         bundled_hash: value.bundled_hash,
         installed_version: value.installed_version,
@@ -291,8 +202,8 @@ pub(super) fn snapshot(value: crate::manager::Snapshot) -> Result<dto::Snapshot,
         instance_id: value.instance_id,
         revision: value.revision,
         config: dto::Config {
-            servers: value.config.servers.into_iter().map(server).collect(),
-            tunnels: value.config.tunnels.into_iter().map(tunnel).collect(),
+            servers: value.config.servers.iter().map(dto::Server::from).collect(),
+            tunnels: value.config.tunnels.iter().map(dto::Tunnel::from).collect(),
         },
         load_error: value.load_error,
         runtime: dto::Runtime {
@@ -383,26 +294,45 @@ pub(super) fn snapshot(value: crate::manager::Snapshot) -> Result<dto::Snapshot,
     })
 }
 
-pub(crate) fn matches_scope(
-    server: &model::Server,
-    expected: &dto::ConnectionScope,
-    revision: u64,
-    instance: uuid::Uuid,
-) -> bool {
-    let settings = &expected.settings;
-    server.id == settings.server_id
-        && revision == expected.connection_revision
-        && instance == expected.backend_instance
-        && server.ssh_host == settings.ssh_host
-        && server.ssh_user == settings.ssh_user
-        && server.ssh_port == settings.ssh_port
-        && server.identity_file == settings.identity_file
-        && server.agent_source == settings.agent_source
-        && server.agent_key_fingerprint == settings.agent_key_fingerprint
-        && server.proxy == settings.proxy.as_ref().map(model_proxy)
-        && matches!(
-            (&server.auth_method, settings.auth_method),
-            (model::AuthMethod::PublicKey, dto::AuthMethod::PublicKey)
-                | (model::AuthMethod::Password, dto::AuthMethod::Password)
-        )
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    /// Each read of the same state must encode the same rows, so the desktop
+    /// can tell a refresh that changed nothing from one that did.
+    #[test]
+    fn snapshot_rows_come_in_server_order() {
+        let mut ids: Vec<Uuid> = (0..8).map(|_| Uuid::new_v4()).collect();
+        let mut runtime = crate::manager::Runtime::default();
+        for (revision, id) in ids.iter().enumerate() {
+            runtime.connection_revisions.insert(*id, revision as u64);
+            runtime.clipboard_messages.insert(*id, "message".into());
+        }
+        let snapshot = super::snapshot(crate::manager::Snapshot {
+            instance_id: Uuid::new_v4(),
+            revision: 1,
+            config: Default::default(),
+            runtime,
+            load_error: None,
+        })
+        .unwrap();
+        ids.sort();
+        let order = |rows: Vec<Uuid>| assert_eq!(rows, ids);
+        order(
+            snapshot
+                .runtime
+                .connection_revisions
+                .iter()
+                .map(|row| row.id)
+                .collect(),
+        );
+        order(
+            snapshot
+                .runtime
+                .clipboard_messages
+                .iter()
+                .map(|row| row.id)
+                .collect(),
+        );
+    }
 }

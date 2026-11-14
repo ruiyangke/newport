@@ -1,10 +1,17 @@
 //! Product identity shared by the agent, desktop and release verifier. This
 //! describes compiled protocols, independently of dependencies or permissions.
+use crate::runtime::service;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const VERSION: u32 = 1;
-pub const CORE_SERVICES: &[&str] = &["git", "monitor", "integration", "gui-notices", "lsp"];
+pub const CORE_SERVICES: &[&str] = &[
+    service::GIT,
+    service::MONITOR,
+    service::INTEGRATION,
+    service::GUI_NOTICES,
+    service::LSP,
+];
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -24,7 +31,7 @@ impl Variant {
     pub fn needs(self) -> &'static [(&'static str, u32)] {
         match self {
             Self::Core => &[],
-            Self::Full => &[("remote-apps", 1)],
+            Self::Full => &[(service::REMOTE_APPS, 1)],
         }
     }
 }
@@ -63,7 +70,7 @@ impl Product {
                     || name.starts_with("product-")
                     || !versions(value)
             })
-            || (self.variant == Variant::Core && self.services.contains_key("remote-apps"))
+            || (self.variant == Variant::Core && self.services.contains_key(service::REMOTE_APPS))
         {
             return Err("Invalid agent product protocols".into());
         }

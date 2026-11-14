@@ -3565,6 +3565,7 @@ A new tab's shell that Needle couldn't hold: an ordinary shell runs
 | 7 | `active` | `newport.desktop.stream.Active` | oneof `value` |  |
 | 8 | `display_lost` | `newport.wire.Present` | oneof `value` |  |
 | 9 | `not_held` | `newport.desktop.stream.NotHeld` | oneof `value` |  |
+| 10 | `size` | `newport.desktop.stream.Resize` | oneof `value` | The held shell's size, which every tab with it open draws it at. |
 
 ### `newport.desktop.stream.TerminalServer`
 
@@ -4023,6 +4024,7 @@ Imports: `newport/terminal.proto`, `newport/wire.proto`.
 | 5 | `attached` | `newport.terminal.Attached` | repeated |  |
 | 6 | `started` | `uint64` | optional |  |
 | 7 | `exited` | `bool` | optional |  |
+| 8 | `agent` | `string` | optional |  |
 
 ### `newport.desktop.terminal.ShellList`
 
@@ -8814,6 +8816,7 @@ Imports: `newport/wire.proto`, `newport/worker.proto`.
 | 9 | `creator` | `newport.terminal.Computer` | message presence |  |
 | 10 | `attached` | `newport.terminal.Attached` | repeated |  |
 | 11 | `exited` | `newport.terminal.Exit` | message presence |  |
+| 12 | `agent` | `string` | optional |  |
 
 ### `newport.terminal.Start`
 
@@ -8998,6 +9001,7 @@ The normalized name was persisted by this control connection.
 | 7 | `active` | `newport.terminal.holder.Active` | oneof `message` |  |
 | 8 | `error` | `newport.wire.Error` | oneof `message` |  |
 | 9 | `renamed` | `newport.terminal.holder.Renamed` | oneof `message` |  |
+| 10 | `size` | `newport.terminal.holder.Size` | oneof `message` | The shell's size, before the screen at attach and whenever it changes: every attached tab draws the shell at this size. |
 
 ## Schema `newport/wire.proto`
 

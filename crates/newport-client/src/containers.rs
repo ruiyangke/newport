@@ -6,23 +6,23 @@
 //! and retain mutations without scheduling background reads.
 use crate::containers_stats::{StatsCache, StatsHistory};
 use crate::{backend::Backend, resources::Resource};
-pub use newport_domain::containers::{
-    Container, ContainerInspect, ContainerLogEntry, ContainerLogPage, ContainerPort, ContainerVerb,
-    ContainersSnapshot, DockerDisk, ProjectVerb, PruneTarget, Pruned,
-};
 use newport_domain::containers::{
-    ContainerState, available_container_verbs, can_remove_container, container_shell_command,
-    display_name, forwardable, valid_container, valid_container_id as valid_id, valid_project,
+    available_container_verbs, can_remove_container, container_shell_command, display_name,
+    forwardable, valid_container, valid_container_id as valid_id, valid_project, with_volumes,
 };
-use newport_domain::{compose::ComposeJob, forwarding, forwarding_batch::Destination};
+use newport_domain::{forwarding, forwarding_batch::Destination};
 use newport_protocol::{
     desktop::{self, containers as ipc},
-    monitor::{compose::Action as ComposeAction, containers as wire},
+    monitor::{
+        compose::{self, Action as ComposeAction, Project as ComposeProject},
+        containers::{
+            self as wire, Container, ContainerInspect, ContainerLogEntry, ContainerLogPage,
+            ContainerPort, ContainerState, ContainerVerb, ContainersSnapshot, DockerDisk,
+            ProjectVerb, PruneTarget, Pruned,
+        },
+    },
 };
-use serde::Serialize;
 mod reply;
-use reply::Response;
-use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, mpsc},
@@ -49,8 +49,7 @@ const MAX_OUTPUT_BYTES: usize = 1_048_576;
 const WORKER_ERROR: &str =
     "Containers worker stopped before confirming the result. Refresh before trying again.";
 
-type Outcome = Result<Value, String>;
-type ReplyOutcome = Result<Response, String>;
+type ReplyOutcome = Result<ipc::Reply, String>;
 type Dispatch = dyn Fn(ipc::Operation) -> Result<mpsc::Receiver<ReplyOutcome>, String>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -101,22 +100,21 @@ impl Action {
 pub struct ActionStatus {
     pub action: Action,
     pub pending: bool,
-    pub result: Option<Value>,
     pub error: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub struct ActionCompletion {
     pub action: Action,
-    pub result: Outcome,
-    pruned: Option<Pruned>,
+    /// The agent's receipt, already checked against the action's kind.
+    pub result: Result<ipc::Reply, String>,
 }
 impl ActionCompletion {
-    /// Typed cleanup result while preserving the existing operation receipt.
+    /// What a cleanup removed and freed.
     pub fn pruned(&self) -> Option<Pruned> {
-        if !matches!(self.action, Action::Prune { .. }) {
-            return None;
+        match &self.result {
+            Ok(ipc::Reply::Prune(pruned)) => Some(**pruned),
+            _ => None,
         }
-        self.pruned
     }
 }
 
@@ -315,7 +313,7 @@ pub struct Containers {
     inspects: VecDeque<(String, Slot<ContainerInspect>)>,
     logs: VecDeque<(LogTarget, LogCache)>,
     next_log_epoch: u64,
-    projects: VecDeque<(String, Slot<Value>)>,
+    projects: VecDeque<(String, Slot<ComposeProject>)>,
     /// The quick reading; volumes may be listed without sizes.
     disk: Slot<DockerDisk>,
     /// Volume sizes, measured apart because they take seconds.
@@ -325,18 +323,18 @@ pub struct Containers {
     /// Advances whenever `disk_view` changes, including when only the
     /// separately measured volumes arrive.
     disk_view_revision: u64,
-    jobs: Slot<Value>,
-    outputs: VecDeque<(String, Slot<Value>)>,
+    jobs: Slot<compose::Jobs>,
+    outputs: VecDeque<(String, Slot<compose::Job>)>,
     selected_job: Option<String>,
     activity_active: bool,
     started_jobs: HashMap<String, ComposeReceipt>,
     cancelling_jobs: HashMap<String, ComposeReceipt>,
     finished_jobs: VecDeque<String>,
     observed_compose_jobs: VecDeque<(String, String)>,
-    compose_completions: VecDeque<ComposeJob>,
-    compose_start: Slot<Value>,
+    compose_completions: VecDeque<compose::Job>,
+    compose_start: Slot<compose::Started>,
     compose_start_project: Option<String>,
-    compose_cancel: Slot<Value>,
+    compose_cancel: Slot<compose::Done>,
     compose_cancel_job: Option<String>,
     actions: VecDeque<(ActionTarget, ActionStatus)>,
     action_completions: VecDeque<ActionCompletion>,
@@ -372,7 +370,7 @@ impl Containers {
                             let desktop::Reply::Containers(response) = response else {
                                 return Err("Unexpected Containers response family.".into());
                             };
-                            reply::convert(*response)
+                            Ok(*response)
                         }))
                         .unwrap_or_else(|_| Err(WORKER_ERROR.into()));
                         let _ = sender.send(result);
@@ -497,7 +495,7 @@ impl Containers {
             end: cache.end,
         })
     }
-    pub fn compose_project(&self) -> Option<&Value> {
+    pub fn compose_project(&self) -> Option<&ComposeProject> {
         slot(&self.projects, self.selected_project.as_ref()?)?
             .data
             .as_ref()
@@ -509,13 +507,18 @@ impl Containers {
     pub fn disk_revision(&self) -> u64 {
         self.disk_view_revision
     }
-    pub fn jobs(&self) -> Option<&Value> {
+    /// Every listed job across projects, newest first, without output.
+    pub fn jobs(&self) -> Option<&compose::Jobs> {
         self.jobs.data.as_ref()
+    }
+    fn job_rows(&self) -> &[compose::Job] {
+        self.jobs().map_or(&[], |jobs| &jobs.jobs)
     }
     pub fn selected_job(&self) -> Option<&str> {
         self.selected_job.as_deref()
     }
-    pub fn job_output(&self) -> Option<&Value> {
+    /// The selected job with its retained contiguous output suffix.
+    pub fn job_output(&self) -> Option<&compose::Job> {
         slot(&self.outputs, self.selected_job.as_ref()?)?
             .data
             .as_ref()
@@ -547,6 +550,14 @@ impl Containers {
     pub fn compose_cancel_pending(&self) -> bool {
         self.pending.contains_key(&Kind::ComposeCancel)
     }
+    /// The job the selected project's last Compose command started, unless
+    /// that start failed.
+    pub fn compose_started(&self) -> Option<&str> {
+        self.resource("compose-start")
+            .filter(|row| row.error.is_none())
+            .and(self.compose_start.data.as_ref())
+            .map(|started| started.job.as_str())
+    }
     pub fn action_status(&self, target: &ActionTarget) -> Option<&ActionStatus> {
         self.actions
             .iter()
@@ -575,7 +586,7 @@ impl Containers {
     }
     /// Terminal outcomes for jobs this connection observed running or started.
     /// Historical finished jobs stay silent; each queued receipt drains once.
-    pub fn take_compose_completions(&mut self) -> Vec<ComposeJob> {
+    pub fn take_compose_completions(&mut self) -> Vec<compose::Job> {
         self.compose_completions.drain(..).collect()
     }
 
@@ -909,22 +920,15 @@ impl Containers {
         None
     }
     fn project_busy(&self, project: &str) -> bool {
-        let observed_running = self
-            .jobs()
-            .and_then(|value| value["jobs"].as_array())
-            .is_some_and(|jobs| {
-                jobs.iter().any(|job| {
-                    job["project"] == project
-                        && job["state"] == "running"
-                        && !job["job"].as_str().is_some_and(|id| {
-                            self.finished_jobs.iter().any(|finished| finished == id)
-                        })
-                })
-            });
+        let observed_running = self.job_rows().iter().any(|job| {
+            job.project == project
+                && job.state.is_running()
+                && !self.finished_jobs.contains(&job.job)
+        });
         let output_running = self.outputs.iter().any(|(id, slot)| {
             slot.data.as_ref().is_some_and(|job| {
-                job["project"] == project
-                    && job["state"] == "running"
+                job.project == project
+                    && job.state.is_running()
                     && !self.finished_jobs.contains(id)
                     // The list includes every running job. A newer list can
                     // supersede an old output cache after a finished job expires.
@@ -951,18 +955,14 @@ impl Containers {
             || !self.started_jobs.is_empty()
             || !self.cancelling_jobs.is_empty()
             || self
-                .jobs()
-                .and_then(|value| value["jobs"].as_array())
-                .into_iter()
-                .flatten()
-                .filter_map(|job| job["project"].as_str())
-                .any(|project| self.project_busy(project))
+                .job_rows()
+                .iter()
+                .any(|job| self.project_busy(&job.project))
             || self
                 .outputs
                 .iter()
                 .filter_map(|(_, slot)| slot.data.as_ref())
-                .filter_map(|job| job["project"].as_str())
-                .any(|project| self.project_busy(project))
+                .any(|job| self.project_busy(&job.project))
     }
 
     pub fn can_compose_run(&self, project: &str) -> bool {
@@ -995,13 +995,9 @@ impl Containers {
         if slot.dirty || slot.data.is_none() {
             return Some("Waiting for current Compose configuration.");
         }
-        let detail = slot.data.as_ref().unwrap();
-        // The wire response has no project field; its request-keyed slot owns
-        // the project identity. Reject a contradictory field if one is supplied.
-        if detail.get("project").is_some_and(|value| value != project) {
-            return Some("The Compose configuration does not match this project.");
-        }
-        if !detail["cli"].is_object() {
+        // The reply has no project field; its request-keyed slot owns the
+        // project identity.
+        if slot.data.as_ref().unwrap().cli.is_none() {
             return Some("Install the Compose CLI on the server to run this command.");
         }
         // `configError` describes the optional `config --format json` read,
@@ -1022,7 +1018,6 @@ impl Containers {
             ActionStatus {
                 action: action.clone(),
                 pending: true,
-                result: None,
                 error: None,
             },
         ));
@@ -1054,28 +1049,23 @@ impl Containers {
         if let Some(receipt) = self.started_jobs.get(project) {
             return Some(&receipt.job);
         }
-        self.jobs()?
-            .get("jobs")?
-            .as_array()?
+        self.job_rows()
             .iter()
-            .find(|job| job["project"] == project)
-            .and_then(|job| job["job"].as_str())
+            .find(|job| job.project == project)
+            .map(|job| job.job.as_str())
     }
     fn job_belongs_to(&self, project: &str, job: &str) -> bool {
         self.started_jobs
             .get(project)
             .is_some_and(|receipt| receipt.job == job)
             || self
-                .jobs()
-                .and_then(|value| value["jobs"].as_array())
-                .is_some_and(|jobs| {
-                    jobs.iter()
-                        .any(|row| row["job"] == job && row["project"] == project)
-                })
+                .job_rows()
+                .iter()
+                .any(|row| row.job == job && row.project == project)
             || slot(&self.outputs, &job.to_owned()).is_some_and(|slot| {
                 slot.data
                     .as_ref()
-                    .is_some_and(|output| output["project"] == project)
+                    .is_some_and(|output| output.project == project)
                     && (self.jobs.dirty || self.jobs.resource.revision < slot.resource.revision)
             })
     }
@@ -1107,9 +1097,7 @@ impl Containers {
         self.activity_active = active;
         if newly_active
             && self.selected_job.is_some()
-            && (self
-                .job_output()
-                .is_none_or(|job| job["state"] == "running")
+            && (self.job_output().is_none_or(|job| job.state.is_running())
                 || self
                     .resource("compose-output")
                     .is_some_and(|row| row.error.is_some()))
@@ -1133,7 +1121,7 @@ impl Containers {
         }
         if self
             .job_output()
-            .is_none_or(|output| output["state"] == "running")
+            .is_none_or(|output| output.state.is_running())
         {
             self.wanted.insert(Kind::Output);
         }
@@ -1172,16 +1160,12 @@ impl Containers {
             && (self.jobs.dirty || self.jobs.resource.revision < output.resource.revision)
             && let Some(data) = output.data.as_ref()
         {
-            return (data["state"] == "running")
-                .then(|| data["project"].as_str())
-                .flatten();
+            return data.state.is_running().then_some(data.project.as_str());
         }
-        self.jobs()?
-            .get("jobs")?
-            .as_array()?
+        self.job_rows()
             .iter()
-            .find(|row| row["job"] == job && row["state"] == "running")
-            .and_then(|row| row["project"].as_str())
+            .find(|row| row.job == job && row.state.is_running())
+            .map(|row| row.project.as_str())
     }
     fn observe_compose_running(&mut self, job: &str, project: &str) {
         if self.retired
@@ -1198,35 +1182,16 @@ impl Containers {
             self.observed_compose_jobs.pop_front();
         }
     }
-    fn compose_completion(&self, value: &Value) -> Option<ComposeJob> {
-        if self.retired
-            || value["state"] == "running"
-            || !self
+    fn compose_completion(&self, job: &compose::Job) -> Option<compose::Job> {
+        (!self.retired
+            && !job.state.is_running()
+            && self
                 .observed_compose_jobs
                 .iter()
-                .any(|(id, project)| value["job"] == *id && value["project"] == *project)
-        {
-            return None;
-        }
-        Some(ComposeJob {
-            job: value["job"].as_str()?.to_owned(),
-            project: value["project"].as_str()?.to_owned(),
-            command: value["command"].as_str()?.to_owned(),
-            state: match value["state"].as_str()? {
-                "running" => newport_domain::compose::JobState::Running,
-                "succeeded" => newport_domain::compose::JobState::Succeeded,
-                "failed" => newport_domain::compose::JobState::Failed,
-                "cancelled" => newport_domain::compose::JobState::Cancelled,
-                _ => return None,
-            },
-            exit_code: value["exitCode"].as_i64(),
-            started_at: value["startedAt"].as_i64()?,
-            finished_at: value["finishedAt"].as_i64(),
-            output: value["output"].as_str()?.to_owned(),
-            offset: value["offset"].as_u64()?,
-        })
+                .any(|(id, project)| job.job == *id && job.project == *project))
+        .then(|| job.clone())
     }
-    fn finish_compose_observation(&mut self, job: &str, receipt: Option<ComposeJob>) {
+    fn finish_compose_observation(&mut self, job: &str, receipt: Option<compose::Job>) {
         if self.compose_job_completed(job)
             && let Some(receipt) = receipt
         {
@@ -1294,11 +1259,7 @@ impl Containers {
             if due(&self.snapshot.resource, now, SNAPSHOT_INTERVAL) {
                 self.wanted.insert(Kind::Snapshot);
             }
-            let jobs_interval = if self
-                .jobs()
-                .and_then(|jobs| jobs["jobs"].as_array())
-                .is_some_and(|jobs| jobs.iter().any(|job| job["state"] == "running"))
-            {
+            let jobs_interval = if self.job_rows().iter().any(|job| job.state.is_running()) {
                 Duration::from_millis(1_500)
             } else {
                 Duration::from_secs(15)
@@ -1316,9 +1277,7 @@ impl Containers {
             }
             if self.activity_active
                 && self.selected_job.is_some()
-                && self
-                    .job_output()
-                    .is_none_or(|job| job["state"] == "running")
+                && self.job_output().is_none_or(|job| job.state.is_running())
                 && self
                     .resource("compose-output")
                     .is_some_and(|row| due(row, now, Duration::from_secs(1)))
@@ -1459,7 +1418,7 @@ impl Containers {
             .data
             .clone()
             .map(|quick| match &self.disk_volumes.data {
-                Some(volumes) => quick.with_volumes(volumes),
+                Some(volumes) => with_volumes(quick, volumes),
                 None => quick,
             });
         if view != self.disk_view {
@@ -1573,8 +1532,7 @@ impl Containers {
                 job: job.clone(),
                 offset: slot(&self.outputs, job)
                     .and_then(|slot| slot.data.as_ref())
-                    .and_then(|output| output["offset"].as_u64())
-                    .unwrap_or(0),
+                    .map_or(0, |output| output.offset),
             })),
             Job::Disk | Job::DiskVolumes => ipc::Operation::Disk(Box::new(ipc::DiskArgs {
                 server,
@@ -1605,13 +1563,7 @@ impl Containers {
                 } => ipc::Operation::Action(Box::new(ipc::ActionArgs {
                     server,
                     container: container.clone(),
-                    verb: match verb {
-                        ContainerVerb::Start => wire::ContainerVerb::Start,
-                        ContainerVerb::Stop => wire::ContainerVerb::Stop,
-                        ContainerVerb::Restart => wire::ContainerVerb::Restart,
-                        ContainerVerb::Pause => wire::ContainerVerb::Pause,
-                        ContainerVerb::Unpause => wire::ContainerVerb::Unpause,
-                    },
+                    verb: *verb,
                 })),
                 Action::Project {
                     project,
@@ -1621,11 +1573,7 @@ impl Containers {
                     server,
                     project: project.clone(),
                     expected_ids: expected_ids.clone(),
-                    verb: match verb {
-                        ProjectVerb::Start => wire::ProjectVerb::Start,
-                        ProjectVerb::Stop => wire::ProjectVerb::Stop,
-                        ProjectVerb::Restart => wire::ProjectVerb::Restart,
-                    },
+                    verb: *verb,
                 })),
                 Action::Remove { containers, .. } => {
                     ipc::Operation::Remove(Box::new(ipc::RemoveArgs {
@@ -1635,13 +1583,7 @@ impl Containers {
                 }
                 Action::Prune { what } => ipc::Operation::Prune(Box::new(ipc::PruneArgs {
                     server,
-                    what: match what {
-                        PruneTarget::Containers => wire::PruneTarget::Containers,
-                        PruneTarget::DanglingImages => wire::PruneTarget::DanglingImages,
-                        PruneTarget::UnusedImages => wire::PruneTarget::UnusedImages,
-                        PruneTarget::BuildCache => wire::PruneTarget::BuildCache,
-                        PruneTarget::Volumes => wire::PruneTarget::Volumes,
-                    },
+                    what: *what,
                 })),
             },
         })
@@ -1746,7 +1688,7 @@ impl Containers {
                 let accepted = finish(
                     &mut self.snapshot,
                     generation,
-                    result.and_then(Response::snapshot),
+                    result.and_then(reply::snapshot),
                     now,
                 );
                 if accepted && self.snapshot.resource.error.is_none() {
@@ -1756,7 +1698,7 @@ impl Containers {
                 accepted
             }
             Job::Inspect(id) => {
-                let result = result.and_then(Response::inspect).and_then(|inspect| {
+                let result = result.and_then(reply::inspect).and_then(|inspect| {
                     if inspect.id == id {
                         Ok(inspect)
                     } else {
@@ -1766,17 +1708,21 @@ impl Containers {
                 slot_mut(&mut self.inspects, &id)
                     .is_some_and(|slot| finish_changed(slot, generation, result, now))
             }
-            Job::Logs(target) => slot_mut(&mut self.logs, &target).is_some_and(|cache| {
-                cache.complete(generation, result.and_then(Response::logs), now)
-            }),
+            Job::Logs(target) => slot_mut(&mut self.logs, &target)
+                .is_some_and(|cache| cache.complete(generation, result.and_then(reply::logs), now)),
             Job::Compose(project) => slot_mut(&mut self.projects, &project).is_some_and(|slot| {
-                finish_changed(slot, generation, result.and_then(Response::value), now)
+                finish_changed(
+                    slot,
+                    generation,
+                    result.and_then(reply::compose_project),
+                    now,
+                )
             }),
             Job::Disk => {
                 let accepted = finish_changed(
                     &mut self.disk,
                     generation,
-                    result.and_then(Response::disk),
+                    result.and_then(reply::disk),
                     now,
                 );
                 if accepted {
@@ -1799,7 +1745,7 @@ impl Containers {
                 let accepted = finish_changed(
                     &mut self.disk_volumes,
                     generation,
-                    result.and_then(Response::disk),
+                    result.and_then(reply::disk),
                     now,
                 );
                 if accepted {
@@ -1808,22 +1754,17 @@ impl Containers {
                 accepted
             }
             Job::Jobs => {
-                let result = result.and_then(Response::value).and_then(validate_jobs);
+                let result = result.and_then(reply::compose_jobs).and_then(validate_jobs);
                 let accepted = finish(&mut self.jobs, generation, result, now);
                 if accepted && self.jobs.resource.error.is_none() {
                     let observed: HashMap<String, (String, bool)> = self
-                        .jobs()
-                        .and_then(|jobs| jobs["jobs"].as_array())
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|job| {
-                            Some((
-                                job["job"].as_str()?.to_owned(),
-                                (
-                                    job["project"].as_str()?.to_owned(),
-                                    job["state"] == "running",
-                                ),
-                            ))
+                        .job_rows()
+                        .iter()
+                        .map(|job| {
+                            (
+                                job.job.clone(),
+                                (job.project.clone(), job.state.is_running()),
+                            )
                         })
                         .collect();
                     for (job, (project, running)) in &observed {
@@ -1841,17 +1782,10 @@ impl Containers {
                             })
                     });
                     let completed: Vec<_> = self
-                        .jobs()
-                        .and_then(|jobs| jobs["jobs"].as_array())
-                        .into_iter()
-                        .flatten()
-                        .filter(|job| job["state"] != "running")
-                        .filter_map(|value| {
-                            Some((
-                                value["job"].as_str()?.to_owned(),
-                                self.compose_completion(value),
-                            ))
-                        })
+                        .job_rows()
+                        .iter()
+                        .filter(|job| !job.state.is_running())
+                        .map(|job| (job.job.clone(), self.compose_completion(job)))
                         .collect();
                     for (job, receipt) in completed {
                         self.finish_compose_observation(&job, receipt);
@@ -1862,7 +1796,7 @@ impl Containers {
             Job::Output(job) => {
                 let accepted = if let Some(slot) = slot_mut(&mut self.outputs, &job) {
                     let result = result
-                        .and_then(Response::value)
+                        .and_then(reply::compose_job)
                         .and_then(|next| append_output(&job, slot.data.as_ref(), next));
                     finish(slot, generation, result, now)
                 } else {
@@ -1873,10 +1807,9 @@ impl Containers {
                         .filter(|slot| slot.resource.error.is_none())
                         .and_then(|slot| slot.data.as_ref())
                 {
-                    if value["state"] == "running" {
-                        if let Some(project) = value["project"].as_str().map(str::to_owned) {
-                            self.observe_compose_running(&job, &project);
-                        }
+                    if value.state.is_running() {
+                        let project = value.project.clone();
+                        self.observe_compose_running(&job, &project);
                     } else {
                         let receipt = self.compose_completion(value);
                         self.finish_compose_observation(&job, receipt);
@@ -1886,10 +1819,7 @@ impl Containers {
             }
             Job::Action(action) => {
                 self.invalidate_readings();
-                let pruned = result.as_ref().ok().and_then(Response::pruned).cloned();
-                let result = result
-                    .and_then(Response::value)
-                    .and_then(|value| validate_action_result(&action, value));
+                let result = result.and_then(|reply| validate_action_result(&action, reply));
                 if let Some((_, status)) = self
                     .actions
                     .iter_mut()
@@ -1898,25 +1828,22 @@ impl Containers {
                     *status = ActionStatus {
                         action: action.clone(),
                         pending: false,
-                        result: result.as_ref().ok().cloned(),
                         error: result.as_ref().err().cloned(),
                     };
                 }
-                self.action_completions.push_back(ActionCompletion {
-                    action,
-                    result: result.clone(),
-                    pruned,
-                });
+                let settled = result.as_ref().map(|_| false).map_err(Clone::clone);
+                self.action_completions
+                    .push_back(ActionCompletion { action, result });
                 while self.action_completions.len() > MAX_COMPLETIONS {
                     self.action_completions.pop_front();
                 }
-                finish_resource(&mut self.action_resource, generation, result, now);
+                self.action_resource.finish_owned(generation, settled, now);
                 true
             }
             Job::ComposeStart { project, .. } => {
-                let result = result.and_then(Response::value).and_then(|value| {
-                    if value["job"].as_str().is_some_and(valid_job) {
-                        Ok(value)
+                let result = result.and_then(reply::compose_started).and_then(|started| {
+                    if valid_job(&started.job) {
+                        Ok(started)
                     } else {
                         Err("Missing Compose job identifier.".into())
                     }
@@ -1929,8 +1856,7 @@ impl Containers {
                             .compose_start
                             .data
                             .as_ref()
-                            .and_then(|value| value["job"].as_str())
-                            .map(str::to_owned)
+                            .map(|started| started.job.clone())
                     {
                         self.observe_compose_running(&job, &project);
                         self.started_jobs.insert(
@@ -1950,8 +1876,7 @@ impl Containers {
                             .compose_start
                             .data
                             .as_ref()
-                            .and_then(|value| value["job"].as_str())
-                            .map(str::to_owned)
+                            .map(|started| started.job.clone())
                     {
                         self.select_job_internal(job);
                         if !self.activity_active {
@@ -1968,7 +1893,13 @@ impl Containers {
                 let accepted = finish(
                     &mut self.compose_cancel,
                     generation,
-                    result.and_then(Response::value).and_then(validate_done),
+                    result.and_then(reply::compose_done).and_then(|done| {
+                        if done.ok {
+                            Ok(done)
+                        } else {
+                            Err(INVALID_OUTCOME.into())
+                        }
+                    }),
                     now,
                 );
                 if !self.retired {
@@ -2029,7 +1960,7 @@ fn due(resource: &Resource, now: Instant, interval: Duration) -> bool {
             .finished_at
             .is_none_or(|at| now.saturating_duration_since(at) >= interval)
 }
-fn finish<T: Serialize>(
+fn finish<T: PartialEq>(
     slot: &mut Slot<T>,
     generation: u64,
     result: Result<T, String>,
@@ -2038,22 +1969,18 @@ fn finish<T: Serialize>(
     if slot.generation != generation {
         return false;
     }
-    let result = result.and_then(|value| {
-        let encoded = serde_json::to_value(&value)
-            .map_err(|error| format!("Invalid Containers response: {error}"))?;
+    let result = result.map(|value| {
+        let changed = slot.data.as_ref() != Some(&value);
         slot.data = Some(value);
         slot.dirty = false;
-        Ok(encoded)
+        changed
     });
-    finish_resource(&mut slot.resource, generation, result, now);
+    slot.resource.finish_owned(generation, result, now);
     true
-}
-fn finish_resource(resource: &mut Resource, generation: u64, result: Outcome, now: Instant) {
-    resource.finish_read(generation, result, now, None);
 }
 // Only passive detail reads use this. Snapshots advance statistics, log reads
 // advance sequence positions, and job/action receipts must always be consumed.
-fn finish_changed<T: Serialize>(
+fn finish_changed<T: PartialEq>(
     slot: &mut Slot<T>,
     generation: u64,
     result: Result<T, String>,
@@ -2073,55 +2000,43 @@ fn valid_job(job: &str) -> bool {
         && job.len() <= 64
         && job.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
-fn validate_done(value: Value) -> Outcome {
-    if value["ok"] == true {
-        Ok(value)
-    } else {
-        Err("Invalid Containers action outcome.".into())
-    }
-}
-fn validate_action_result(action: &Action, value: Value) -> Outcome {
-    match action {
-        Action::Container { .. } | Action::Project { .. } => validate_done(value),
-        Action::Remove { .. } if value["removed"].as_u64().is_some() => Ok(value),
-        Action::Prune { .. }
-            if value["removed"].as_u64().is_some() && value["reclaimed"].as_u64().is_some() =>
+const INVALID_OUTCOME: &str = "Invalid Containers action outcome.";
+/// Accepts only the receipt kind the action asks for.
+fn validate_action_result(action: &Action, reply: ipc::Reply) -> Result<ipc::Reply, String> {
+    match (action, &reply) {
+        (Action::Container { .. }, ipc::Reply::Action(done))
+        | (Action::Project { .. }, ipc::Reply::ProjectAction(done))
+            if done.ok =>
         {
-            Ok(value)
+            Ok(reply)
         }
-        _ => Err("Invalid Containers action outcome.".into()),
+        (Action::Remove { .. }, ipc::Reply::Remove(_))
+        | (Action::Prune { .. }, ipc::Reply::Prune(_)) => Ok(reply),
+        _ => Err(INVALID_OUTCOME.into()),
     }
 }
-fn validate_job(value: &Value) -> Result<(), String> {
-    if !value["job"].as_str().is_some_and(valid_job)
-        || !matches!(
-            value["state"].as_str(),
-            Some("running" | "succeeded" | "failed" | "cancelled")
-        )
-        || value["offset"].as_u64().is_none()
-        || !value["output"].is_string()
-    {
-        Err("Invalid Compose job response.".into())
-    } else {
+fn validate_job(job: &compose::Job) -> Result<(), String> {
+    if valid_job(&job.job) {
         Ok(())
+    } else {
+        Err("Invalid Compose job response.".into())
     }
 }
-fn validate_jobs(value: Value) -> Outcome {
-    let jobs = value["jobs"]
-        .as_array()
-        .ok_or("Invalid Compose jobs response.")?;
-    for job in jobs {
-        validate_job(job)?;
-    }
-    Ok(value)
+fn validate_jobs(jobs: compose::Jobs) -> Result<compose::Jobs, String> {
+    jobs.jobs.iter().try_for_each(validate_job)?;
+    Ok(jobs)
 }
-fn append_output(job: &str, previous: Option<&Value>, mut next: Value) -> Outcome {
+fn append_output(
+    job: &str,
+    previous: Option<&compose::Job>,
+    mut next: compose::Job,
+) -> Result<compose::Job, String> {
     validate_job(&next)?;
-    if next["job"] != job {
+    if next.job != job {
         return Err("Compose output does not match the selected job.".into());
     }
-    let suffix = next["output"].as_str().unwrap();
-    let end = next["offset"].as_u64().unwrap();
+    let suffix = next.output.as_str();
+    let end = next.offset;
     // Agent offsets count cumulative UTF-8 bytes. Its retained suffix may begin
     // after our last read if the agent evicted output while Activity was hidden.
     let start = end
@@ -2130,12 +2045,12 @@ fn append_output(job: &str, previous: Option<&Value>, mut next: Value) -> Outcom
     let mut prefix = "";
     if let Some(previous) = previous {
         validate_job(previous)?;
-        let previous_end = previous["offset"].as_u64().unwrap();
-        let previous_output = previous["output"].as_str().unwrap();
+        let previous_end = previous.offset;
+        let previous_output = previous.output.as_str();
         let previous_start = previous_end
             .checked_sub(previous_output.len() as u64)
             .ok_or("Compose output exceeds its cumulative byte offset.")?;
-        if previous["job"] != job || end < previous_end {
+        if previous.job != job || end < previous_end {
             return Err("Compose output does not match the selected job.".into());
         }
         if start <= previous_end {
@@ -2155,8 +2070,7 @@ fn append_output(job: &str, previous: Option<&Value>, mut next: Value) -> Outcom
         // A gap replaces the old text. Joining across missing bytes would give
         // earlier rows false absolute offsets, even if the text looks unchanged.
     }
-    let output = bounded_output(prefix, suffix);
-    next["output"] = json!(output);
+    next.output = bounded_output(prefix, suffix);
     Ok(next)
 }
 
@@ -2196,11 +2110,33 @@ fn request_timeout(operation: &ipc::Operation) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use newport_domain::containers::{ComposeLabels, ContainerState};
+    use compose::State;
+    use serde_json::{Value, json};
     use std::{
         cell::{Cell, RefCell},
         rc::Rc,
     };
+    use wire::{ComposeLabels, ContainerLogEntry, DiskTotals, DockerTotals, DockerVolume};
+
+    #[test]
+    fn an_action_accepts_only_its_own_successful_receipt() {
+        let done = |ok| Box::new(wire::Done { ok });
+        let start = Action::Container {
+            container: "c1".into(),
+            name: "web".into(),
+            verb: ContainerVerb::Start,
+        };
+        assert!(validate_action_result(&start, ipc::Reply::Action(done(true))).is_ok());
+        for reply in [
+            ipc::Reply::Action(done(false)),
+            ipc::Reply::ProjectAction(done(true)),
+        ] {
+            assert_eq!(
+                validate_action_result(&start, reply).unwrap_err(),
+                INVALID_OUTCOME
+            );
+        }
+    }
 
     // Test observations are one-way projections of the typed producer output.
     fn observe(operation: &ipc::Operation) -> (&'static str, Value) {
@@ -2271,28 +2207,6 @@ mod tests {
         }
     }
 
-    // These fixtures intentionally include malformed cache values. They
-    // never cross the protobuf boundary; production uses reply::convert.
-    fn fixture_reply(method: &str, value: Value) -> ReplyOutcome {
-        let invalid = |error| format!("Invalid Containers response: {error}");
-        Ok(match method {
-            "containers_snapshot" => {
-                Response::Snapshot(Box::new(serde_json::from_value(value).map_err(invalid)?))
-            }
-            "container_inspect" => {
-                Response::Inspect(Box::new(serde_json::from_value(value).map_err(invalid)?))
-            }
-            "container_logs" => {
-                Response::Logs(Box::new(serde_json::from_value(value).map_err(invalid)?))
-            }
-            "docker_disk" => {
-                Response::Disk(Box::new(serde_json::from_value(value).map_err(invalid)?))
-            }
-            "docker_prune" => Response::Pruned(serde_json::from_value(value).map_err(invalid)?),
-            _ => Response::Value(value),
-        })
-    }
-
     struct Request {
         method: &'static str,
         args: Value,
@@ -2356,7 +2270,20 @@ mod tests {
                 .args
                 .clone()
         }
-        fn reply(&mut self, method: &str, result: Outcome) {
+        /// Answers the pending Compose configuration read.
+        fn reply_project(&mut self, result: Result<ComposeProject, String>) {
+            self.requests
+                .borrow_mut()
+                .iter_mut()
+                .find(|request| request.method == "compose_project" && request.sender.is_some())
+                .unwrap()
+                .sender
+                .take()
+                .unwrap()
+                .send(result.map(|project| ipc::Reply::ComposeProject(Box::new(project))))
+                .unwrap();
+        }
+        fn reply(&mut self, method: &str, result: ReplyOutcome) {
             self.requests
                 .borrow_mut()
                 .iter_mut()
@@ -2365,8 +2292,15 @@ mod tests {
                 .sender
                 .take()
                 .unwrap()
-                .send(result.and_then(|value| fixture_reply(method, value)))
+                .send(result)
                 .unwrap();
+        }
+        /// Answers the pending output read for one job.
+        fn reply_output(&mut self, result: Result<compose::Job, String>) {
+            self.reply(
+                "compose_job",
+                result.map(|job| ipc::Reply::ComposeJob(Box::new(job))),
+            );
         }
         fn disconnect(&mut self, method: &str) {
             self.requests
@@ -2388,12 +2322,12 @@ mod tests {
         fn details(&mut self, id: &str, name: &str, project: &str) {
             self.controller.select_container(name.into());
             self.reply("container_inspect", Ok(inspect(id, name)));
-            self.reply("compose_project", Ok(json!({"project":project,"files":[]})));
+            self.reply_project(Ok(marked(project)));
             self.controller.poll(true);
         }
         fn compose_details(&mut self, project: &str) {
             self.controller.select_project(project.to_owned());
-            self.reply("compose_project", Ok(compose_detail(project)));
+            self.reply_project(Ok(compose_detail(project)));
             self.controller.poll(true);
         }
     }
@@ -2413,16 +2347,14 @@ mod tests {
             ..Default::default()
         }
     }
-    fn snapshot(containers: Vec<Container>) -> Value {
-        serde_json::to_value(ContainersSnapshot {
+    fn snapshot(containers: Vec<Container>) -> ipc::Reply {
+        ipc::Reply::Snapshot(Box::new(ContainersSnapshot {
             containers,
             ..Default::default()
-        })
-        .unwrap()
+        }))
     }
-    fn disk(size: u64) -> Value {
-        use newport_domain::containers::{DiskTotals, DockerTotals};
-        serde_json::to_value(DockerDisk {
+    fn disk_reading(size: u64) -> DockerDisk {
+        DockerDisk {
             totals: DockerTotals {
                 images: DiskTotals {
                     count: 1,
@@ -2431,23 +2363,69 @@ mod tests {
                 },
                 ..Default::default()
             },
+            volumes_measured: true,
             ..Default::default()
-        })
-        .unwrap()
+        }
     }
-    fn inspect(id: &str, name: &str) -> Value {
-        serde_json::to_value(ContainerInspect {
+    fn disk(size: u64) -> ipc::Reply {
+        ipc::Reply::Disk(Box::new(disk_reading(size)))
+    }
+    fn inspect(id: &str, name: &str) -> ipc::Reply {
+        ipc::Reply::Inspect(Box::new(ContainerInspect {
             id: id.into(),
             name: name.into(),
             ..Default::default()
-        })
-        .unwrap()
+        }))
     }
-    fn logs(message: &str, cursor: Option<&str>) -> Value {
-        json!({"entries":[{"at":1,"stream":"stdout","message":message,"container":null}],"cursor":cursor})
+    fn entry(at: i64, message: &str) -> ContainerLogEntry {
+        ContainerLogEntry {
+            at: Some(at),
+            message: message.into(),
+            ..Default::default()
+        }
     }
-    fn job(name: &str, state: &str, offset: u64, output: &str) -> Value {
-        json!({"job":name,"project":"app","state":state,"offset":offset,"output":output,"command":"up","startedAt":1000,"finishedAt":if state == "running" { None } else { Some(2000) },"exitCode":if state == "succeeded" { Some(0) } else { None }})
+    fn page(entries: Vec<ContainerLogEntry>, cursor: Option<&str>) -> ipc::Reply {
+        ipc::Reply::Logs(Box::new(ContainerLogPage {
+            entries,
+            cursor: cursor.map(str::to_owned),
+        }))
+    }
+    fn logs(message: &str, cursor: Option<&str>) -> ipc::Reply {
+        page(vec![entry(1, message)], cursor)
+    }
+    fn job(name: &str, state: State, offset: u64, output: &str) -> compose::Job {
+        compose::Job {
+            job: name.into(),
+            project: "app".into(),
+            command: "up".into(),
+            state,
+            exit_code: (state == State::Succeeded).then_some(0),
+            started_at: 1000,
+            finished_at: (!state.is_running()).then_some(2000),
+            output: output.into(),
+            offset,
+        }
+    }
+    fn listing(jobs: Vec<compose::Job>) -> ipc::Reply {
+        ipc::Reply::ComposeJobs(Box::new(compose::Jobs { jobs }))
+    }
+    fn started(job: &str) -> ipc::Reply {
+        ipc::Reply::ComposeRun(Box::new(compose::Started { job: job.into() }))
+    }
+    fn cancelled() -> ipc::Reply {
+        ipc::Reply::ComposeCancel(Box::new(compose::Done { ok: true }))
+    }
+    fn container_done() -> ipc::Reply {
+        ipc::Reply::Action(Box::new(wire::Done { ok: true }))
+    }
+    fn project_done() -> ipc::Reply {
+        ipc::Reply::ProjectAction(Box::new(wire::Done { ok: true }))
+    }
+    fn removed(removed: u64) -> ipc::Reply {
+        ipc::Reply::Remove(Box::new(wire::Removed { removed }))
+    }
+    fn pruned(removed: u64, reclaimed: u64) -> ipc::Reply {
+        ipc::Reply::Prune(Box::new(Pruned { removed, reclaimed }))
     }
     fn stop(digit: char, name: &str) -> Action {
         Action::Container {
@@ -2465,7 +2443,7 @@ mod tests {
         h.controller.poll(false);
         assert!(!h.controller.poll(false));
         let revision = h.controller.resource("container-inspect").unwrap().revision;
-        let read = |h: &mut Harness, result: Outcome, manual: bool, changed: bool| {
+        let read = |h: &mut Harness, result: ReplyOutcome, manual: bool, changed: bool| {
             assert!(h.controller.launch(Job::Inspect(id('a')), manual));
             assert_eq!(h.controller.poll(false), manual);
             assert_eq!(
@@ -2488,7 +2466,7 @@ mod tests {
 
         assert!(h.controller.launch(Job::Compose("app".into()), false));
         assert!(!h.controller.poll(false));
-        h.reply("compose_project", Ok(json!({"project":"app","files":[]})));
+        h.reply_project(Ok(marked("app")));
         assert!(!h.controller.poll(false));
 
         assert!(h.controller.launch(Job::Disk, false));
@@ -2551,7 +2529,7 @@ mod tests {
         assert!(h.controller.pending_container_action(&id('a')).is_some());
         assert!(h.controller.pending_container_action(&id('b')).is_some());
         assert!(h.controller.pending_container_action(&id('c')).is_none());
-        h.reply("containers_remove", Ok(json!({"removed": 2})));
+        h.reply("containers_remove", Ok(removed(2)));
         h.controller.poll(true);
         assert!(h.controller.pending_container_action(&id('b')).is_none());
     }
@@ -2615,7 +2593,7 @@ mod tests {
             "container_logs",
             Ok(logs("private web data", Some("c1.1.1"))),
         );
-        h.reply("compose_project", Ok(json!({"secret":"app"})));
+        h.reply_project(Ok(marked("app")));
         h.controller.poll(true);
         assert!(h.controller.inspect().is_none());
         assert!(h.controller.logs().is_none());
@@ -2625,14 +2603,21 @@ mod tests {
         assert_eq!(h.last_args("compose_project")["project"], "data");
         h.reply("container_inspect", Ok(inspect(&id('b'), "database")));
         h.reply("container_logs", Ok(logs("database log", None)));
-        h.reply("compose_project", Ok(json!({"secret":"data"})));
+        h.reply_project(Ok(marked("data")));
         h.controller.poll(true);
         assert_eq!(h.controller.inspect().unwrap().name, "database");
         assert_eq!(
             h.controller.logs().unwrap().entries[0].message,
             "database log"
         );
-        assert_eq!(h.controller.compose_project().unwrap()["secret"], "data");
+        assert_eq!(
+            h.controller
+                .compose_project()
+                .unwrap()
+                .working_dir
+                .as_deref(),
+            Some("data")
+        );
         h.controller.select_project("app".into());
         assert!(h.controller.inspect().is_none());
         assert!(h.controller.logs().is_none());
@@ -2723,13 +2708,8 @@ mod tests {
         h.snapshot(vec![container('a', "web", "app")]);
         h.controller.select_container("web".into());
         h.controller.set_logs_active(true, true);
-        let mut page = logs("initial", Some("c1.1.1"));
-        page["entries"] = json!(
-            (0..2_100)
-                .map(|n| json!({"at":n,"stream":"stdout","message":n.to_string(),"container":null}))
-                .collect::<Vec<_>>()
-        );
-        h.reply("container_logs", Ok(page));
+        let entries = (0..2_100).map(|n| entry(n, &n.to_string())).collect();
+        h.reply("container_logs", Ok(page(entries, Some("c1.1.1"))));
         h.controller.poll(true);
         assert_eq!(h.controller.logs().unwrap().entries.len(), 2_000);
         assert_eq!(h.controller.logs().unwrap().entries[0].message, "100");
@@ -2777,17 +2757,17 @@ mod tests {
         assert_eq!(log_positions(&h.controller), (epoch, 0, 0));
         assert!(h.controller.logs().is_none());
         h.controller.set_logs_active(true, false);
-        let identical = logs("identical line", Some("c1.1.2005"))["entries"][0].clone();
+        let identical = entry(1, "identical line");
         h.reply(
             "container_logs",
-            Ok(json!({"entries": vec![identical.clone(); 2005], "cursor":"c1.1.2005"})),
+            Ok(page(vec![identical.clone(); 2005], Some("c1.1.2005"))),
         );
         h.controller.poll(true);
         assert_eq!(log_positions(&h.controller), (epoch, 5, 2005));
         h.controller.retry_logs();
         h.reply(
             "container_logs",
-            Ok(json!({"entries": vec![identical; 3], "cursor":"c1.1.2008"})),
+            Ok(page(vec![identical; 3], Some("c1.1.2008"))),
         );
         h.controller.poll(true);
         assert_eq!(log_positions(&h.controller), (epoch, 8, 2008));
@@ -2799,11 +2779,7 @@ mod tests {
                 .iter()
                 .all(|line| line.message == "identical line")
         );
-        assert_eq!(
-            h.controller.resource("container-logs").unwrap().value,
-            serde_json::to_value(h.controller.logs().unwrap()).unwrap(),
-            "wire-shaped resource remains unchanged"
-        );
+        assert!(h.controller.resource("container-logs").unwrap().has_value());
     }
 
     #[test]
@@ -2818,7 +2794,7 @@ mod tests {
         let revision = h.controller.resource("container-logs").unwrap().revision;
         h.controller.retry_logs();
         assert_eq!(log_positions(&h.controller), positions);
-        h.reply("container_logs", Ok(json!({"entries":[],"cursor":null})));
+        h.reply("container_logs", Ok(page(vec![], None)));
         h.controller.poll(true);
         assert_eq!(log_positions(&h.controller), positions);
         let updated = h.controller.resource("container-logs").unwrap().revision;
@@ -2827,10 +2803,7 @@ mod tests {
             h.controller.logs().unwrap().cursor.as_deref(),
             Some("c1.1.1")
         );
-        for failure in [
-            Err("fixture read failed".into()),
-            Ok(json!({"entries":"malformed"})),
-        ] {
+        for failure in [Err("fixture read failed".into()), Ok(disk(1))] {
             h.controller.retry_logs();
             h.reply("container_logs", failure);
             h.controller.poll(true);
@@ -3033,7 +3006,7 @@ mod tests {
             Ok(snapshot(vec![container('c', "stale", "old")])),
         );
         h.reply("container_inspect", Ok(inspect(&id('a'), "old web")));
-        h.reply("compose_project", Ok(json!({"stale":true})));
+        h.reply_project(Ok(marked("stale")));
         h.reply("docker_disk", Ok(disk(999)));
         h.controller.poll(true);
         assert_eq!(h.controller.snapshot().unwrap().containers[0].name, "web");
@@ -3079,7 +3052,7 @@ mod tests {
             h.last_args("project_action")["expectedIds"],
             json!([id('a')])
         );
-        h.reply("project_action", Ok(json!({"ok":true})));
+        h.reply("project_action", Ok(project_done()));
         h.controller.poll(true);
         assert!(h.controller.snapshot.dirty);
         assert!(!h.controller.action(stop('a', "web")));
@@ -3091,7 +3064,7 @@ mod tests {
         h.snapshot(vec![container('a', "web", "app")]);
         assert!(h.controller.action(stop('a', "web")));
         let count = h.total();
-        h.reply("container_action", Ok(json!({"ok":true})));
+        h.reply("container_action", Ok(container_done()));
         h.controller.poll(false);
         assert_eq!(h.total(), count);
         assert_eq!(h.controller.take_action_completions().len(), 1);
@@ -3106,7 +3079,7 @@ mod tests {
         h.controller.retire();
         let count = h.total();
         h.reply("container_action", Err("late failure".into()));
-        h.reply("compose_jobs", Ok(json!({"jobs":[]})));
+        h.reply("compose_jobs", Ok(listing(vec![])));
         h.controller.poll(true);
         h.controller.refresh();
         h.controller.retry_jobs();
@@ -3229,14 +3202,14 @@ mod tests {
         h.controller.retry_compose();
         h.reply(
             "compose_jobs",
-            Ok(json!({"jobs":[job("job-a","succeeded",3,"")]})),
+            Ok(listing(vec![job("job-a", State::Succeeded, 3, "")])),
         );
         h.reply(
             "containers_snapshot",
             Ok(snapshot(vec![container('b', "old snapshot", "app")])),
         );
         h.reply("container_inspect", Ok(inspect(&id('a'), "stale")));
-        h.reply("compose_project", Ok(json!({"stale":true})));
+        h.reply_project(Ok(marked("stale")));
         h.controller.poll(true);
         assert_eq!(h.controller.snapshot().unwrap().containers[0].name, "web");
         assert_eq!(h.controller.inspect().unwrap().name, "web");
@@ -3249,12 +3222,12 @@ mod tests {
             Ok(snapshot(vec![container('a', "web", "app")])),
         );
         h.reply("container_inspect", Ok(inspect(&id('a'), "web")));
-        h.reply("compose_project", Ok(json!({"fresh":true})));
+        h.reply_project(Ok(marked("fresh")));
         h.controller.poll(true);
         h.controller.retry_jobs();
         h.reply(
             "compose_jobs",
-            Ok(json!({"jobs":[job("job-a","succeeded",3,"")]})),
+            Ok(listing(vec![job("job-a", State::Succeeded, 3, "")])),
         );
         h.controller.poll(true);
         assert_eq!(h.count("containers_snapshot"), 3);
@@ -3267,7 +3240,7 @@ mod tests {
         h.controller.poll(true);
         h.reply(
             "compose_jobs",
-            Ok(json!({"jobs":[job("job-a","running",0,"")]})),
+            Ok(listing(vec![job("job-a", State::Running, 0, "")])),
         );
         h.controller.poll(true);
         h.advance(1);
@@ -3276,7 +3249,7 @@ mod tests {
         h.now.set(h.now.get() + Duration::from_millis(500));
         h.controller.poll(true);
         assert_eq!(h.count("compose_jobs"), 2);
-        h.reply("compose_jobs", Ok(json!({"jobs":[]})));
+        h.reply("compose_jobs", Ok(listing(vec![])));
         h.controller.poll(true);
         h.advance(14);
         h.controller.poll(true);
@@ -3288,12 +3261,28 @@ mod tests {
         assert_eq!(h.count("compose_jobs"), 3);
     }
 
-    fn compose_detail(_project: &str) -> Value {
-        json!({"cli":{"kind":"plugin","version":"2.29.1"},"cliError":null,"workingDir":"/srv/app","configFiles":["/srv/app/compose.yaml"],"files":[],"services":[],"configError":null})
+    fn compose_detail(_project: &str) -> ComposeProject {
+        ComposeProject {
+            cli: Some(compose::Cli {
+                kind: compose::CliKind::Plugin,
+                version: "2.29.1".into(),
+            }),
+            working_dir: Some("/srv/app".into()),
+            config_files: vec!["/srv/app/compose.yaml".into()],
+            services: Some(vec![]),
+            ..Default::default()
+        }
     }
-    fn project_job(project: &str, id: &str, state: &str) -> Value {
+    /// A Compose reading told apart by its working directory.
+    fn marked(working_dir: &str) -> ComposeProject {
+        ComposeProject {
+            working_dir: Some(working_dir.into()),
+            ..Default::default()
+        }
+    }
+    fn project_job(project: &str, id: &str, state: State) -> compose::Job {
         let mut value = job(id, state, 0, "");
-        value["project"] = json!(project);
+        value.project = project.into();
         value
     }
 
@@ -3306,11 +3295,13 @@ mod tests {
         h.controller.select_project("app".into());
         assert!(!h.controller.can_compose_run("app"));
         for detail in [
-            json!({"project":"app","cli":null}),
-            json!({"project":"other","cli":{"kind":"plugin","version":"2.29.1"}}),
-            json!({"project":"app","cli":null,"configError":"invalid config"}),
+            ComposeProject::default(),
+            ComposeProject {
+                config_error: Some("invalid config".into()),
+                ..Default::default()
+            },
         ] {
-            h.reply("compose_project", Ok(detail));
+            h.reply_project(Ok(detail));
             h.controller.poll(true);
             assert!(!h.controller.compose_run(
                 "app".into(),
@@ -3323,15 +3314,15 @@ mod tests {
             ));
             h.controller.retry_compose();
         }
-        h.reply("compose_project", Ok(compose_detail("app")));
+        h.reply_project(Ok(compose_detail("app")));
         h.controller.poll(true);
         assert!(h.controller.can_compose_run("app"));
         h.controller.retry_compose();
-        h.reply("compose_project", Err("unavailable".into()));
+        h.reply_project(Err("unavailable".into()));
         h.controller.poll(true);
         assert!(!h.controller.can_compose_run("app"));
         h.controller.retry_compose();
-        h.reply("compose_project", Ok(compose_detail("app")));
+        h.reply_project(Ok(compose_detail("app")));
         h.controller.poll(true);
         h.controller.refresh();
         h.reply("containers_snapshot", Err("engine unavailable".into()));
@@ -3375,9 +3366,10 @@ mod tests {
             h.snapshot(vec![container('a', "web", "app")]);
             h.controller.select_project("app".into());
             let mut detail = compose_detail("app");
-            detail["services"] = Value::Null;
-            detail["configError"] = json!("Compose printed a configuration Newport couldn't read.");
-            h.reply("compose_project", Ok(detail));
+            detail.services = None;
+            detail.config_error =
+                Some("Compose printed a configuration Newport couldn't read.".into());
+            h.reply_project(Ok(detail));
             h.controller.poll(true);
             assert_eq!(h.controller.compose_run_blocked_reason("app"), None);
             assert!(!h.controller.compose_run(
@@ -3408,17 +3400,20 @@ mod tests {
             h.snapshot(vec![container('a', "web", "app")]);
             h.controller.select_project("app".into());
             let mut detail = compose_detail("app");
-            detail["services"] = Value::Null;
+            detail.services = None;
             if missing_files {
-                detail["files"] =
-                    json!([{"path":"/srv/app/compose.yaml","text":null,"error":"No such file"}]);
-                detail["configError"] =
-                    json!("open /srv/app/compose.yaml: no such file or directory");
+                detail.files = vec![compose::File {
+                    path: "/srv/app/compose.yaml".into(),
+                    text: None,
+                    error: Some("No such file".into()),
+                }];
+                detail.config_error =
+                    Some("open /srv/app/compose.yaml: no such file or directory".into());
             } else {
-                detail["configFiles"] = json!([]);
-                detail["configError"] = json!("Compose didn't record this project's files.");
+                detail.config_files = vec![];
+                detail.config_error = Some("Compose didn't record this project's files.".into());
             }
-            h.reply("compose_project", Ok(detail));
+            h.reply_project(Ok(detail));
             h.controller.poll(true);
             h.snapshot(vec![]);
             assert!(h.controller.can_compose_run("app"));
@@ -3441,10 +3436,10 @@ mod tests {
         h.snapshot(vec![container('a', "web", "app")]);
         h.controller.select_project("app".into());
         let mut detail = compose_detail("app");
-        detail["cli"] = Value::Null;
-        detail["cliError"] = json!("The Compose CLI isn't installed on this server.");
-        detail["configError"] = json!("Inspection failed.");
-        h.reply("compose_project", Ok(detail));
+        detail.cli = None;
+        detail.cli_error = Some("The Compose CLI isn't installed on this server.".into());
+        detail.config_error = Some("Inspection failed.".into());
+        h.reply_project(Ok(detail));
         h.controller.poll(true);
         assert_eq!(
             h.controller.compose_run_blocked_reason("app"),
@@ -3460,9 +3455,9 @@ mod tests {
         assert_eq!(h.count("compose_run"), 0);
         h.controller.retry_compose();
         let mut detail = compose_detail("app");
-        detail["services"] = Value::Null;
-        detail["configError"] = json!("Could not inspect the project.");
-        h.reply("compose_project", Ok(detail));
+        detail.services = None;
+        detail.config_error = Some("Could not inspect the project.".into());
+        h.reply_project(Ok(detail));
         h.controller.poll(true);
         assert!(
             h.controller
@@ -3499,7 +3494,7 @@ mod tests {
         h.snapshot(rows.clone());
         h.compose_details("app");
         h.compose_details("other");
-        h.reply("compose_jobs", Ok(json!({"jobs":[]})));
+        h.reply("compose_jobs", Ok(listing(vec![])));
         h.controller.poll(true);
         h.controller.select_project("app".into());
         assert!(h.controller.compose_run(
@@ -3524,10 +3519,10 @@ mod tests {
             "unrelated project remains independent"
         );
         h.controller.select_project("other".into());
-        h.reply("compose_run", Ok(json!({"job":"job-a"})));
+        h.reply("compose_run", Ok(started("job-a")));
         h.controller.poll(true);
         h.reply("containers_snapshot", Ok(snapshot(rows.clone())));
-        h.reply("compose_project", Ok(compose_detail("other")));
+        h.reply_project(Ok(compose_detail("other")));
         h.controller.poll(true);
         assert!(!h.controller.can_compose_run("app"));
         assert_eq!(h.controller.preferred_job("app"), Some("job-a"));
@@ -3541,18 +3536,24 @@ mod tests {
                 force_recreate: false
             }
         ));
-        h.reply("compose_run", Ok(json!({"job":"job-b"})));
+        h.reply("compose_run", Ok(started("job-b")));
         h.controller.poll(false);
         assert!(h.controller.project_busy("app"));
         assert!(h.controller.project_busy("other"));
         assert_eq!(h.controller.preferred_job("app"), Some("job-a"));
         assert_eq!(h.controller.preferred_job("other"), Some("job-b"));
         // This list was already in flight before job-b was acknowledged.
-        h.reply("compose_jobs", Ok(json!({"jobs":[]})));
+        h.reply("compose_jobs", Ok(listing(vec![])));
         h.controller.poll(true);
         assert!(h.controller.project_busy("app"));
         assert!(h.controller.project_busy("other"));
-        h.reply("compose_jobs", Ok(json!({"jobs":[project_job("other","job-b","running"),project_job("app","job-a","running")]})));
+        h.reply(
+            "compose_jobs",
+            Ok(listing(vec![
+                project_job("other", "job-b", State::Running),
+                project_job("app", "job-a", State::Running),
+            ])),
+        );
         h.controller.poll(true);
         assert!(h.controller.started_jobs.is_empty());
         assert!(h.controller.project_busy("app"));
@@ -3595,14 +3596,20 @@ mod tests {
             container('b', "db", "other"),
         ]);
         h.compose_details("app");
-        h.reply("compose_jobs", Ok(json!({"jobs":[project_job("app","job-a","running"),project_job("other","job-b","running")]})));
+        h.reply(
+            "compose_jobs",
+            Ok(listing(vec![
+                project_job("app", "job-a", State::Running),
+                project_job("other", "job-b", State::Running),
+            ])),
+        );
         h.controller.poll(true);
         assert!(h.controller.select_project_job("app", "job-a".into()));
         assert!(h.controller.compose_cancel("job-a".into()));
         h.controller.select_project("other".into());
         assert!(h.controller.compose_cancelling("job-a"));
         assert!(!h.controller.compose_cancelling("job-b"));
-        h.reply("compose_cancel", Ok(json!({"ok":true})));
+        h.reply("compose_cancel", Ok(cancelled()));
         h.controller.poll(true);
         assert!(!h.controller.compose_cancel_pending());
         assert!(h.controller.compose_cancelling("job-a"));
@@ -3619,17 +3626,29 @@ mod tests {
         assert!(h.controller.compose_cancelling("job-a"));
         assert!(!h.controller.compose_cancelling("job-b"));
         // First reply is stale after job-b's cancellation completion invalidated it.
-        h.reply("compose_jobs", Ok(json!({"jobs":[]})));
+        h.reply("compose_jobs", Ok(listing(vec![])));
         h.controller.poll(true);
         assert!(h.controller.compose_cancelling("job-a"));
-        h.reply("compose_jobs", Ok(json!({"jobs":[project_job("app","job-a","running"),project_job("other","job-b","running")]})));
+        h.reply(
+            "compose_jobs",
+            Ok(listing(vec![
+                project_job("app", "job-a", State::Running),
+                project_job("other", "job-b", State::Running),
+            ])),
+        );
         h.controller.poll(true);
         assert!(
             h.controller.compose_cancelling("job-a"),
             "running observation does not finish cancellation"
         );
         h.controller.retry_jobs();
-        h.reply("compose_jobs", Ok(json!({"jobs":[project_job("app","job-a","cancelled"),project_job("other","job-b","running")]})));
+        h.reply(
+            "compose_jobs",
+            Ok(listing(vec![
+                project_job("app", "job-a", State::Cancelled),
+                project_job("other", "job-b", State::Running),
+            ])),
+        );
         h.controller.poll(true);
         assert!(!h.controller.compose_cancelling("job-a"));
         assert!(!h.controller.compose_cancel("job-a".into()));
@@ -3640,7 +3659,7 @@ mod tests {
     fn activity_visibility_gates_polling_but_settles_pending_output_and_allows_explicit_read() {
         let mut h = Harness::new();
         h.controller.select_job("job-a".into());
-        h.reply("compose_job", Ok(job("job-a", "running", 3, "one")));
+        h.reply_output(Ok(job("job-a", State::Running, 3, "one")));
         h.controller.poll(true);
         h.advance(2);
         h.controller.poll(true);
@@ -3652,9 +3671,9 @@ mod tests {
         h.controller.set_activity_active(true);
         assert_eq!(h.count("compose_job"), 2);
         h.controller.set_activity_active(false);
-        h.reply("compose_job", Ok(job("job-a", "running", 6, "two")));
+        h.reply_output(Ok(job("job-a", State::Running, 6, "two")));
         h.controller.poll(true);
-        assert_eq!(h.controller.job_output().unwrap()["output"], "onetwo");
+        assert_eq!(h.controller.job_output().unwrap().output, "onetwo");
         h.advance(2);
         h.controller.poll(true);
         assert_eq!(h.count("compose_job"), 2);
@@ -3664,7 +3683,7 @@ mod tests {
         h.controller.poll(true);
         assert_eq!(h.count("compose_job"), 3);
         h.controller.poll(false);
-        h.reply("compose_job", Ok(job("job-a", "running", 9, "tri")));
+        h.reply_output(Ok(job("job-a", State::Running, 9, "tri")));
         h.controller.poll(false);
         h.advance(5);
         h.controller.poll(false);
@@ -3689,7 +3708,7 @@ mod tests {
         let mut h = Harness::new();
         h.snapshot(vec![container('a', "web", "app")]);
         h.compose_details("app");
-        h.reply("compose_jobs", Ok(json!({"jobs":[]})));
+        h.reply("compose_jobs", Ok(listing(vec![])));
         h.controller.poll(true);
         assert!(h.controller.compose_run(
             "app".into(),
@@ -3700,17 +3719,17 @@ mod tests {
                 force_recreate: false
             }
         ));
-        h.reply("compose_run", Ok(json!({"job":"job-a"})));
+        h.reply("compose_run", Ok(started("job-a")));
         h.controller.poll(true);
         assert_eq!(h.controller.selected_job(), Some("job-a"));
         assert_eq!(h.count("compose_job"), 0);
         h.reply(
             "compose_jobs",
-            Ok(json!({"jobs":[job("job-a","running",0,"")]})),
+            Ok(listing(vec![job("job-a", State::Running, 0, "")])),
         );
         h.controller.poll(true);
         assert!(h.controller.compose_cancel("job-a".into()));
-        h.reply("compose_cancel", Ok(json!({"ok":true})));
+        h.reply("compose_cancel", Ok(cancelled()));
         h.controller.poll(true);
         assert!(h.controller.compose_cancelling("job-a"));
         assert_eq!(h.count("compose_job"), 0);
@@ -3725,18 +3744,18 @@ mod tests {
         h.compose_details("app");
         h.reply(
             "compose_jobs",
-            Ok(json!({"jobs":[job("job-a","running",0,"")]})),
+            Ok(listing(vec![job("job-a", State::Running, 0, "")])),
         );
         h.controller.poll(true);
         assert!(h.controller.select_project_job("app", "job-a".into()));
         assert!(h.controller.compose_cancel("job-a".into()));
-        h.reply("compose_job", Ok(job("job-a", "cancelled", 0, "")));
+        h.reply_output(Ok(job("job-a", State::Cancelled, 0, "")));
         h.controller.poll(true);
         assert!(
             h.controller.compose_cancelling("job-a"),
             "physical cancellation is still settling"
         );
-        h.reply("compose_cancel", Ok(json!({"ok":true})));
+        h.reply("compose_cancel", Ok(cancelled()));
         h.controller.poll(false);
         assert!(!h.controller.compose_cancelling("job-a"));
         assert!(!h.controller.compose_cancel("job-a".into()));
@@ -3751,7 +3770,14 @@ mod tests {
             container('b', "db", "other"),
         ]);
         h.compose_details("app");
-        h.reply("compose_jobs", Ok(json!({"jobs":[project_job("app","latest","failed"),project_job("app","older","running"),project_job("other","elsewhere","running")]})));
+        h.reply(
+            "compose_jobs",
+            Ok(listing(vec![
+                project_job("app", "latest", State::Failed),
+                project_job("app", "older", State::Running),
+                project_job("other", "elsewhere", State::Running),
+            ])),
+        );
         h.controller.poll(true);
         assert_eq!(h.controller.preferred_job("app"), Some("latest"));
         assert!(h.controller.select_project_job("app", "older".into()));
@@ -3764,7 +3790,7 @@ mod tests {
         assert_eq!(h.controller.preferred_job("other"), Some("elsewhere"));
         assert!(h.controller.select_project_job("other", "elsewhere".into()));
         h.controller.retry_jobs();
-        h.reply("compose_jobs", Ok(json!({"jobs":[]})));
+        h.reply("compose_jobs", Ok(listing(vec![])));
         h.controller.poll(true);
         assert_eq!(h.controller.preferred_job("other"), None);
         h.controller.clear_job_selection();
@@ -3775,45 +3801,46 @@ mod tests {
     fn compose_completion_history_is_silent_on_initial_list_and_output_reads() {
         let mut h = Harness::new();
         h.controller.poll(true);
-        h.reply("compose_jobs", Ok(json!({"jobs":[job("past-success", "succeeded", 0, ""),job("past-failure", "failed", 0, ""),job("past-cancel", "cancelled", 0, "")]})));
+        h.reply(
+            "compose_jobs",
+            Ok(listing(vec![
+                job("past-success", State::Succeeded, 0, ""),
+                job("past-failure", State::Failed, 0, ""),
+                job("past-cancel", State::Cancelled, 0, ""),
+            ])),
+        );
         h.controller.poll(true);
         assert!(h.controller.take_compose_completions().is_empty());
         assert!(h.controller.select_job("past-success".into()));
-        h.reply(
-            "compose_job",
-            Ok(job("past-success", "succeeded", 5, "done\n")),
-        );
+        h.reply_output(Ok(job("past-success", State::Succeeded, 5, "done\n")));
         h.controller.poll(false);
         assert!(h.controller.take_compose_completions().is_empty());
         assert!(h.controller.select_job("unlisted-history".into()));
-        h.reply(
-            "compose_job",
-            Ok(job("unlisted-history", "failed", 5, "fail\n")),
-        );
+        h.reply_output(Ok(job("unlisted-history", State::Failed, 5, "fail\n")));
         h.controller.poll(false);
         assert!(h.controller.take_compose_completions().is_empty());
     }
 
     #[test]
     fn compose_completions_deduplicate_list_and_output_for_every_terminal_state() {
-        for state in ["succeeded", "failed", "cancelled"] {
+        for state in [State::Succeeded, State::Failed, State::Cancelled] {
             for output_first in [false, true] {
                 let mut h = Harness::new();
                 h.controller.poll(true);
                 h.reply(
                     "compose_jobs",
-                    Ok(json!({"jobs":[job("job-a", "running", 0, "")]})),
+                    Ok(listing(vec![job("job-a", State::Running, 0, "")])),
                 );
                 h.controller.poll(true);
                 assert!(h.controller.select_job("job-a".into()));
                 if output_first {
-                    h.reply("compose_job", Ok(job("job-a", state, 5, "done\n")));
+                    h.reply_output(Ok(job("job-a", state, 5, "done\n")));
                     h.controller.poll(false);
                 } else {
                     h.controller.retry_jobs();
                     h.reply(
                         "compose_jobs",
-                        Ok(json!({"jobs":[job("job-a", state, 0, "")]})),
+                        Ok(listing(vec![job("job-a", state, 0, "")])),
                     );
                     h.controller.poll(false);
                 }
@@ -3821,7 +3848,7 @@ mod tests {
                 assert_eq!(receipts.len(), 1);
                 assert_eq!(receipts[0].job, "job-a");
                 assert_eq!(receipts[0].project, "app");
-                assert_eq!(receipts[0].state.as_str(), state);
+                assert_eq!(receipts[0].state, state);
                 assert_eq!(receipts[0].started_at, 1000);
                 assert_eq!(receipts[0].finished_at, Some(2000));
                 assert_eq!(receipts[0].output, if output_first { "done\n" } else { "" });
@@ -3829,22 +3856,19 @@ mod tests {
                     h.controller.retry_jobs();
                     h.reply(
                         "compose_jobs",
-                        Ok(json!({"jobs":[job("job-a", state, 0, "")]})),
+                        Ok(listing(vec![job("job-a", state, 0, "")])),
                     );
                 } else {
-                    h.reply("compose_job", Ok(job("job-a", state, 5, "done\n")));
+                    h.reply_output(Ok(job("job-a", state, 5, "done\n")));
                 }
                 h.controller.poll(false);
                 assert!(h.controller.take_compose_completions().is_empty());
                 h.controller.select_job("different-history".into());
-                h.reply(
-                    "compose_job",
-                    Ok(job("different-history", "succeeded", 0, "")),
-                );
+                h.reply_output(Ok(job("different-history", State::Succeeded, 0, "")));
                 h.controller.poll(false);
                 h.controller.select_job("job-a".into());
                 h.controller.retry_job_output();
-                h.reply("compose_job", Ok(job("job-a", state, 5, "")));
+                h.reply_output(Ok(job("job-a", state, 5, "")));
                 h.controller.poll(false);
                 assert!(h.controller.take_compose_completions().is_empty());
             }
@@ -3856,7 +3880,7 @@ mod tests {
         let mut h = Harness::new();
         h.snapshot(vec![container('a', "web", "app")]);
         h.compose_details("app");
-        h.reply("compose_jobs", Ok(json!({"jobs":[]})));
+        h.reply("compose_jobs", Ok(listing(vec![])));
         h.controller.poll(true);
         assert!(h.controller.compose_run(
             "app".into(),
@@ -3867,13 +3891,13 @@ mod tests {
                 force_recreate: false
             }
         ));
-        h.reply("compose_run", Ok(json!({"job":"job-a"})));
+        h.reply("compose_run", Ok(started("job-a")));
         h.controller.poll(false);
         assert!(h.controller.take_compose_completions().is_empty());
         h.controller.poll(true);
         h.reply(
             "compose_jobs",
-            Ok(json!({"jobs":[job("job-a", "failed", 0, "")]})),
+            Ok(listing(vec![job("job-a", State::Failed, 0, "")])),
         );
         let dispatched = h.total();
         h.controller.poll(false);
@@ -3885,7 +3909,7 @@ mod tests {
         let receipts = h.controller.take_compose_completions();
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0].job, "job-a");
-        assert_eq!(receipts[0].state, newport_domain::compose::JobState::Failed);
+        assert_eq!(receipts[0].state, State::Failed);
         assert!(h.controller.take_compose_completions().is_empty());
     }
 
@@ -3893,21 +3917,21 @@ mod tests {
     fn compose_output_running_observation_owns_completion_and_rejects_other_project_receipt() {
         let mut h = Harness::new();
         h.controller.select_job("job-a".into());
-        h.reply("compose_job", Ok(job("job-a", "running", 0, "")));
+        h.reply_output(Ok(job("job-a", State::Running, 0, "")));
         h.controller.poll(true);
         h.controller.retry_job_output();
-        h.reply("compose_job", Ok(job("job-a", "cancelled", 5, "done\n")));
+        h.reply_output(Ok(job("job-a", State::Cancelled, 5, "done\n")));
         h.controller.poll(false);
         assert_eq!(
             h.controller.take_compose_completions()[0].state,
-            newport_domain::compose::JobState::Cancelled
+            State::Cancelled
         );
 
         h.controller.select_job("job-b".into());
-        h.reply("compose_job", Ok(job("job-b", "running", 0, "")));
+        h.reply_output(Ok(job("job-b", State::Running, 0, "")));
         h.controller.poll(false);
         h.controller.retry_job_output();
-        h.reply("compose_job", Ok(project_job("other", "job-b", "failed")));
+        h.reply_output(Ok(project_job("other", "job-b", State::Failed)));
         h.controller.poll(false);
         assert!(h.controller.take_compose_completions().is_empty());
     }
@@ -3918,19 +3942,25 @@ mod tests {
         h.controller.poll(true);
         h.reply(
             "compose_jobs",
-            Ok(json!({"jobs":[job("job-a", "running", 0, ""),job("job-b", "running", 0, "")]})),
+            Ok(listing(vec![
+                job("job-a", State::Running, 0, ""),
+                job("job-b", State::Running, 0, ""),
+            ])),
         );
         h.controller.poll(true);
         h.controller.select_job("job-b".into());
         h.controller.retry_jobs();
         h.reply(
             "compose_jobs",
-            Ok(json!({"jobs":[job("job-a", "succeeded", 0, ""),job("job-b", "running", 0, "")]})),
+            Ok(listing(vec![
+                job("job-a", State::Succeeded, 0, ""),
+                job("job-b", State::Running, 0, ""),
+            ])),
         );
         h.controller.poll(false);
         assert_eq!(h.controller.compose_completions.len(), 1);
         h.controller.retire();
-        h.reply("compose_job", Ok(job("job-b", "failed", 5, "fail\n")));
+        h.reply_output(Ok(job("job-b", State::Failed, 5, "fail\n")));
         h.controller.poll(false);
         assert!(h.controller.take_compose_completions().is_empty());
         assert!(h.controller.observed_compose_jobs.is_empty());
@@ -3942,15 +3972,15 @@ mod tests {
         let count = MAX_COMPLETIONS + 5;
         h.controller.poll(true);
         let jobs: Vec<_> = (0..count)
-            .map(|i| job(&format!("job-{i}"), "running", 0, ""))
+            .map(|i| job(&format!("job-{i}"), State::Running, 0, ""))
             .collect();
-        h.reply("compose_jobs", Ok(json!({"jobs":jobs})));
+        h.reply("compose_jobs", Ok(listing(jobs)));
         h.controller.poll(true);
         h.controller.retry_jobs();
         let jobs: Vec<_> = (0..count)
-            .map(|i| job(&format!("job-{i}"), "succeeded", 0, ""))
+            .map(|i| job(&format!("job-{i}"), State::Succeeded, 0, ""))
             .collect();
-        h.reply("compose_jobs", Ok(json!({"jobs":jobs})));
+        h.reply("compose_jobs", Ok(listing(jobs)));
         h.controller.poll(false);
         let receipts = h.controller.take_compose_completions();
         assert_eq!(receipts.len(), MAX_COMPLETIONS);
@@ -3966,7 +3996,7 @@ mod tests {
         h.controller.poll(true);
         h.reply(
             "compose_jobs",
-            Ok(json!({"jobs":[job("job-a", "succeeded", 0, "")]})),
+            Ok(listing(vec![job("job-a", State::Succeeded, 0, "")])),
         );
         h.controller.poll(true);
         h.controller.select_project("other".into());
@@ -3977,7 +4007,7 @@ mod tests {
         assert_eq!(h.controller.selected_project(), Some("other"));
         assert_eq!(h.total(), dispatched);
         h.controller.retry_jobs();
-        h.reply("compose_jobs", Ok(json!({"jobs":[]})));
+        h.reply("compose_jobs", Ok(listing(vec![])));
         h.controller.poll(true);
         assert!(!h.controller.has_project_job("app", "job-a"));
         h.controller.retire();
@@ -3987,45 +4017,45 @@ mod tests {
     #[test]
     fn compose_output_merges_contiguous_and_overlapping_byte_windows_without_duplicates() {
         for (previous, next, expected) in [
-            (None, job("job-a", "running", 20, "tail"), "tail"),
+            (None, job("job-a", State::Running, 20, "tail"), "tail"),
             (
-                Some(job("job-a", "running", 8, "abc\ndef\n")),
-                job("job-a", "running", 12, "new\n"),
+                Some(job("job-a", State::Running, 8, "abc\ndef\n")),
+                job("job-a", State::Running, 12, "new\n"),
                 "abc\ndef\nnew\n",
             ),
             (
-                Some(job("job-a", "running", 8, "abc\ndef\n")),
-                job("job-a", "running", 19, "def\nghijklmnop\n"),
+                Some(job("job-a", State::Running, 8, "abc\ndef\n")),
+                job("job-a", State::Running, 19, "def\nghijklmnop\n"),
                 "abc\ndef\nghijklmnop\n",
             ),
             (
-                Some(job("job-a", "running", 8, "def\n")),
-                job("job-a", "running", 19, "abc\ndef\nghijklmnop\n"),
+                Some(job("job-a", State::Running, 8, "def\n")),
+                job("job-a", State::Running, 19, "abc\ndef\nghijklmnop\n"),
                 "abc\ndef\nghijklmnop\n",
             ),
             (
-                Some(job("job-a", "running", 8, "abc\ndef\n")),
-                job("job-a", "running", 8, "def\n"),
+                Some(job("job-a", State::Running, 8, "abc\ndef\n")),
+                job("job-a", State::Running, 8, "def\n"),
                 "abc\ndef\n",
             ),
             (
-                Some(job("job-a", "running", 8, "abc\ndef\n")),
-                job("job-a", "succeeded", 8, ""),
+                Some(job("job-a", State::Running, 8, "abc\ndef\n")),
+                job("job-a", State::Succeeded, 8, ""),
                 "abc\ndef\n",
             ),
             (
-                Some(job("job-a", "running", 5, "same\n")),
-                job("job-a", "running", 10, "same\n"),
+                Some(job("job-a", State::Running, 5, "same\n")),
+                job("job-a", State::Running, 10, "same\n"),
                 "same\nsame\n",
             ),
             (
-                Some(job("job-a", "running", 5, "same\n")),
-                job("job-a", "running", 5, "same\n"),
+                Some(job("job-a", State::Running, 5, "same\n")),
+                job("job-a", State::Running, 5, "same\n"),
                 "same\n",
             ),
         ] {
             let mut expected_reply = next.clone();
-            expected_reply["output"] = json!(expected);
+            expected_reply.output = expected.into();
             assert_eq!(
                 append_output("job-a", previous.as_ref(), next).unwrap(),
                 expected_reply
@@ -4035,19 +4065,17 @@ mod tests {
 
     #[test]
     fn compose_output_gaps_keep_only_the_new_contiguous_suffix_and_absolute_offsets() {
-        let previous = job("job-a", "running", 4, "old\n");
+        let previous = job("job-a", State::Running, 4, "old\n");
         for (end, suffix) in [(100, "new\n"), (100, "old\n"), (100, ""), (u64::MAX, "é\n")] {
             let merged = append_output(
                 "job-a",
                 Some(&previous),
-                job("job-a", "running", end, suffix),
+                job("job-a", State::Running, end, suffix),
             )
             .unwrap();
-            assert_eq!(merged["output"], suffix);
-            assert_eq!(merged["offset"], end);
-            let lines =
-                newport_domain::compose::output_lines(merged["output"].as_str().unwrap(), end)
-                    .unwrap();
+            assert_eq!(merged.output, suffix);
+            assert_eq!(merged.offset, end);
+            let lines = newport_domain::compose::output_lines(merged.output.as_str(), end).unwrap();
             if let Some(line) = lines.first() {
                 assert_eq!(line.offset, end - suffix.len() as u64);
             }
@@ -4056,62 +4084,53 @@ mod tests {
 
     #[test]
     fn compose_output_overlap_preserves_utf8_boundaries_and_rejects_inconsistent_bytes() {
-        let previous = job("job-a", "running", 107, "é🙂\n");
+        let previous = job("job-a", State::Running, 107, "é🙂\n");
         let merged = append_output(
             "job-a",
             Some(&previous),
-            job("job-a", "running", 110, "🙂\n€"),
+            job("job-a", State::Running, 110, "🙂\n€"),
         )
         .unwrap();
-        assert_eq!(merged["output"], "é🙂\n€");
-        assert_eq!(merged["offset"], 110);
+        assert_eq!(merged.output, "é🙂\n€");
+        assert_eq!(merged.offset, 110);
         for next in [
-            job("job-b", "running", 110, "🙂\n€"),
-            job("job-a", "running", 106, ""),
-            job("job-a", "running", 1, "é"),
-            job("job-a", "running", 110, "🙃\n€"),
+            job("job-b", State::Running, 110, "🙂\n€"),
+            job("job-a", State::Running, 106, ""),
+            job("job-a", State::Running, 1, "é"),
+            job("job-a", State::Running, 110, "🙃\n€"),
             // Start 101 lies inside the retained é; byte offsets are not chars.
-            job("job-a", "running", 108, "x🙂\ny"),
+            job("job-a", State::Running, 108, "x🙂\ny"),
             // End 107 would split the new emoji, which cannot extend old text.
-            job("job-a", "running", 109, "🙂"),
+            job("job-a", State::Running, 109, "🙂"),
         ] {
             assert!(
                 append_output("job-a", Some(&previous), next.clone()).is_err(),
-                "{next}"
+                "{next:?}"
             );
         }
-        assert!(append_output("job-a", None, job("job-a", "running", 1, "é")).is_err());
+        assert!(append_output("job-a", None, job("job-a", State::Running, 1, "é")).is_err());
         assert!(
             append_output(
                 "job-a",
-                Some(&job("job-a", "running", 1, "é")),
-                job("job-a", "running", 2, "a")
+                Some(&job("job-a", State::Running, 1, "é")),
+                job("job-a", State::Running, 2, "a")
             )
             .is_err()
         );
-        for (field, value) in [
-            ("offset", json!(-1)),
-            ("output", Value::Null),
-            ("state", json!("unknown")),
-        ] {
-            let mut next = job("job-a", "running", 107, "");
-            next[field] = value;
-            assert!(append_output("job-a", Some(&previous), next).is_err());
-        }
     }
 
     #[test]
     fn compose_output_caps_retention_before_allocating_the_merged_text() {
         let prefix = "€".repeat(MAX_OUTPUT_BYTES / 3);
         let previous_end = prefix.len() as u64;
-        let previous = job("job-a", "running", previous_end, &prefix);
+        let previous = job("job-a", State::Running, previous_end, &prefix);
         let merged = append_output(
             "job-a",
             Some(&previous),
-            job("job-a", "running", previous_end + 2, "é"),
+            job("job-a", State::Running, previous_end + 2, "é"),
         )
         .unwrap();
-        let output = merged["output"].as_str().unwrap();
+        let output = merged.output.as_str();
         assert_eq!(output, format!("{}é", &prefix[3..]));
         assert!(output.len() <= MAX_OUTPUT_BYTES);
         let large_suffix = "🙂".repeat(MAX_OUTPUT_BYTES / 4 + 2);
@@ -4120,14 +4139,14 @@ mod tests {
             Some(&previous),
             job(
                 "job-a",
-                "running",
+                State::Running,
                 previous_end + large_suffix.len() as u64,
                 &large_suffix,
             ),
         )
         .unwrap();
-        assert_eq!(merged["output"].as_str().unwrap(), &large_suffix[8..]);
-        assert_eq!(merged["output"].as_str().unwrap().len(), MAX_OUTPUT_BYTES);
+        assert_eq!(merged.output.as_str(), &large_suffix[8..]);
+        assert_eq!(merged.output.as_str().len(), MAX_OUTPUT_BYTES);
         let duplicate = append_output("job-a", Some(&merged), merged.clone()).unwrap();
         assert_eq!(duplicate, merged);
     }
@@ -4136,23 +4155,20 @@ mod tests {
     fn compose_output_gap_advances_next_read_but_invalid_reply_preserves_cache_and_cursor() {
         let mut h = Harness::new();
         h.controller.select_job("job-a".into());
-        h.reply("compose_job", Ok(job("job-a", "running", 4, "old\n")));
+        h.reply_output(Ok(job("job-a", State::Running, 4, "old\n")));
         h.controller.poll(true);
         h.controller.retry_job_output();
         assert_eq!(h.last_args("compose_job")["offset"], 4);
-        h.reply("compose_job", Ok(job("job-a", "running", 100, "new\n")));
+        h.reply_output(Ok(job("job-a", State::Running, 100, "new\n")));
         h.controller.poll(true);
-        assert_eq!(h.controller.job_output().unwrap()["output"], "new\n");
+        assert_eq!(h.controller.job_output().unwrap().output, "new\n");
         let revision = h.controller.resource("compose-output").unwrap().revision;
         h.controller.retry_job_output();
         assert_eq!(h.last_args("compose_job")["offset"], 100);
-        h.reply(
-            "compose_job",
-            Ok(job("job-a", "succeeded", 104, "bad\nend\n")),
-        );
+        h.reply_output(Ok(job("job-a", State::Succeeded, 104, "bad\nend\n")));
         h.controller.poll(true);
-        assert_eq!(h.controller.job_output().unwrap()["output"], "new\n");
-        assert_eq!(h.controller.job_output().unwrap()["state"], "running");
+        assert_eq!(h.controller.job_output().unwrap().output, "new\n");
+        assert_eq!(h.controller.job_output().unwrap().state, State::Running);
         assert_eq!(
             h.controller.resource("compose-output").unwrap().revision,
             revision
@@ -4167,9 +4183,9 @@ mod tests {
         assert!(!h.controller.finished_jobs.iter().any(|job| job == "job-a"));
         h.controller.retry_job_output();
         assert_eq!(h.last_args("compose_job")["offset"], 100);
-        h.reply("compose_job", Ok(job("job-a", "succeeded", 104, "end\n")));
+        h.reply_output(Ok(job("job-a", State::Succeeded, 104, "end\n")));
         h.controller.poll(false);
-        assert_eq!(h.controller.job_output().unwrap()["output"], "new\nend\n");
+        assert_eq!(h.controller.job_output().unwrap().output, "new\nend\n");
         assert!(
             h.controller
                 .resource("compose-output")
@@ -4186,19 +4202,19 @@ mod tests {
         h.controller.select_job("job-a".into());
         h.controller.select_job("job-b".into());
         assert_eq!(h.count("compose_job"), 1);
-        h.reply("compose_job", Ok(job("job-a", "running", 3, "old")));
+        h.reply_output(Ok(job("job-a", State::Running, 3, "old")));
         h.controller.poll(true);
         assert!(h.controller.job_output().is_none());
         assert_eq!(h.last_args("compose_job")["job"], "job-b");
         assert_eq!(h.last_args("compose_job")["offset"], 0);
-        h.reply("compose_job", Ok(job("job-b", "running", 3, "new")));
+        h.reply_output(Ok(job("job-b", State::Running, 3, "new")));
         h.controller.poll(true);
         h.advance(1);
         h.controller.poll(true);
         assert_eq!(h.last_args("compose_job")["offset"], 3);
-        h.reply("compose_job", Ok(job("job-b", "running", 1, "backwards")));
+        h.reply_output(Ok(job("job-b", State::Running, 1, "backwards")));
         h.controller.poll(true);
-        assert_eq!(h.controller.job_output().unwrap()["output"], "new");
+        assert_eq!(h.controller.job_output().unwrap().output, "new");
         assert!(
             h.controller
                 .resource("compose-output")
@@ -4207,14 +4223,14 @@ mod tests {
                 .is_some()
         );
         h.controller.retry_job_output();
-        h.reply(
-            "compose_job",
-            Ok(job("job-b", "succeeded", 1_200_003, &"€".repeat(400_000))),
-        );
+        h.reply_output(Ok(job(
+            "job-b",
+            State::Succeeded,
+            1_200_003,
+            &"€".repeat(400_000),
+        )));
         h.controller.poll(true);
-        let output = h.controller.job_output().unwrap()["output"]
-            .as_str()
-            .unwrap();
+        let output = h.controller.job_output().unwrap().output.as_str();
         assert!(output.len() <= MAX_OUTPUT_BYTES);
         assert!(output.ends_with('€'));
         let count = h.count("compose_job");
@@ -4228,7 +4244,7 @@ mod tests {
         let mut h = Harness::new();
         h.snapshot(vec![container('a', "web", "app")]);
         h.compose_details("app");
-        h.reply("compose_jobs", Ok(json!({"jobs":[]})));
+        h.reply("compose_jobs", Ok(listing(vec![])));
         h.controller.poll(true);
         assert!(!h.controller.compose_run(
             "app".into(),
@@ -4257,21 +4273,21 @@ mod tests {
         ));
         h.controller.select_project("other".into());
         let count = h.total();
-        h.reply("compose_run", Ok(json!({"job":"job-a"})));
+        h.reply("compose_run", Ok(started("job-a")));
         h.controller.poll(false);
         assert_eq!(h.total(), count);
         assert_eq!(h.controller.selected_job(), None);
         h.controller.poll(true);
         h.reply(
             "compose_jobs",
-            Ok(json!({"jobs":[job("job-a","running",0,"")]})),
+            Ok(listing(vec![job("job-a", State::Running, 0, "")])),
         );
         h.controller.poll(true);
         assert!(h.controller.compose_cancel("job-a".into()));
         assert!(!h.controller.compose_cancel("job-a".into()));
         h.controller.retire();
         let count = h.total();
-        h.reply("compose_cancel", Ok(json!({"ok":true})));
+        h.reply("compose_cancel", Ok(cancelled()));
         h.controller.poll(true);
         assert_eq!(h.total(), count);
         assert!(!h.controller.compose_cancel_pending());
@@ -4309,7 +4325,7 @@ mod tests {
             Some("app failed to start")
         );
         h.controller.select_job("job-a".into());
-        h.reply("compose_job", Ok(job("job-a", "running", 0, "")));
+        h.reply_output(Ok(job("job-a", State::Running, 0, "")));
         h.controller.poll(false);
         assert!(h.controller.compose_cancel("job-a".into()));
         h.controller.select_job("job-b".into());
@@ -4368,12 +4384,31 @@ mod tests {
         assert_eq!(h.count("docker_disk"), 3);
     }
 
-    fn quick_disk(size: u64) -> Value {
-        let mut quick = disk(size);
-        quick["volumesMeasured"] = json!(false);
-        quick["volumes"] = json!([{"name":"data","driver":"local","size":null,"refCount":1,"anonymous":false,"compose":null}]);
-        quick["totals"]["volumes"] = json!({"count":1,"size":0,"reclaimable":0});
+    fn volume(name: &str, size: Option<u64>, ref_count: u64) -> DockerVolume {
+        DockerVolume {
+            name: name.into(),
+            driver: "local".into(),
+            size,
+            ref_count: Some(ref_count),
+            ..Default::default()
+        }
+    }
+    fn volumes_totals(count: u64, size: u64) -> DiskTotals {
+        DiskTotals {
+            count,
+            size,
+            reclaimable: 0,
+        }
+    }
+    fn quick_reading(size: u64) -> DockerDisk {
+        let mut quick = disk_reading(size);
+        quick.volumes_measured = false;
+        quick.volumes = vec![volume("data", None, 1)];
+        quick.totals.volumes = volumes_totals(1, 0);
         quick
+    }
+    fn quick_disk(size: u64) -> ipc::Reply {
+        ipc::Reply::Disk(Box::new(quick_reading(size)))
     }
 
     #[test]
@@ -4393,10 +4428,10 @@ mod tests {
         assert_eq!(shown.volumes[0].size, None);
         assert_eq!(h.count("docker_disk"), 2, "volume sizes are read after");
         assert_eq!(h.last_args("docker_disk")["part"], "volumes");
-        let mut measured = disk(0);
-        measured["volumes"] = json!([{"name":"data","driver":"local","size":700,"refCount":1,"anonymous":false,"compose":null}]);
-        measured["totals"]["volumes"] = json!({"count":1,"size":700,"reclaimable":0});
-        h.reply("docker_disk", Ok(measured));
+        let mut measured = disk_reading(0);
+        measured.volumes = vec![volume("data", Some(700), 1)];
+        measured.totals.volumes = volumes_totals(1, 700);
+        h.reply("docker_disk", Ok(ipc::Reply::Disk(Box::new(measured))));
         h.controller.poll(true);
         assert!(
             h.controller.disk_revision() > quick_revision,
@@ -4428,10 +4463,10 @@ mod tests {
         h.controller.set_disk_active(true);
         h.controller.poll(true);
         assert_eq!(h.count("docker_disk"), 4);
-        let mut removed = quick_disk(90);
-        removed["volumes"] = json!([]);
-        removed["totals"]["volumes"] = json!({"count":0,"size":0,"reclaimable":0});
-        h.reply("docker_disk", Ok(removed));
+        let mut removed = quick_reading(90);
+        removed.volumes = vec![];
+        removed.totals.volumes = volumes_totals(0, 0);
+        h.reply("docker_disk", Ok(ipc::Reply::Disk(Box::new(removed))));
         h.controller.poll(true);
         let current = h.controller.disk().unwrap();
         assert!(current.volumes.is_empty(), "no stale volume rows");
@@ -4444,13 +4479,10 @@ mod tests {
         h.controller.set_disk_active(false);
         h.controller.set_disk_active(true);
         h.controller.poll(true);
-        let mut created = quick_disk(90);
-        created["volumes"] = json!([
-            {"name":"data","driver":"local","size":null,"refCount":1,"anonymous":false,"compose":null},
-            {"name":"logs","driver":"local","size":null,"refCount":0,"anonymous":false,"compose":null}
-        ]);
-        created["totals"]["volumes"] = json!({"count":2,"size":0,"reclaimable":0});
-        h.reply("docker_disk", Ok(created));
+        let mut created = quick_reading(90);
+        created.volumes = vec![volume("data", None, 1), volume("logs", None, 0)];
+        created.totals.volumes = volumes_totals(2, 0);
+        h.reply("docker_disk", Ok(ipc::Reply::Disk(Box::new(created))));
         h.controller.poll(true);
         let partial = h.controller.disk().unwrap();
         assert!(!partial.volumes_measured, "the new volume is not sized yet");
@@ -4476,7 +4508,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_disk_refresh_keeps_typed_data_and_requires_retry_or_reactivation() {
+    fn an_unexpected_disk_reply_keeps_typed_data_and_requires_retry_or_reactivation() {
         let mut h = Harness::new();
         h.controller.poll(true);
         h.controller.set_disk_active(true);
@@ -4484,10 +4516,7 @@ mod tests {
         h.controller.poll(true);
         let updated = h.controller.resource("docker-disk").unwrap().updated_at;
         h.controller.retry_disk();
-        h.reply(
-            "docker_disk",
-            Ok(json!({"images":[],"volumes":[],"totals":null})),
-        );
+        h.reply("docker_disk", Ok(logs("not a disk reading", None)));
         h.controller.poll(true);
         assert_eq!(h.controller.disk().unwrap().totals.size(), 100);
         assert_eq!(
@@ -4501,7 +4530,7 @@ mod tests {
                 .error
                 .as_deref()
                 .unwrap()
-                .starts_with("Invalid Containers response:")
+                .starts_with("Unexpected Containers response")
         );
         h.advance(60);
         for _ in 0..10 {
@@ -4548,7 +4577,7 @@ mod tests {
             json!({"id":"00000000-0000-0000-0000-00000000000a","what":"dangling-images"})
         );
         h.reply("docker_disk", Ok(disk(999)));
-        h.reply("docker_prune", Ok(json!({"removed":2,"reclaimed":40})));
+        h.reply("docker_prune", Ok(pruned(2, 40)));
         h.controller.poll(true);
         assert_eq!(h.controller.disk().unwrap().totals.size(), 100);
         assert_eq!(h.count("docker_disk"), 3);
@@ -4562,10 +4591,7 @@ mod tests {
                 reclaimed: 40
             })
         );
-        assert_eq!(
-            receipts[0].result.as_ref().unwrap(),
-            &json!({"removed":2,"reclaimed":40})
-        );
+        assert_eq!(receipts[0].result.as_ref().unwrap(), &pruned(2, 40));
         h.reply("docker_disk", Ok(disk(60)));
         h.controller.poll(true);
         assert_eq!(h.controller.disk().unwrap().totals.size(), 60);
@@ -4653,9 +4679,15 @@ mod tests {
             h.controller.shell_command(&id('a'), "web").is_ok(),
             "ordinary refresh retains last accepted state"
         );
-        let mut podman = snapshot(vec![container('a', "web", "app")]);
-        podman["engine"]["podman"] = json!(true);
-        h.reply("containers_snapshot", Ok(podman));
+        let mut podman = ContainersSnapshot {
+            containers: vec![container('a', "web", "app")],
+            ..Default::default()
+        };
+        podman.engine.podman = true;
+        h.reply(
+            "containers_snapshot",
+            Ok(ipc::Reply::Snapshot(Box::new(podman))),
+        );
         h.controller.poll(true);
         assert!(
             h.controller
@@ -4726,7 +4758,7 @@ mod tests {
         };
         h.snapshot(rows.clone());
         h.compose_details("app");
-        h.reply("compose_jobs", Ok(json!({"jobs":[]})));
+        h.reply("compose_jobs", Ok(listing(vec![])));
         h.controller.poll(true);
         assert!(h.controller.can_action(&removal));
         assert!(h.controller.compose_run(
@@ -4742,7 +4774,7 @@ mod tests {
         assert!(h.controller.shell_command(&id('b'), "db").is_ok());
         assert!(!h.controller.can_action(&removal));
         assert!(!h.controller.can_action(&stop('a', "web")));
-        h.reply("compose_run", Ok(json!({"job":"job-a"})));
+        h.reply("compose_run", Ok(started("job-a")));
         h.controller.poll(true);
         h.reply("containers_snapshot", Ok(snapshot(rows.clone())));
         h.controller.poll(true);
@@ -4753,17 +4785,17 @@ mod tests {
         assert!(h.controller.shell_command(&id('b'), "db").is_ok());
         h.reply(
             "compose_jobs",
-            Ok(json!({"jobs":[job("job-a","running",0,"")]})),
+            Ok(listing(vec![job("job-a", State::Running, 0, "")])),
         );
         h.controller.poll(true);
         assert!(!h.controller.can_action(&removal));
         assert!(h.controller.compose_cancel("job-a".into()));
         assert!(h.controller.shell_command(&id('a'), "web").is_err());
-        h.reply("compose_cancel", Ok(json!({"ok":true})));
+        h.reply("compose_cancel", Ok(cancelled()));
         h.controller.poll(true);
         h.reply(
             "compose_jobs",
-            Ok(json!({"jobs":[job("job-a","cancelled",0,"")]})),
+            Ok(listing(vec![job("job-a", State::Cancelled, 0, "")])),
         );
         h.reply("containers_snapshot", Ok(snapshot(rows.clone())));
         h.controller.poll(true);
@@ -4835,15 +4867,15 @@ mod tests {
         h.snapshot(vec![container('a', "web", "app")]);
         h.reply(
             "compose_jobs",
-            Ok(json!({"jobs":[job("job-a","running",0,"")]})),
+            Ok(listing(vec![job("job-a", State::Running, 0, "")])),
         );
         h.controller.poll(true);
         h.controller.select_job("job-a".into());
-        h.reply("compose_job", Ok(job("job-a", "running", 0, "")));
+        h.reply_output(Ok(job("job-a", State::Running, 0, "")));
         h.controller.poll(true);
         assert!(h.controller.shell_command(&id('a'), "web").is_err());
         h.controller.retry_jobs();
-        h.reply("compose_jobs", Ok(json!({"jobs":[]})));
+        h.reply("compose_jobs", Ok(listing(vec![])));
         h.controller.poll(true);
         assert!(h.controller.shell_command(&id('a'), "web").is_ok());
     }
@@ -4888,18 +4920,18 @@ mod tests {
         assert!(h.controller.action(confirmed.clone()));
         h.controller.retire();
         let requests = h.total();
-        h.reply("containers_remove", Ok(json!({"removed":1})));
+        h.reply("containers_remove", Ok(removed(1)));
         h.controller.poll(true);
         assert_eq!(h.total(), requests);
         let receipts = h.controller.take_action_completions();
         assert_eq!(receipts[0].action, confirmed);
-        assert_eq!(receipts[0].result.as_ref().unwrap(), &json!({"removed":1}));
+        assert_eq!(receipts[0].result.as_ref().unwrap(), &removed(1));
         assert_eq!(h.count("containers_remove"), 2);
     }
 
     #[test]
     fn port_destination_validates_exact_observed_binding_and_normalizes_reachable_addresses() {
-        use newport_domain::containers::PortProtocol;
+        use wire::PortProtocol;
         let mut h = Harness::new();
         let bindings = vec![
             ContainerPort {
@@ -4995,7 +5027,7 @@ mod tests {
 
     #[test]
     fn port_clicks_reject_stopped_recreated_stale_and_conflicting_targets() {
-        use newport_domain::containers::PortProtocol;
+        use wire::PortProtocol;
         let mut h = Harness::new();
         let port = ContainerPort {
             ip: None,
@@ -5147,10 +5179,10 @@ mod tests {
     }
 
     #[test]
-    fn stats_failed_or_malformed_snapshot_does_not_sample_retained_values() {
+    fn stats_failed_or_unexpected_snapshot_reply_does_not_sample_retained_values() {
         let mut h = Harness::new();
         h.snapshot(vec![measured('a', Some(1.), Some(10))]);
-        for response in [Err("offline".into()), Ok(json!({"invalid":"snapshot"}))] {
+        for response in [Err("offline".into()), Ok(disk(1))] {
             h.advance(5);
             h.controller.refresh();
             h.reply("containers_snapshot", response);

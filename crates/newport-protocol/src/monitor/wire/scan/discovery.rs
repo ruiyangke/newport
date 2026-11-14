@@ -81,6 +81,25 @@ pub(crate) fn check_helper_reply(body: &[u8], admitted: bool) -> Result<(), Erro
     )
 }
 
+#[cfg(test)]
+pub(super) fn tables() -> Vec<(super::Table, &'static str)> {
+    use super::table;
+    vec![
+        (table(SNAPSHOT), "newport.discovery.Snapshot"),
+        (table(REPORT), "newport.discovery.Report"),
+        (table(HELPER_REQUEST), "newport.discovery.HelperRequest"),
+        (
+            table(HELPER_REQUEST_HEADER).envelope(),
+            "newport.discovery.HelperRequest",
+        ),
+        (table(HELPER_REPLY), "newport.discovery.HelperReply"),
+        (
+            table(HELPER_HEADER).envelope(),
+            "newport.discovery.HelperReply",
+        ),
+    ]
+}
+
 schema!(HELPER_REQUEST {
     1 => (1, false, Kind::Text(64)), 2 => (1, false, Kind::Scalar),
     3 => (1, false, Kind::Discovery),
@@ -191,9 +210,8 @@ schema!(COVERAGE {
 });
 schema!(DIAGNOSTICS {
     1 => (1, false, Kind::Integer32), 2 => (1, false, Kind::Integer32),
-    3 => (1, false, Kind::Integer32), 4 => (1, false, Kind::Scalar),
 });
-schema!(SNAPSHOT {
+schema!(pub(super) SNAPSHOT {
     1 => (1, false, Kind::Scalar), 2 => (1, false, Kind::Scalar),
     3 => (1, false, Kind::Scalar), 4 => (1, false, Kind::Message(SCOPE)),
     5 => (MAX_LISTENERS, false, Kind::Message(SOCKET)),

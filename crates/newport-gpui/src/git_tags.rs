@@ -28,14 +28,18 @@ pub(super) struct DeleteReview {
     oid: String,
     snapshot: String,
 }
-pub(super) fn tag_identity(tag: &Value) -> Option<(String, String)> {
-    let name = tag["name"]["display"].as_str()?;
-    let oid = tag["oid"]["hex"].as_str()?;
-    (!name.is_empty()
+/// The name and object of a selected tag that names itself losslessly.
+pub(super) fn tag_identity(selected: Option<&git_listing::Entry>) -> Option<(String, String)> {
+    let Some(git_listing::Entry::Tag(tag)) = selected else {
+        return None;
+    };
+    let name = tag.name.as_ref()?;
+    let oid = &tag.oid.hex;
+    (!name.display.is_empty()
         && !oid.is_empty()
-        && tag["symbolicTarget"].is_null()
-        && tag["name"]["bytesB64"] == base64::engine::general_purpose::STANDARD.encode(name))
-    .then(|| (name.to_owned(), oid.to_owned()))
+        && tag.symbolic_target.is_none()
+        && name.bytes_b64 == base64::engine::general_purpose::STANDARD.encode(&name.display))
+    .then(|| (name.display.clone(), oid.clone()))
 }
 pub(super) struct Form {
     id: uuid::Uuid,
@@ -58,41 +62,50 @@ impl Form {
         }
     }
 }
-fn target_commit<'a>(tab: usize, selected: &'a Value, status: &'a Value) -> Option<&'a str> {
-    let oid = match tab {
-        1 => &selected["oid"]["hex"],
-        4 => &status["metadata"]["head"]["oid"]["hex"],
-        _ => return None,
+fn target_commit<'a>(
+    tab: usize,
+    selected: Option<&'a git_listing::Entry>,
+    status: Option<&'a git_listing::StatusPage>,
+) -> Option<&'a str> {
+    let oid = match (tab, selected) {
+        (1, Some(git_listing::Entry::Commit(commit))) => Some(&commit.oid),
+        (4, _) => status.and_then(|status| status.metadata.head.oid.as_ref()),
+        _ => None,
     };
-    oid.as_str().filter(|value| !value.is_empty())
+    oid.map(|oid| oid.hex.as_str())
+        .filter(|value| !value.is_empty())
 }
 impl Newport {
     pub(super) fn can_modify_tag(&self) -> bool {
         self.git.tab == 4
             && !self.git_mutation_blocks_write()
-            && self.git.repo["capabilities"]["readOnly"] == false
-            && tag_identity(&self.git.selected).is_some()
+            && self.git.writable()
+            && tag_identity(self.git.selected.as_ref()).is_some()
             && self.git.error.is_none()
             && ["git-list", "git-tag-status"].iter().all(|key| {
                 self.resources
                     .get(key)
                     .is_some_and(|r| !r.pending && r.error.is_none())
             })
-            && self.value("git-tag-status")["snapshot"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty())
+            && self
+                .git_status("git-tag-status")
+                .is_some_and(|status| !status.snapshot.is_empty())
+    }
+    pub(super) fn tag_status_snapshot(&self) -> String {
+        self.git_status("git-tag-status")
+            .map_or_else(|| "—".into(), |status| status.snapshot.clone())
     }
     fn review_delete_tag(&mut self, cx: &mut Context<Self>) {
         if !self.can_modify_tag() || self.git.tag_form.is_some() || self.git.tag_push.is_some() {
             return;
         }
-        let Some((name, oid)) = tag_identity(&self.git.selected) else {
+        let Some((name, oid)) = tag_identity(self.git.selected.as_ref()) else {
             return;
         };
         self.git.tag_delete = Some(DeleteReview {
             name,
             oid,
-            snapshot: text(&self.value("git-tag-status"), "snapshot"),
+            snapshot: self.tag_status_snapshot(),
         });
         cx.notify();
     }
@@ -123,19 +136,19 @@ impl Newport {
         matches!(self.git.tab, 1 | 4)
             && self.git.integration_review.is_none()
             && !self.git_mutation_blocks_write()
-            && self.git.repo["capabilities"]["readOnly"] == false
+            && self.git.writable()
             && self
                 .resources
                 .get("git-tag-status")
                 .is_some_and(|r| !r.pending && r.error.is_none())
-            && self.value("git-tag-status")["snapshot"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty())
+            && self
+                .git_status("git-tag-status")
+                .is_some_and(|status| !status.snapshot.is_empty())
             && (self.git.tag_form.is_some()
                 || target_commit(
                     self.git.tab,
-                    &self.git.selected,
-                    &self.value("git-tag-status"),
+                    self.git.selected.as_ref(),
+                    self.git_status("git-tag-status"),
                 )
                 .is_some())
     }
@@ -147,9 +160,12 @@ impl Newport {
         {
             return;
         }
-        let status = self.value("git-tag-status");
-        let Some(oid) = target_commit(self.git.tab, &self.git.selected, &status).map(str::to_owned)
-        else {
+        let Some(oid) = target_commit(
+            self.git.tab,
+            self.git.selected.as_ref(),
+            self.git_status("git-tag-status"),
+        )
+        .map(str::to_owned) else {
             return;
         };
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Tag name"));
@@ -192,7 +208,7 @@ impl Newport {
             target,
             kind,
             annotated: false,
-            snapshot: text(&status, "snapshot"),
+            snapshot: self.tag_status_snapshot(),
             _subscriptions: subscriptions,
         });
         cx.notify();
@@ -245,7 +261,13 @@ impl Newport {
             .on_click(cx.listener(|this, _, window, cx| this.new_tag(window, cx)))
     }
     pub(super) fn git_tag_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
-        crate::git_listing::toolbar(&self.git.page, "tag", "tags", self.git_tag_trigger(cx), cx)
+        crate::git_listing::toolbar(
+            self.git.page.as_ref(),
+            "tag",
+            "tags",
+            self.git_tag_trigger(cx),
+            cx,
+        )
     }
     pub(super) fn git_tag_delete_trigger(&self, cx: &mut Context<Self>) -> Button {
         crate::controls::button("review-delete-tag")
@@ -284,7 +306,7 @@ impl Newport {
                             cx.listener(|this, _, _, cx| {
                                 if this.git_write_pending() { return; }
                                 this.git.tag_form = None;
-                                this.git.detail_open = !this.git.selected.is_null();
+                                this.git.detail_open = this.git.selected.is_some();
                                 cx.notify();
                             }),
                         ))
@@ -317,7 +339,6 @@ impl Form {
 #[cfg(test)]
 mod tests {
     use super::{tag_identity, target_commit};
-    use serde_json::{Value, json};
     #[test]
     fn tag_draft_validates_target_and_explicit_annotation() {
         let mut draft = super::Draft {
@@ -349,23 +370,38 @@ mod tests {
     }
     #[test]
     fn delete_tag_requires_lossless_direct_identity() {
-        let tag = json!({"name":{"display":"v1","bytesB64":"djE="},"oid":{"hex":"tag-object"},"peeledOid":{"hex":"commit"}});
-        assert_eq!(tag_identity(&tag), Some(("v1".into(), "tag-object".into())));
+        use crate::git_listing::Entry;
+        let mut tag = crate::git_fixture::tag("v1", "commit");
+        tag.oid.hex = "tag-object".into();
+        let entry = |tag: &newport_protocol::git::Tag| Entry::Tag(tag.clone());
+        assert_eq!(
+            tag_identity(Some(&entry(&tag))),
+            Some(("v1".into(), "tag-object".into()))
+        );
         let mut invalid = tag.clone();
-        invalid["name"]["bytesB64"] = json!("/w==");
-        assert!(tag_identity(&invalid).is_none());
+        invalid.name.as_mut().unwrap().bytes_b64 = "/w==".into();
+        assert!(tag_identity(Some(&entry(&invalid))).is_none());
         let mut symbolic = tag;
-        symbolic["symbolicTarget"] = json!({"display":"refs/tags/other"});
-        assert!(tag_identity(&symbolic).is_none());
+        symbolic.symbolic_target = Some(newport_protocol::git::Path::new(b"refs/tags/other"));
+        assert!(tag_identity(Some(&entry(&symbolic))).is_none());
+        assert!(tag_identity(None).is_none());
     }
     #[test]
     fn history_target_is_selected_commit_not_head() {
-        let selected = json!({"oid":{"hex":"older"}});
-        let status = json!({"metadata":{"head":{"oid":{"hex":"head"}}}});
-        assert_eq!(target_commit(1, &selected, &status), Some("older"));
-        assert_eq!(target_commit(4, &selected, &status), Some("head"));
-        assert_eq!(target_commit(1, &Value::Null, &status), None);
-        assert_eq!(target_commit(4, &selected, &Value::Null), None);
-        assert_eq!(target_commit(3, &selected, &status), None);
+        use crate::git_listing::Entry;
+        let selected = Entry::Commit(crate::git_fixture::commit("older", "Older"));
+        let mut status = crate::git_fixture::status_page("s", vec![], None);
+        status.metadata.head.oid = Some(crate::git_fixture::object("head"));
+        assert_eq!(
+            target_commit(1, Some(&selected), Some(&status)),
+            Some("older")
+        );
+        assert_eq!(
+            target_commit(4, Some(&selected), Some(&status)),
+            Some("head")
+        );
+        assert_eq!(target_commit(1, None, Some(&status)), None);
+        assert_eq!(target_commit(4, Some(&selected), None), None);
+        assert_eq!(target_commit(3, Some(&selected), Some(&status)), None);
     }
 }

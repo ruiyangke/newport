@@ -1,7 +1,7 @@
 //! Remote names are paged independently from the selected configuration and
 //! captured editors. Searching never retargets a pending write or fetches URLs.
 use super::*;
-use newport_protocol::git::Request as GitRequest;
+use newport_protocol::git::{Remote, Request as GitRequest};
 
 fn remote_url(id: &'static str, title: &'static str, url: Option<&str>) -> impl IntoElement {
     let value = url.unwrap_or("Not configured");
@@ -23,23 +23,25 @@ fn remote_url(id: &'static str, title: &'static str, url: Option<&str>) -> impl 
         )
 }
 
-pub(super) fn selected_detail(selected: &Value, detail: &Value) -> Option<Value> {
-    (selected["name"].as_str().is_some_and(|s| !s.is_empty())
-        && selected["name"] == detail["name"]
-        && detail["token"].as_str().is_some_and(|s| !s.is_empty()))
-    .then(|| detail.clone())
+/// The configuration of the selected remote, once it can be reviewed.
+pub(super) fn selected_detail<'a>(
+    selected: Option<&str>,
+    detail: Option<&'a Remote>,
+) -> Option<&'a Remote> {
+    let selected = selected.filter(|name| !name.is_empty())?;
+    detail.filter(|detail| detail.name == selected && !detail.token.is_empty())
 }
 impl Newport {
-    pub(super) fn git_selected_remote(&self) -> Option<Value> {
+    pub(super) fn git_selected_remote(&self) -> Option<&Remote> {
         let resource = self.resources.get("git-remote-detail")?;
         if resource.pending || resource.error.is_some() {
             return None;
         }
-        selected_detail(&self.git.selected, &resource.value)
+        selected_detail(self.git.remote_name(), self.git_remote_detail())
     }
     pub(super) fn git_remote_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         git_listing::toolbar(
-            &self.git.page,
+            self.git.page.as_ref(),
             "remote",
             "remotes",
             crate::controls::button("add-git-remote")
@@ -83,17 +85,12 @@ impl Newport {
                                     .truncate()
                                     .text_size(px(crate::ui::FONT_SIZE))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(
-                                        self.git.selected["name"]
-                                            .as_str()
-                                            .unwrap_or("Remotes")
-                                            .to_owned(),
-                                    ),
+                                    .child(self.git.remote_name().unwrap_or("Remotes").to_owned()),
                             )
                             .child(self.repository_settings_button(cx)),
                     )
                     .when(
-                        self.git.selected.is_null()
+                        self.git.selected.is_none()
                             && self.git.remote_edit.is_none()
                             && self.git.settings.is_none()
                             && !self.git.settings_open,
@@ -119,7 +116,7 @@ impl Newport {
                                     .accessibility_label("Try reading repository status again")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.resources.invalidate("git-remote-status");
-                                        this.request_git(
+                                        this.request_git_typed(
                                             "git-remote-status",
                                             GitRequest::Status {
                                                 repo_id: this.git_repository_id(),
@@ -153,12 +150,12 @@ impl Newport {
                         view.child(remote_url(
                             "remote-fetch-url",
                             "Fetch URL",
-                            remote["url"].as_str(),
+                            remote.url.as_deref(),
                         ))
                         .child(remote_url(
                             "remote-push-url",
                             "Push URL",
-                            remote["pushUrl"].as_str().or(remote["url"].as_str()),
+                            remote.push_url.as_deref().or(remote.url.as_deref()),
                         ))
                         .child(self.git_remote_actions(cx))
                     })
@@ -224,7 +221,6 @@ mod tests {
     use super::{remote_url, selected_detail};
     use gpui_kit::base::test_support::snapshots;
     use gpui_kit::{self as gpui, Context, IntoElement, Render, Window, div, prelude::*};
-    use serde_json::{Value, json};
     struct UrlHost;
     impl Render for UrlHost {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -263,10 +259,16 @@ mod tests {
     }
     #[test]
     fn details_require_the_selected_name_and_reviewable_configuration() {
-        let selected = json!({"name":"backup"});
-        assert!(selected_detail(&selected, &json!({"name":"origin","token":"t"})).is_none());
-        assert!(selected_detail(&selected, &json!({"name":"backup"})).is_none());
-        assert!(selected_detail(&Value::Null, &Value::Null).is_none());
-        assert!(selected_detail(&selected, &json!({"name":"backup","token":"t"})).is_some());
+        let remote = |name: &str, token: &str| newport_protocol::git::Remote {
+            name: name.into(),
+            url: None,
+            push_url: None,
+            token: token.into(),
+        };
+        let selected = Some("backup");
+        assert!(selected_detail(selected, Some(&remote("origin", "t"))).is_none());
+        assert!(selected_detail(selected, Some(&remote("backup", ""))).is_none());
+        assert!(selected_detail(None, None).is_none());
+        assert!(selected_detail(selected, Some(&remote("backup", "t"))).is_some());
     }
 }

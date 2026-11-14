@@ -89,8 +89,6 @@ struct Graph<'a> {
     /// Exactly these features instead of the defaults.
     features: Option<&'a str>,
     locked: bool,
-    /// `--config` arguments the build passes to Cargo.
-    config: &'a [String],
 }
 
 /// The desktop executable's Rust target triple.
@@ -107,18 +105,17 @@ fn desktop_triple(target: Option<&str>) -> Result<String> {
 }
 
 /// The graphs a desktop package of `target` ships: the app, the grammar
-/// libraries and the agent it installs on servers. With Remote apps composed
-/// (and GPUI patched for them), the app includes the private crates and the
-/// agent is the Full agent.
-fn desktop_graphs<'a>(root: &Path, target: &str, patch: Option<&'a [String]>) -> Vec<Graph<'a>> {
-    let config = patch.unwrap_or_default();
-    let locked = patch.is_none();
-    let (agent, agent_manifest) = match patch {
-        Some(_) => (
+/// libraries and the agent it installs on servers. With Remote apps composed,
+/// the app includes the private crates and the agent is the Full agent.
+fn desktop_graphs(root: &Path, target: &str, composed: bool) -> Vec<Graph<'static>> {
+    // The private crates change the lockfile for the build.
+    let locked = !composed;
+    let (agent, agent_manifest) = match composed {
+        true => (
             "Newport agent with Remote apps",
             root.join("remote/products/unified-agent/Cargo.toml"),
         ),
-        None => (
+        false => (
             "Newport agent",
             root.join("crates/newport-agent/Cargo.toml"),
         ),
@@ -130,7 +127,6 @@ fn desktop_graphs<'a>(root: &Path, target: &str, patch: Option<&'a [String]>) ->
             targets: vec![target.to_owned()],
             features: None,
             locked,
-            config,
         },
         Graph {
             title: format!("Syntax grammars ({target})"),
@@ -138,7 +134,6 @@ fn desktop_graphs<'a>(root: &Path, target: &str, patch: Option<&'a [String]>) ->
             targets: vec![target.to_owned()],
             features: Some("catalog"),
             locked,
-            config,
         },
         Graph {
             title: format!("{agent} ({})", AGENT_TARGETS.join(", ")),
@@ -146,7 +141,6 @@ fn desktop_graphs<'a>(root: &Path, target: &str, patch: Option<&'a [String]>) ->
             targets: AGENT_TARGETS.map(str::to_owned).to_vec(),
             features: None,
             locked: true,
-            config: &[],
         },
     ]
 }
@@ -167,8 +161,7 @@ pub fn desktop(target: Option<&str>, composed: Option<&Composed>) -> Result<Stri
          their own notices beside them.\n",
         product.product_name, product.version, product.product_name
     );
-    let patch = composed.map(|composed| &composed.patch[..]);
-    for graph in desktop_graphs(&root, &target, patch) {
+    for graph in desktop_graphs(&root, &target, composed.is_some()) {
         section(&mut text, &graph.title);
         text.push_str(&render(&tool, &root, &graph)?);
     }
@@ -189,19 +182,19 @@ fn section(text: &mut String, title: &str) {
     text.push_str(&format!("\n\n{rule}\n{title}\n{rule}\n\n"));
 }
 
-/// The `<name>.NOTICE` next to each patched crate's patch, which states what
+/// The `NOTICE` in each patched crate's folder of patches, which states what
 /// Newport changed as the crate's license asks.
 fn change_statements(directories: &[PathBuf]) -> Result<Vec<String>> {
     let mut statements = Vec::new();
     for directory in directories {
         let mut paths: Vec<PathBuf> = match fs::read_dir(directory) {
             Ok(entries) => entries
-                .map(|entry| entry.map(|entry| entry.path()))
+                .map(|entry| entry.map(|entry| entry.path().join("NOTICE")))
                 .collect::<Result<_, _>>()?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(error.into()),
         };
-        paths.retain(|path| path.extension().is_some_and(|ext| ext == "NOTICE"));
+        paths.retain(|path| path.is_file());
         paths.sort();
         for path in paths {
             statements.push(
@@ -213,34 +206,17 @@ fn change_statements(directories: &[PathBuf]) -> Result<Vec<String>> {
     Ok(statements)
 }
 
-/// A directory to run Cargo in with the build's `--config` arguments as its
-/// configuration: cargo-about runs Cargo itself and can't pass them on.
-fn workspace(root: &Path, config: &[String]) -> Result<tempfile::TempDir> {
+/// A fresh directory for cargo-about's output.
+fn workspace(root: &Path) -> Result<tempfile::TempDir> {
     let parent = root.join("target/notices");
     fs::create_dir_all(&parent)?;
-    let directory = tempfile::tempdir_in(&parent)?;
-    if !config.is_empty() {
-        let settings: Vec<&str> = config
-            .iter()
-            .map(|argument| {
-                argument
-                    .strip_prefix("--config=")
-                    .context("Unsupported Cargo configuration argument")
-            })
-            .collect::<Result<_>>()?;
-        fs::create_dir(directory.path().join(".cargo"))?;
-        fs::write(
-            directory.path().join(".cargo/config.toml"),
-            settings.join("\n") + "\n",
-        )?;
-    }
-    Ok(directory)
+    Ok(tempfile::tempdir_in(&parent)?)
 }
 
 /// Render one graph with `about.hbs`, after checking cargo-about leaves out
 /// only Newport's own crates.
 fn render(tool: &Path, root: &Path, graph: &Graph) -> Result<String> {
-    let directory = workspace(root, graph.config)?;
+    let directory = workspace(root)?;
     let selection = |c: &mut Command| {
         c.current_dir(directory.path())
             .arg("--manifest-path")
@@ -416,7 +392,6 @@ mod tests {
             targets: Vec::new(),
             features: None,
             locked: false,
-            config: &[],
         }
     }
 
@@ -497,67 +472,37 @@ mod tests {
     }
 
     #[test]
-    fn build_configuration_reaches_cargo_from_the_working_directory() {
-        let root = tempfile::tempdir().unwrap();
-        let config = [
-            "--config=patch.crates-io.gpui-pre.git='https://example.com/gpui'".to_owned(),
-            "--config=patch.crates-io.gpui-pre.rev='abc'".to_owned(),
-        ];
-        let directory = workspace(root.path(), &config).unwrap();
-        let written: toml::Value = toml::from_str(
-            &fs::read_to_string(directory.path().join(".cargo/config.toml")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            written["patch"]["crates-io"]["gpui-pre"]["rev"].as_str(),
-            Some("abc")
-        );
-        assert!(
-            !workspace(root.path(), &[])
-                .unwrap()
-                .path()
-                .join(".cargo")
-                .exists()
-        );
-        assert!(workspace(root.path(), &["--locked".to_owned()]).is_err());
-    }
-
-    #[test]
     fn remote_apps_ship_the_full_agent_and_the_changes_to_its_crates() {
         let root = Path::new("/checkout");
-        let core = desktop_graphs(root, "aarch64-apple-darwin", None);
+        let core = desktop_graphs(root, "aarch64-apple-darwin", false);
         assert_eq!(
             core[2].manifest,
             root.join("crates/newport-agent/Cargo.toml")
         );
         assert_eq!(core[2].targets, AGENT_TARGETS);
-        assert!(
-            core.iter()
-                .all(|graph| graph.locked && graph.config.is_empty())
-        );
+        assert!(core.iter().all(|graph| graph.locked));
         assert_eq!(core[1].features, Some("catalog"));
         assert_eq!(core[0].targets, ["aarch64-apple-darwin"]);
 
-        let patch = ["--config=patch.crates-io.gpui-pre.rev='abc'".to_owned()];
-        let full = desktop_graphs(root, "x86_64-pc-windows-msvc", Some(&patch));
+        let full = desktop_graphs(root, "x86_64-pc-windows-msvc", true);
         assert_eq!(
             full[2].manifest,
             root.join("remote/products/unified-agent/Cargo.toml")
         );
-        // The private crates change the lockfile for the build, which passes
-        // the patch to Cargo; the Full agent keeps its own lockfile.
-        assert!(
-            full.iter()
-                .take(2)
-                .all(|graph| !graph.locked && graph.config == patch)
-        );
-        assert!(full[2].locked && full[2].config.is_empty());
+        // The private crates change the lockfile for the build; the Full
+        // agent keeps its own lockfile.
+        assert!(full.iter().take(2).all(|graph| !graph.locked));
+        assert!(full[2].locked);
 
         let directory = tempfile::tempdir().unwrap();
         let patches = directory.path().join("patches");
-        fs::create_dir(&patches).unwrap();
-        fs::write(patches.join("cpal.NOTICE"), "Newport modifies cpal.\n").unwrap();
-        fs::write(patches.join("cpal.patch"), "patch").unwrap();
+        fs::create_dir_all(patches.join("cpal")).unwrap();
+        fs::write(patches.join("cpal/NOTICE"), "Newport modifies cpal.\n").unwrap();
+        fs::write(patches.join("cpal/001-change.patch"), "patch").unwrap();
+        // A crate whose license asks for no statement has no NOTICE.
+        fs::create_dir(patches.join("pulseaudio")).unwrap();
+        fs::write(patches.join("pulseaudio/001-change.patch"), "patch").unwrap();
+        fs::write(patches.join("patched.toml"), "").unwrap();
         assert_eq!(
             change_statements(&[patches, directory.path().join("absent")]).unwrap(),
             ["Newport modifies cpal.\n"]

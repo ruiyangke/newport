@@ -63,10 +63,10 @@ fn choose_local_file(
 }
 
 fn progress_label(progress: &Progress) -> String {
-    let done = bytes(&json!(progress.completed));
+    let done = bytes(progress.completed);
     progress.total.map_or_else(
         || format!("{done} transferred"),
-        |total| format!("{done} / {}", bytes(&json!(total))),
+        |total| format!("{done} / {}", bytes(total)),
     )
 }
 fn direction_name(direction: Direction) -> &'static str {
@@ -227,15 +227,11 @@ impl Newport {
                 return;
             }
         };
-        let current = self.snapshot["config"]["servers"]
-            .as_array()
-            .and_then(|servers| {
-                servers
-                    .iter()
-                    .find(|server| server["id"] == chooser.target.server)
-            })
-            .map(|server| terminal_scope::connection(server, &self.snapshot));
-        if !self.configuration_available() || current.as_ref() != Some(&chooser.target.connection) {
+        let current = self.connection_of(&chooser.target.server);
+        if !self.configuration_available()
+            || current.is_none()
+            || current != chooser.target.connection
+        {
             self.notification = Some(Notification::error(
                 "The connection changed. Choose the file again.",
             ));
@@ -259,16 +255,19 @@ impl Newport {
         if !configuration_available {
             return false;
         }
-        let Some(transfer) = self.file_transfer.as_mut() else {
-            return false;
-        };
         // Page/server navigation leaves the original transfer running. An edited,
         // deleted or restarted connection retires it before consuming its reply.
-        let current = self.snapshot["config"]["servers"]
-            .as_array()
-            .and_then(|servers| servers.iter().find(|s| s["id"] == transfer.server()))
-            .map(|server| terminal_scope::connection(server, &self.snapshot));
-        let obsolete = configuration_available && current.as_ref() != Some(transfer.connection());
+        let current = self
+            .file_transfer
+            .as_ref()
+            .map(|transfer| self.connection_of(transfer.server()));
+        let (Some(current), Some(transfer)) = (current, self.file_transfer.as_mut()) else {
+            return false;
+        };
+        let obsolete = configuration_available
+            && current
+                .as_ref()
+                .is_none_or(|current| Some(current) != transfer.connection());
         let newly_retired = obsolete && !transfer.retired();
         if newly_retired {
             transfer.retire();
@@ -281,7 +280,9 @@ impl Newport {
         }
         let current_scope = configuration_available
             && !transfer.retired()
-            && current.as_ref() == Some(transfer.connection());
+            && current
+                .as_ref()
+                .is_some_and(|current| Some(current) == transfer.connection());
         let uploaded = current_scope
             && transfer.direction() == Direction::Upload
             && update.completion.as_ref().is_some_and(Result::is_ok);
@@ -414,8 +415,11 @@ mod tests {
             let id = uuid::Uuid::new_v4();
             let target = files::FileTarget::from_listing(
                 "test".into(),
-                json!(["old connection"]),
-                &json!({"path":"/remote"}),
+                Some(crate::snapshot_fixture::scope("old connection")),
+                &newport_protocol::desktop::files::Listing {
+                    path: "/remote".into(),
+                    entries: Vec::new(),
+                },
                 "/remote",
             )
             .unwrap();
@@ -448,13 +452,16 @@ mod tests {
             assert!(this.notification.is_some());
 
             // Ordinary page/server navigation must not retarget the chosen file.
-            let server = this.snapshot["config"]["servers"][0].clone();
-            let connection = terminal_scope::connection(&server, &this.snapshot);
-            let original_server = server["id"].as_str().unwrap().to_owned();
+            let server = this.servers()[0].clone();
+            let connection = this.connection(&server);
+            let original_server = server.id.to_string();
             let target = files::FileTarget::from_listing(
                 original_server.clone(),
                 connection,
-                &json!({"path":"/original-folder"}),
+                &newport_protocol::desktop::files::Listing {
+                    path: "/original-folder".into(),
+                    entries: Vec::new(),
+                },
                 "/original-folder",
             )
             .unwrap();

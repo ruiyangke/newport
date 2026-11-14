@@ -16,6 +16,7 @@ use super::{
     protocol::{Error, Path as WirePath, Request},
     tokens::RepoRef,
 };
+use newport_protocol::git::code;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -139,7 +140,10 @@ impl Repo {
         }
         let git_dir =
             command::run(root, &["rev-parse", "--absolute-git-dir"])?.ok_or_else(|| {
-                Error::new("REPO_NOT_FOUND", "The repository is no longer available.")
+                Error::new(
+                    code::REPO_NOT_FOUND,
+                    "The repository is no longer available.",
+                )
             })?;
         let git_dir = Path::new(OsStr::from_bytes(trim_line(&git_dir)))
             .canonicalize()

@@ -1,5 +1,5 @@
 //! Shared-display prerequisites. Installed dependencies are not a live display.
-use newport_domain::requirements::{Finding, Gap, Requirement};
+use newport_protocol::desktop::applications::{Finding, Gap, Requirement};
 
 pub(super) const PROBE: &str = include_str!("display_probe.sh");
 
@@ -20,12 +20,12 @@ fn version(value: &str) -> Option<[u32; 3]> {
 pub(super) fn gap(value: Option<&str>) -> Option<Gap> {
     let parsed = value.and_then(version);
     let finding = match (value, parsed.map(|v| v >= [23, 1, 0])) {
-        (Some("missing"), _) => Finding::Missing,
+        (Some("missing"), _) => Finding::Missing(Box::default()),
         (_, Some(true)) => return None,
-        (_, Some(false)) => Finding::Outdated {
-            version: parsed.map(|[a, b, c]| format!("{a}.{b}.{c}"))?,
-        },
-        _ => Finding::Unverified,
+        (_, Some(false)) => {
+            Finding::Outdated(Box::new(parsed.map(|[a, b, c]| format!("{a}.{b}.{c}"))?))
+        }
+        _ => Finding::Unverified(Box::default()),
     };
     Some(Gap {
         requirement: Requirement::Xwayland,
@@ -40,29 +40,31 @@ mod tests {
     #[test]
     fn missing_old_and_unverified_are_distinct_from_available() {
         for (input, finding) in [
-            (Some("missing"), Some(Finding::Missing)),
+            (Some("missing"), Some(Finding::Missing(Box::default()))),
             (
                 Some("22.1.9"),
-                Some(Finding::Outdated {
-                    version: "22.1.9".into(),
-                }),
+                Some(Finding::Outdated(Box::new("22.1.9".into()))),
             ),
             (
                 Some("23.0.99"),
-                Some(Finding::Outdated {
-                    version: "23.0.99".into(),
-                }),
+                Some(Finding::Outdated(Box::new("23.0.99".into()))),
             ),
             (Some("23.1.0"), None),
             (Some("24.1.6-1"), None),
-            (Some("unverified"), Some(Finding::Unverified)),
-            (None, Some(Finding::Unverified)),
+            (
+                Some("unverified"),
+                Some(Finding::Unverified(Box::default())),
+            ),
+            (None, Some(Finding::Unverified(Box::default()))),
         ] {
             let found = gap(input);
             assert_eq!(found.as_ref().map(|g| &g.finding), finding.as_ref());
             if let Some(gap) = found {
                 assert_eq!(gap.requirement, Requirement::Xwayland);
-                assert_eq!(gap.installs(), gap.finding != Finding::Unverified);
+                assert_eq!(
+                    newport_domain::requirements::installs(&gap),
+                    !matches!(gap.finding, Finding::Unverified(_))
+                );
             }
         }
         for input in [
@@ -73,7 +75,10 @@ mod tests {
             "unknown",
             "24.1.0\nmissing=dbus",
         ] {
-            assert_eq!(gap(Some(input)).unwrap().finding, Finding::Unverified);
+            assert!(matches!(
+                gap(Some(input)).unwrap().finding,
+                Finding::Unverified(_)
+            ));
         }
     }
 }

@@ -6,7 +6,6 @@ use gpui::{
     VisualTestContext, Window, div,
 };
 use gpui_kit as gpui;
-use serde_json::json;
 
 /// What the window shows, as the app renders it.
 struct ScreenHost(Entity<Newport>);
@@ -47,9 +46,11 @@ fn fixture(
             let mut v = owner(window, cx);
             v.page = page;
             v.server = id.to_string();
-            v.snapshot["instanceId"] = json!(instance);
-            v.snapshot["config"]["servers"][0]["id"] = json!(id);
-            v.snapshot["config"]["servers"][0]["name"] = json!("Box");
+            let snapshot = v.snapshot_mut();
+            snapshot.instance_id = instance;
+            snapshot.config.servers[0].id = id;
+            snapshot.config.servers[0].name = "Box".into();
+            snapshot.runtime.connection_revisions.clear();
             v
         });
         view = Some(entity.clone());

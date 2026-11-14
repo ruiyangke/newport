@@ -34,32 +34,38 @@ pub(super) fn description(id: &'static str, content: &str, cx: &App) -> AnyEleme
         .into_any_element()
 }
 
-fn connection_label(state: &Value) -> String {
-    let status = state["status"].as_str().unwrap_or("disconnected");
-    match status {
-        "reconnecting" if state["reconnectAttempt"].as_u64().unwrap_or(0) > 0 => {
-            format!("Reconnecting · attempt {}", state["reconnectAttempt"])
+fn connection_label(state: Option<&configuration::ConnectionState>) -> String {
+    use configuration::ConnectionStatus;
+    let Some(state) = state else {
+        return "Disconnected".into();
+    };
+    match state.status {
+        ConnectionStatus::Reconnecting if state.reconnect_attempt > 0 => {
+            format!("Reconnecting · attempt {}", state.reconnect_attempt)
         }
-        "connected" => "Connected".into(),
-        "connecting" => "Connecting".into(),
-        "reconnecting" => "Reconnecting".into(),
-        "error" => "Error".into(),
-        _ => "Disconnected".into(),
+        ConnectionStatus::Connected => "Connected".into(),
+        ConnectionStatus::Connecting => "Connecting".into(),
+        ConnectionStatus::Reconnecting => "Reconnecting".into(),
+        ConnectionStatus::Error => "Error".into(),
+        ConnectionStatus::Disconnected => "Disconnected".into(),
     }
 }
-fn feature_status<'a>(
-    feature: &str,
+fn feature_status(
+    feature: configuration::Feature,
     enabled: bool,
-    permissions: &'a Value,
+    permissions: Option<&configuration::PermissionsSnapshot>,
     connected: bool,
-) -> &'a str {
+) -> &str {
     if !enabled {
         return "Off";
     }
-    if permissions["effective"][feature] == true {
+    if permissions.is_some_and(|permissions| match feature {
+        configuration::Feature::Clipboard => permissions.effective.clipboard,
+        configuration::Feature::Browser => permissions.effective.browser,
+    }) {
         return "Active";
     }
-    if let Some(error) = permissions["error"].as_str() {
+    if let Some(error) = permissions.and_then(|permissions| permissions.error.as_deref()) {
         return error;
     }
     if connected {
@@ -87,17 +93,20 @@ impl Newport {
     }
 
     pub(super) fn integration_installing(&self, server: &str) -> bool {
-        matches!(
-            self.snapshot["runtime"]["agentInstallation"][server]["stage"].as_str(),
-            Some(
-                "preparing"
-                    | "uploading"
-                    | "installing"
-                    | "verifying"
-                    | "activating"
-                    | "uninstalling"
+        use configuration::InstallStage;
+        let progress = uuid::Uuid::parse_str(server)
+            .ok()
+            .and_then(|server| self.runtime()?.agent_installation(server));
+        progress.is_some_and(|progress| {
+            matches!(
+                progress.stage,
+                InstallStage::Preparing
+                    | InstallStage::Uploading
+                    | InstallStage::Installing
+                    | InstallStage::Verifying
+                    | InstallStage::Activating
             )
-        )
+        })
     }
 
     fn integration_disabling(&self, server: &str, feature: &str) -> bool {
@@ -115,13 +124,14 @@ impl Newport {
     pub(super) fn integration_scoped_command(
         &mut self,
         server: &str,
-        expected: &Value,
+        expected: &Option<configuration::ConnectionScope>,
         feature: (&str, bool),
         cx: &mut Context<Self>,
     ) {
-        if self.selected_server().is_some_and(|current| {
-            crate::terminal_scope::connection(current, &self.snapshot) == *expected
-        }) {
+        if self
+            .selected_connection()
+            .is_some_and(|current| expected.as_ref() == Some(&current))
+        {
             self.integration_command(server, Some(feature), cx);
         }
     }
@@ -139,8 +149,7 @@ impl Newport {
         {
             return;
         }
-        let expected_connection =
-            crate::terminal_scope::connection(self.selected_server().unwrap(), &self.snapshot);
+        let expected_connection = self.selected_connection();
         let revoking = matches!(feature, Some(("browser" | "clipboard", false)));
         if !revoking && (self.integration_busy(server) || self.integration_installing(server)) {
             return;
@@ -155,7 +164,7 @@ impl Newport {
                         _ => return Err("Unknown integration feature.".into()),
                     };
                     let expected =
-                        newport_client::desktop_inputs::connection_scope(&expected_connection)
+                        newport_client::desktop_inputs::captured(expected_connection.as_ref())
                             .map_err(|error| {
                                 newport_client::request_error::RequestError::from(error.to_string())
                             })?;
@@ -182,7 +191,7 @@ impl Newport {
         } else {
             action_key(server, feature.is_none())
         };
-        self.request_result(&key, request);
+        self.request_typed(&key, request);
         cx.notify();
     }
 
@@ -191,12 +200,18 @@ impl Newport {
             && key != crate::integration_needle::inspect_key(server)
             && let Some(resource) = self.resources.get(key)
         {
+            let uninstalled = match self.connection_reply(key) {
+                Some(desktop::connection::Reply::UninstallAgent(output)) => {
+                    Some(output.text.as_str())
+                }
+                _ => None,
+            };
             self.notification = Some(match &resource.error {
                 Some(error) => Notification::error(error.clone()),
                 None => Notification::success(if key == crate::integration_needle::key(server) {
-                    resource.value.as_str().unwrap_or("Needle uninstalled")
+                    uninstalled.unwrap_or("Needle uninstalled")
                 } else if key == action_key(server, true) {
-                    resource.value.as_str().unwrap_or("Needle installed")
+                    "Needle installed"
                 } else {
                     "Integration preference saved"
                 }),
@@ -212,36 +227,44 @@ impl Newport {
 #[cfg(test)]
 mod tests {
     use super::{connection_label, feature_status};
-    use serde_json::{Value, json};
+    use crate::snapshot_fixture as fixture;
+    use newport_protocol::desktop::configuration::{ConnectionStatus, Feature};
     #[test]
     fn saved_preference_is_not_reported_as_active_before_acknowledgement() {
         assert_eq!(
-            feature_status("clipboard", true, &Value::Null, false),
+            feature_status(Feature::Clipboard, true, None, false),
             "Waiting for connection"
         );
         assert_eq!(
-            feature_status("clipboard", true, &Value::Null, true),
+            feature_status(Feature::Clipboard, true, None, true),
             "Applying permission…"
         );
-        let active = json!({"effective":{"clipboard":true,"browser":false}});
-        assert_eq!(feature_status("clipboard", true, &active, true), "Active");
-        assert_eq!(feature_status("browser", false, &active, true), "Off");
-        let failed = json!({"error":"Clipboard service unavailable"});
+        let active = fixture::permissions(true, false);
         assert_eq!(
-            feature_status("clipboard", true, &failed, true),
+            feature_status(Feature::Clipboard, true, Some(&active), true),
+            "Active"
+        );
+        assert_eq!(
+            feature_status(Feature::Browser, false, Some(&active), true),
+            "Off"
+        );
+        let mut failed = fixture::permissions(false, false);
+        failed.error = Some("Clipboard service unavailable".into());
+        assert_eq!(
+            feature_status(Feature::Clipboard, true, Some(&failed), true),
             "Clipboard service unavailable"
         );
     }
     #[test]
     fn connection_labels_do_not_imply_a_retry_limit() {
-        assert_eq!(connection_label(&Value::Null), "Disconnected");
+        assert_eq!(connection_label(None), "Disconnected");
+        let mut reconnecting = fixture::connection(ConnectionStatus::Reconnecting);
+        reconnecting.reconnect_attempt = 3;
         assert_eq!(
-            connection_label(&json!({"status":"reconnecting","reconnectAttempt":3})),
+            connection_label(Some(&reconnecting)),
             "Reconnecting · attempt 3"
         );
-        assert_eq!(
-            connection_label(&json!({"status":"reconnecting","reconnectAttempt":0})),
-            "Reconnecting"
-        );
+        reconnecting.reconnect_attempt = 0;
+        assert_eq!(connection_label(Some(&reconnecting)), "Reconnecting");
     }
 }

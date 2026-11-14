@@ -1,0 +1,26 @@
+gpui_windows: Drop a closed window's late reports
+
+Hiding or destroying a window makes Windows report deactivation and, under
+the cursor, mouse leave after GPUI has already removed the window, and each
+report then logs "window not found". Take the active-status and hover
+callbacks on drop, as the visibility callback already is.
+
+Remove when upstream gpui_windows drops them on close.
+
+diff --git a/src/window.rs b/src/window.rs
+index 6466108..767f537 100644
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -615,6 +615,12 @@ impl Drop for WindowsWindow {
+         // `DestroyWindow` below sends `WM_SHOWWINDOW`; without a callback the
+         // resulting visibility report has nothing to notify.
+         self.0.state.callbacks.visibility_change.take();
++        // Hiding or destroying an active window deactivates it after GPUI has
++        // already removed it, and the report would find no window.
++        self.0.state.callbacks.active_status_change.take();
++        // Hiding a window under the cursor sends `WM_MOUSELEAVE`, which would
++        // report on a window GPUI has already removed.
++        self.0.state.callbacks.hovered_status_change.take();
+         // clone this `Rc` to prevent early release of the pointer
+         let this = self.0.clone();
+         self.0

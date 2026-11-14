@@ -144,15 +144,14 @@ impl Picker {
     }
     pub(super) fn loaded(
         &mut self,
-        result: Result<Value, String>,
+        result: Result<newport_protocol::desktop::files::Index, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.loading = false;
         self.operation = None;
-        match result.and_then(|value| {
-            let paths = serde_json::from_value::<Vec<String>>(value["paths"].clone())
-                .map_err(|_| "Invalid project file list".to_owned())?;
+        match result.and_then(|index| {
+            let paths = index.paths;
             if paths.len() > 100_000
                 || paths.iter().any(|p| {
                     p.len() > 16_384
@@ -162,7 +161,7 @@ impl Picker {
             {
                 return Err("Invalid project file paths".into());
             }
-            Ok((paths, value["skipped"].as_u64().unwrap_or(0) as usize))
+            Ok((paths, index.skipped as usize))
         }) {
             Ok((paths, skipped)) => {
                 self.index = Arc::new(candidates(paths));
@@ -356,7 +355,10 @@ impl Render for Picker {
                                                         .gap_2()
                                                         .min_w_0()
                                                         .w_full()
-                                                        .child(file_icon::icon(name, "file"))
+                                                        .child(file_icon::icon(
+                                                            name,
+                                                            newport_protocol::desktop::files::EntryKind::File,
+                                                        ))
                                                         .child(
                                                             div()
                                                                 .flex()

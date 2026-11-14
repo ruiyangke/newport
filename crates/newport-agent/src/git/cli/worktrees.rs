@@ -1,5 +1,6 @@
 use super::super::tokens::SnapshotRef;
 use super::*;
+use newport_protocol::git::code;
 pub(super) fn rows(repo: &Repo) -> Result<(Vec<Value>, String), Error> {
     let bytes = repo.run(&["worktree", "list", "--porcelain", "-z"])?;
     let mut rows = Vec::new();
@@ -134,7 +135,7 @@ fn execute(repo: &Repo, args: Vec<std::ffi::OsString>) -> Result<(), Error> {
     command::write(&repo.root, &args, vec![]).map_err(|e| {
         if e.code == "TIMEOUT" {
             Error::new(
-                "OUTCOME_UNKNOWN",
+                code::OUTCOME_UNKNOWN,
                 "The worktree operation timed out. Inspect the saved outcome.",
             )
         } else {
@@ -184,7 +185,7 @@ pub(super) fn apply(repo: &Repo, action: &super::super::protocol::Action) -> Res
             || repo.common.join("worktrees").join(name).exists()
         {
             return Err(Error::new(
-                "PATH_EXISTS",
+                code::PATH_EXISTS,
                 "The destination or worktree name already exists.",
             ));
         }

@@ -19,15 +19,14 @@ crates may build for another target.
 
 | Command | Does |
 | --- | --- |
-| `cargo xtask dev [--remote-apps] [-- <args>…]` | Runs the desktop app: builds the Linux agents with Docker on macOS when missing or stale; Windows needs the resources described below. Stages grammars when stale and PDFium on Windows, then runs `cargo run -p newport-app`. Without `NEWPORT_DATA_DIR` it uses the disposable profile `target/dev-profile`. On macOS the app's output streams to the terminal, and a development Newport still running from the same bundle is quit first. `--remote-apps` compiles Remote apps in (see below). |
+| `cargo xtask dev [--remote-apps] [-- <args>…]` | Runs the desktop app: builds the Linux agents with Docker on macOS when missing or stale; Windows needs the resources described below. Stages grammars when stale, then runs `cargo run -p newport-app`. Without `NEWPORT_DATA_DIR` it uses the disposable profile `target/dev-profile`. On macOS the app's output streams to the terminal, and a development Newport still running from the same bundle is quit first. `--remote-apps` compiles Remote apps in (see below). |
 | `cargo xtask build [--release] [--target <triple>] [--remote-apps]` | The same resources, then `cargo build -p newport-app` in that environment. |
 | `cargo xtask grammars [--release] [--target <triple>]` | Builds every tree-sitter grammar library and stages it in `<target>/<profile>/grammars`. `dev` and `build` do this when the staged libraries are missing or older than `crates/newport-grammars`, `Cargo.lock` or the language list. |
-| `cargo xtask pdfium [--release] [--target <triple>]` | Downloads, verifies and stages PDFium for Windows. |
-| `cargo xtask patched` | Generates the patched dependencies: each crate pinned in `patches/patched.toml` (and `remote/patches/patched.toml`), downloaded from crates.io, checked against its SHA-256 and patched with `patches/<name>.patch` into `patches/<name>/`, which Git ignores. Every other `cargo xtask` command does this first; run it before calling `cargo` directly. |
-| `cargo xtask patched --save <crate>` | Writes `<crate>`'s patch from the edits made to its generated source. |
-| `cargo xtask agents [--if-changed \| --arch x86_64\|aarch64]` | On macOS or Linux, builds the Linux agent binaries in Docker; `--if-changed` only when they are missing or older than `crates/newport-agent`'s sources (as `dev` and `build` do), `--arch` only that architecture (CI builds each natively). Windows requires prebuilt resources. With `NEWPORT_PREBUILT=1`, `agents` verifies downloaded ones instead of building. |
+| `cargo xtask patched` | Generates the patched dependencies: each crate pinned in `patches/patched.toml` (and `remote/patches/patched.toml`), downloaded from crates.io, checked against its SHA-256 and patched with its numbered patches, `patches/<crate>/NNN-<subject>.patch` from 001 to 999 in order, into `vendor/<crate>/`, which Git ignores. Every other `cargo xtask` command does this first; run it before calling `cargo` directly. |
+| `cargo xtask patched --save patches/<crate>/NNN-<subject>.patch` | Writes the edits made to the crate's generated source as its last patch: a new number, or the last patch again, keeping its description. |
+| `cargo xtask agents [--if-changed \| --arch x86_64\|aarch64]` | On macOS or Linux, builds the Linux agent binaries in Docker; `--if-changed` only when they are missing or older than `crates/newport-agent`'s sources (as `dev` and `build` do), `--arch` only that architecture (CI builds each natively). `--clean` compiles everything again in a Cargo directory it empties before and after, instead of the one Docker's cache shares between checkouts, as the release does. Windows requires prebuilt resources. With `NEWPORT_PREBUILT=1`, `agents` verifies downloaded ones instead of building. |
 | `cargo xtask agents --remote-apps` | Builds the Full agent (core and Remote apps) for both architectures from this checkout and `remote/` as they are, exports it and keeps the export in `remote/target/unified-agent/desktop-resources`, as a Remote apps `dev` or `build` does when it has none. |
-| `cargo xtask full-agent build [--production] [--arch x86_64\|aarch64] [--output-dir <dir>]` | Builds the Full agent in Docker into `<dir>/<arch>` (default `remote/target/unified-agent`), with the `tools/static-agent` builder in `remote/`. It reads a snapshot laid out as the checkout: with `--production`, `git archive` of HEAD and of `remote/` at its tag named like HEAD's release tag, which needs both checkouts clean and `remote/` at that tag; otherwise both working trees, marked dirty. |
+| `cargo xtask full-agent build [--production] [--arch x86_64\|aarch64] [--output-dir <dir>]` | Builds the Full agent in Docker into `<dir>/<arch>` (default `remote/target/unified-agent`), with the `tools/static-agent` builder in `remote/`. It reads a snapshot laid out as the checkout: with `--production`, `git archive` of HEAD and of `remote/` at its tag named like HEAD's release tag, which needs both checkouts clean and `remote/` at that tag; otherwise both working trees, marked dirty. Development builds share a Cargo cache per architecture; a production build uses an empty Docker volume of its own and removes it afterwards. |
 | `cargo xtask full-agent export [--production] [--build-dir <dir>] --output <new dir>` | Checks both architectures' builds (ELF architecture, product identity, export protocol policy, matching provenance and notices) and writes the export: binaries, identities, the allowlisted notices, `full-agent-provenance.json` and `newport-build.json`. `--production` requires production builds of HEAD and of `remote/` at its tag of the same name. |
 | `cargo xtask artifact record\|verify <dir>` | Records or checks `newport-build.json`: per-file SHA-256 and the commit. |
 | `cargo xtask dev-run <binary> [<args>…]` | macOS cargo runner. Bundles, signs and launches `newport` through LaunchServices; other binaries run directly. |
@@ -103,6 +102,22 @@ compare uncommitted source edits.
 | `cargo xtask test git-cli-contract [--output <path>]` | Agent Git CLI responses through the app's validators. |
 | `cargo xtask test benchmark --output <path> [--agent <path>] [--before <rev>] [--after <rev>] [--size <size>]… [--rounds <n>] [--latency-ms <ms>]` | Git benchmark; `--output` is required and `--rounds` defaults to 3. |
 | `cargo xtask test keychain` | macOS: signs a test bundle and runs the protected Keychain test. |
+
+`check rust`, scoped or not, also checks that the desktop UI and client work with
+the protocol's typed values. It reports the file and line, and fails when:
+
+- any source under `crates/` names `execute_rendered`;
+- production code in `crates/newport-gpui/src` or `crates/newport-client/src`
+  names `serde_json`, `json!`, or the `lsp_types` aliases `LSPAny`, `LSPObject`
+  or `LSPArray`, which are `serde_json` types.
+
+Comments, string literals, `#[cfg(test)]` items and files declared only for
+tests are skipped. Files whose input is JSON other than a protocol reply are
+listed with their reason: `UI_JSON_FILES` (the application manifest, the saved
+workspace and UI state files, grammar metadata, the highlight theme, and
+language server messages, registrations and settings) and `CLIENT_JSON_FILES` (the language server stream and the
+saved preferences file), both in `src/typed_ui.rs`. Add a file only while that
+JSON is its input; a listed file that no longer exists also fails.
 
 The SSH lane selects tests assigned to its adverse server, which recognizes a
 bounded command set. Tests needing real Linux installation use `test remote`.
@@ -269,7 +284,7 @@ core SSH and native clipboard jobs.
 | Command | Does |
 | --- | --- |
 | `cargo xtask package [--debug] [--skip-build] [--target <triple>] [--nsis] [--remote-apps]` | Stages the app and verifies it. macOS: `Newport.app` plus a zip. Windows: a zip, and with `--nsis` the installer. `--remote-apps` compiles Remote apps in on either desktop platform. Writes the third-party notices first, as `notices` does, into the app's `Licenses`. |
-| `cargo xtask notices [--target <triple>] [--remote-apps] [--output <path>]` | Writes the third-party notices of a desktop package (default `target/THIRD-PARTY-NOTICES.txt`): the licenses of every crate in the app's, the grammar libraries' and the bundled agent's dependency graphs (the Full agent's with `--remote-apps`), rendered by [cargo-about](https://github.com/EmbarkStudios/cargo-about) with the root `about.toml` and `about.hbs`, then the changes Newport made to patched crates (`patches/<name>.NOTICE`, and `remote/patches/` with `--remote-apps`). Fails on a license `about.toml` doesn't accept, an unpublished crate that isn't Newport's, or a clarification whose text can't be fetched or changed. Installs the pinned cargo-about into `target/tools` first. |
+| `cargo xtask notices [--target <triple>] [--remote-apps] [--output <path>]` | Writes the third-party notices of a desktop package (default `target/THIRD-PARTY-NOTICES.txt`): the licenses of every crate in the app's, the grammar libraries' and the bundled agent's dependency graphs (the Full agent's with `--remote-apps`), rendered by [cargo-about](https://github.com/EmbarkStudios/cargo-about) with the root `about.toml` and `about.hbs`, then the changes Newport made to patched crates (`patches/<crate>/NOTICE`, and `remote/patches/` with `--remote-apps`). Fails on a license `about.toml` doesn't accept, an unpublished crate that isn't Newport's, or a clarification whose text can't be fetched or changed. Installs the pinned cargo-about into `target/tools` first. |
 | `cargo xtask release verify` | Checks the tag against every version and the checkout. A release builds everything it ships from the tagged commit, without depending on a CI run. |
 | `cargo xtask release setup-signing` | CI: writes the certificate and profile and creates a temporary keychain. |
 | `cargo xtask release macos [--skip-build] [--remote-apps]` | Developer ID signing, notarization, stapling, and the signed update tarball and manifest fragment. |
@@ -311,16 +326,12 @@ tested), compile Remote apps in from the private Remote apps source at
 edition.
 
 For the build only, the streaming crates are added to newport-gpui with
-`cargo add`, and GPUI is patched to this lockfile's revision on the command
-line. A guard takes the crates out of `Cargo.toml` and `Cargo.lock` again when
+`cargo add`; their GPUI is Newport's patched one, through `[patch.crates-io]`.
+A guard takes the crates out of `Cargo.toml` and `Cargo.lock` again when
 the build ends, fails or is interrupted with Ctrl-C; a build that was killed
 outright is cleaned up by the next `dev`, `build` or `test`. The checkout never
 keeps a reference to the private crates.
 
-For local GPUI development, `NEWPORT_GPUI_DIR` may name a GPUI snapshot
-workspace. The build patches its members for both registry and Git consumers,
-so the embedded presenter and Newport use the same types. This override is
-transient and refused in CI; release CI uses the promoted, pinned snapshot.
 Tests belonging to another workspace must run with that workspace's manifest
 through `cargo xtask test rust --manifest-path ...`, rather than selecting a
 dependency package from Newport's workspace.
@@ -358,5 +369,7 @@ that export before Developer ID signing and notarization.
 
 - `tests/agent-runtime/private-directory.sh`, `tests/remote/start.sh` and
   `tests/remote/docker/start.sh` run inside containers.
+- `tests/agent-status/osc7501.sh` plays a coding agent reporting its status,
+  for checking terminal tabs by eye; run it in a Newport terminal.
 - `tools/xtask/runner.sh` is the cargo runner shim: Cargo needs a runner that
   exists before anything is built.

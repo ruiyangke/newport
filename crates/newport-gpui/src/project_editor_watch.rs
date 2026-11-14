@@ -80,15 +80,19 @@ impl CodeWorkspace {
         );
         self.rpc(operation, window, cx, move |this, result, window, cx| {
             this.watch.busy = false;
+            let result = result.and_then(|reply| match reply {
+                files::Reply::Watch(events) => Ok(*events),
+                _ => Err(UNEXPECTED_REPLY.to_owned()),
+            });
             let delay = match &result {
-                Ok(value) if value["mode"] == "native" => 2,
+                Ok(events) if events.mode == files::WatchMode::Native => 2,
                 _ => 10,
             };
             this.watch.next = Some(Instant::now() + Duration::from_secs(delay));
-            if let Ok(value) = result {
-                this.watch.cursor = value["cursor"].as_str().map(str::to_owned);
+            if let Ok(events) = result {
+                this.watch.cursor = events.cursor.clone();
                 if this.available && this.visible {
-                    this.apply_file_events(&value, &directories);
+                    this.apply_file_events(&events, &directories);
                     this.refresh_watched_files(window, cx);
                 } else {
                     // Events drained while hidden must be reconciled on return.
@@ -111,14 +115,13 @@ impl CodeWorkspace {
             }
         });
     }
-    pub(super) fn apply_file_events(&mut self, value: &Value, directories: &BTreeSet<String>) {
-        let paths: BTreeSet<_> = value["paths"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .collect();
-        let reset = value["reset"] == true;
+    pub(super) fn apply_file_events(
+        &mut self,
+        events: &files::WatchReply,
+        directories: &BTreeSet<String>,
+    ) {
+        let paths: BTreeSet<_> = events.paths.iter().map(String::as_str).collect();
+        let reset = events.reset;
         for directory in directories {
             if (reset
                 || paths.iter().any(|p| {
@@ -187,6 +190,7 @@ impl CodeWorkspace {
         let operation = self.read_request(&path, None, None, false);
         self.rpc(operation, window, cx, move |this, result, window, cx| {
             this.opening.remove(&path);
+            let result = result.and_then(document_reply);
             let Some(index) = this
                 .buffers
                 .iter()
@@ -212,7 +216,7 @@ impl CodeWorkspace {
             // may complete between the event and this read.
             if result
                 .as_ref()
-                .is_ok_and(|v| v["revision"].as_str() == Some(&buffer.revision))
+                .is_ok_and(|document| document.revision == buffer.revision)
             {
                 buffer.conflict = None;
                 return;

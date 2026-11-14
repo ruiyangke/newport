@@ -111,3 +111,22 @@ fn observations_keep_multicore_cpu_and_bound_nested_metadata() {
     });
     assert!(inspect.validate().is_err());
 }
+#[test]
+fn disk_totals_add_every_category_without_wrapping() {
+    let category = |size, reclaimable| DiskTotals {
+        count: 1,
+        size,
+        reclaimable,
+    };
+    let mut totals = DockerTotals {
+        images: category(100, 80),
+        containers: category(10, 1),
+        volumes: category(50, 20),
+        build_cache: category(30, 30),
+    };
+    assert_eq!(totals.size(), 190);
+    assert_eq!(totals.reclaimable(), 131);
+    totals.images = category(u64::MAX, u64::MAX);
+    assert_eq!(totals.size(), u64::MAX);
+    assert_eq!(totals.reclaimable(), u64::MAX);
+}

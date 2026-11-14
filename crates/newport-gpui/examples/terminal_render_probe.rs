@@ -51,6 +51,7 @@ impl Render for Probe {
                         cell,
                         point(px(0.), px(0.)),
                         false,
+                        false,
                         &matches.matches,
                         matches.matches.first(),
                         None,

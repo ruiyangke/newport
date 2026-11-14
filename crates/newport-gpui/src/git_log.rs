@@ -1,6 +1,6 @@
 //! Bounded session log consumption; only events for the exact repository are displayed.
 use super::*;
-use newport_gpui::git_log_text::{LogLine, LogRecord, plain_text, render_styled_at};
+use newport_gpui::git_log_text::{LogBatch, LogLine, LogRecord, plain_text, render_styled_at};
 use std::sync::Arc;
 #[derive(Default)]
 pub(super) struct Log {
@@ -38,12 +38,16 @@ impl Newport {
         if self.page != Page::Projects || self.git_repository_id().is_empty() {
             return;
         }
-        let scope = json!([
-            self.server,
-            self.git_repository_id(),
-            self.snapshot["instanceId"]
-        ])
-        .to_string();
+        let scope = format!(
+            "{:?}",
+            (
+                self.server.to_string(),
+                self.git_repository_id(),
+                self.snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.instance_id.to_string())
+            )
+        );
         if self.git_log.scope != scope {
             self.resources.invalidate("git-log-events");
             self.git_log.view.clear(cx);
@@ -73,25 +77,38 @@ impl Newport {
                         columns: self.git_log.columns(),
                     },
                 ),
-                Err(error) => self.request_result("git-log-events", Err(error)),
+                Err(error) => self.request_failed("git-log-events", error),
             }
         }
     }
-    pub(super) fn git_log_completed(&mut self, cx: &mut Context<Self>) {
-        if self
+    /// Settles a Git log poll. Returns whether its generation was still
+    /// current, and the batch it delivered.
+    pub(super) fn complete_git_log(
+        &mut self,
+        generation: u64,
+        result: Result<LogBatch, newport_client::request_error::RequestError>,
+    ) -> (bool, Option<LogBatch>) {
+        let status = newport_client::resources::QueryStatus {
+            error: result.as_ref().err().cloned(),
+            updated_at: result.is_ok().then(now_millis).flatten(),
+            ..Default::default()
+        };
+        // A failed poll keeps the log already shown.
+        let shown = self
             .resources
             .get("git-log-events")
-            .is_some_and(|r| r.error.is_some())
-        {
-            return;
-        }
-        let value = self.value("git-log-events");
-        let Some(cursor) = value["cursor"].as_u64() else {
-            return;
-        };
-        let Some(event_count) = value["eventCount"].as_u64() else {
-            return;
-        };
+            .is_some_and(|row| row.has_value());
+        let accepted = self.resources.complete_query(
+            "git-log-events",
+            generation,
+            &status,
+            result.is_ok() || shown,
+            result.is_ok(),
+        );
+        (accepted, result.ok().filter(|_| accepted))
+    }
+    pub(super) fn git_log_completed(&mut self, batch: LogBatch, cx: &mut Context<Self>) {
+        let cursor = batch.cursor;
         if cursor < self.git_log.cursor {
             self.git_log.cursor = 0;
             return;
@@ -100,25 +117,17 @@ impl Newport {
             return;
         }
         self.git_log.gap |=
-            cursor.saturating_sub(self.git_log.cursor) > event_count || value["omitted"] == true;
+            cursor.saturating_sub(self.git_log.cursor) > batch.event_count as u64 || batch.omitted;
         self.git_log.cursor = cursor;
-        if value["records"].as_array().is_none_or(Vec::is_empty) {
+        if batch.records.is_empty() {
             return;
         }
         let was_empty = self.git_log.records.is_empty();
-        if let Some(records) = value["records"].as_array() {
-            for record in records {
-                if let Ok(record) = serde_json::from_value::<LogRecord>(record.clone()) {
-                    self.git_log.records.push_back(Arc::new(record));
-                } else {
-                    self.git_log.gap = true;
-                }
-            }
-        }
+        self.git_log
+            .records
+            .extend(batch.records.into_iter().map(Arc::new));
         let columns = self.git_log.columns();
-        if value["columns"].as_u64() != Some(u64::from(columns))
-            || (!was_empty && self.git_log.rendered_columns != columns)
-        {
+        if batch.columns != columns || (!was_empty && self.git_log.rendered_columns != columns) {
             self.git_log_reflow(cx);
         } else {
             self.git_log.invalidate_reflow();

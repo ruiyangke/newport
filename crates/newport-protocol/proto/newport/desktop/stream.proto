@@ -172,6 +172,8 @@ message TerminalEvent {
     newport.desktop.stream.Active active = 7;
     newport.wire.Present display_lost = 8;
     newport.desktop.stream.NotHeld not_held = 9;
+    // The held shell's size, which every tab with it open draws it at.
+    newport.desktop.stream.Resize size = 10;
   }
 }
 

@@ -22,11 +22,24 @@ pub(super) fn key(server: &str) -> String {
 /// A confirmation to uninstall, tied to the connection it was asked for.
 #[derive(Clone)]
 pub(super) struct Confirmation {
-    server: Value,
-    scope: Value,
+    server: configuration::Server,
+    scope: Option<configuration::ConnectionScope>,
 }
 
 impl Newport {
+    /// The selected server's last agent check and its agent runtime.
+    fn needle_state(
+        &self,
+    ) -> (
+        Option<&configuration::InstallationStatus>,
+        Option<&configuration::RuntimeSnapshot>,
+    ) {
+        let (Some(runtime), Some(server)) = (self.runtime(), self.server_id()) else {
+            return (None, None);
+        };
+        (runtime.agent_status(server), runtime.agent_runtime(server))
+    }
+
     fn ask_to_uninstall_needle(&mut self, cx: &mut Context<Self>) {
         if !self.configuration_available()
             || self.server_form.is_some()
@@ -40,7 +53,7 @@ impl Newport {
         self.needle_uninstall_confirmations.insert(
             self.server.clone(),
             Confirmation {
-                scope: newport_domain::connection_scope::connection(&server, &self.snapshot),
+                scope: self.connection(&server),
                 server,
             },
         );
@@ -55,20 +68,18 @@ impl Newport {
         };
         // The connection changed since it was asked for: ask again.
         let current = self.selected_server().is_some_and(|server| {
-            server["id"] == confirmation.server["id"]
-                && newport_domain::connection_scope::connection(server, &self.snapshot)
-                    == confirmation.scope
+            server.id == confirmation.server.id && self.connection(server) == confirmation.scope
         });
         if current && !self.integration_busy(&self.server) {
-            self.request_result(
+            self.request_typed(
                 &key(&self.server),
-                desktop_server_record(&confirmation.server).map(|expected_server| {
-                    desktop::Operation::Connection(Box::new(
-                        desktop::connection::Operation::UninstallAgent(Box::new(
-                            desktop::connection::UninstallAgentArgs { expected_server },
-                        )),
-                    ))
-                }),
+                Ok(desktop::Operation::Connection(Box::new(
+                    desktop::connection::Operation::UninstallAgent(Box::new(
+                        desktop::connection::UninstallAgentArgs {
+                            expected_server: confirmation.server,
+                        },
+                    )),
+                ))),
             );
             // Uninstalling starts setup over, even one finished in this window.
             self.setup_flow = None;
@@ -80,7 +91,7 @@ impl Newport {
     fn needle_action(
         &mut self,
         server: &str,
-        expected: &Value,
+        expected: &Option<configuration::ConnectionScope>,
         action: Action,
         cx: &mut Context<Self>,
     ) {
@@ -89,9 +100,9 @@ impl Newport {
             || !self.configuration_available()
             || self.integration_busy(server)
             || self.integration_installing(server)
-            || self.selected_server().is_none_or(|current| {
-                crate::terminal_scope::connection(current, &self.snapshot) != *expected
-            })
+            || !self
+                .selected_connection()
+                .is_some_and(|current| expected.as_ref() == Some(&current))
         {
             return;
         }
@@ -100,55 +111,53 @@ impl Newport {
             Action::Update => self.integration_command(server, None, cx),
             Action::Uninstall => self.ask_to_uninstall_needle(cx),
             Action::Inspect => {
-                let Some(current) = self.selected_server() else {
+                let Some(expected_server) = self.selected_server().cloned() else {
                     return;
                 };
-                let request = desktop_server_record(current).map(|expected_server| {
-                    desktop::Operation::Connection(Box::new(
+                self.request_typed(
+                    &inspect_key(server),
+                    Ok(desktop::Operation::Connection(Box::new(
                         desktop::connection::Operation::InspectAgent(Box::new(
                             desktop::connection::InspectAgentArgs { expected_server },
                         )),
-                    ))
-                });
-                self.request_result(&inspect_key(server), request);
+                    ))),
+                );
                 cx.notify();
             }
         }
     }
 
     fn needle_details_open(&self) -> bool {
-        self.selected_server().is_some_and(|server| {
-            self.needle_details.get(&self.server)
-                == Some(&crate::terminal_scope::connection(server, &self.snapshot))
-        })
+        self.selected_connection()
+            .is_some_and(|connection| self.needle_details.get(&self.server) == Some(&connection))
     }
 
     fn toggle_needle_details(&mut self, cx: &mut Context<Self>) {
         if self.needle_details_open() {
             self.needle_details.remove(&self.server);
-        } else if let Some(server) = self.selected_server() {
-            self.needle_details.insert(
-                self.server.clone(),
-                crate::terminal_scope::connection(server, &self.snapshot),
-            );
+        } else if let Some(connection) = self.selected_connection() {
+            self.needle_details.insert(self.server.clone(), connection);
         }
         cx.notify();
     }
 
     pub(super) fn needle_management(&self, cx: &mut Context<Self>) -> AnyElement {
         let server = self.server.clone();
-        let installed = &self.snapshot["runtime"]["agentStatus"][&server];
-        let runtime = &self.snapshot["runtime"]["agentRuntime"][&server];
-        let transport = crate::connectivity::scoped(&server, &self.snapshot, cx)
-            .map(|state| match state.phase {
-                crate::connectivity::Phase::Connected => "connected",
-                crate::connectivity::Phase::Connecting => "connecting",
-                crate::connectivity::Phase::AwaitingApproval => "awaitingApproval",
-                crate::connectivity::Phase::Reconnecting => "recovering",
-                crate::connectivity::Phase::Failed => "failed",
-                crate::connectivity::Phase::Disconnected => "disconnected",
-            })
-            .or_else(|| self.snapshot["runtime"]["agentTransport"][&server]["status"].as_str());
+        let (installed, runtime) = self.needle_state();
+        let transport = crate::connectivity::scoped(&server, self.snapshot.as_ref(), cx)
+            .map(|state| state.phase)
+            .or_else(|| {
+                use crate::connectivity::Phase;
+                use configuration::TransportStatus;
+                let transport = self.runtime()?.agent_transport(self.server_id()?)?;
+                Some(match transport.status {
+                    TransportStatus::Disconnected => Phase::Disconnected,
+                    TransportStatus::Connecting => Phase::Connecting,
+                    TransportStatus::Connected => Phase::Connected,
+                    TransportStatus::Recovering => Phase::Reconnecting,
+                    TransportStatus::Failed => Phase::Failed,
+                })
+            });
         let missing = self.needle_missing();
         let mut presentation = status::present(installed, runtime, transport, missing);
         let request = self.resources.get(&key(&server));
@@ -293,10 +302,7 @@ impl Newport {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let server = self.server.clone();
-        let expected = self
-            .selected_server()
-            .map(|s| crate::terminal_scope::connection(s, &self.snapshot))
-            .unwrap_or_default();
+        let expected = self.selected_connection();
         let mut actions = div().flex().flex_wrap().items_center().gap(px(6.));
         if let Some((action, label)) = action {
             let server = server.clone();
@@ -363,8 +369,7 @@ impl Newport {
         operation_error: Option<&str>,
         cx: &App,
     ) -> AnyElement {
-        let installed = &self.snapshot["runtime"]["agentStatus"][&self.server];
-        let runtime = &self.snapshot["runtime"]["agentRuntime"][&self.server];
+        let (installed, runtime) = self.needle_state();
         let builds = status::Builds::of(installed, runtime);
         let mut details = div()
             .id("needle-details")
@@ -389,7 +394,7 @@ impl Newport {
             ("Included with Newport", builds.bundled()),
             (
                 "Server default",
-                if installed["installed"] == false {
+                if installed.is_some_and(|installed| installed.installed == Some(false)) {
                     "Not installed".into()
                 } else {
                     builds.installed()
@@ -399,9 +404,11 @@ impl Newport {
                 "Updates",
                 if presentation.label == "Update required" {
                     "Manual update required"
-                } else if installed["buildRelation"] == "newer" {
+                } else if installed.is_some_and(|installed| {
+                    installed.build_relation == configuration::BuildRelation::Newer
+                }) {
                     "Update Newport first"
-                } else if installed["error"].is_string() {
+                } else if installed.is_some_and(|installed| installed.error.is_some()) {
                     "Server default cannot be updated automatically"
                 } else {
                     "Automatic when compatible"
@@ -412,8 +419,8 @@ impl Newport {
             details = details.child(detail_row(label, value, cx));
         }
         if let Some(error) = operation_error
-            .or_else(|| runtime["error"].as_str())
-            .or_else(|| installed["error"].as_str())
+            .or_else(|| runtime.and_then(|runtime| runtime.error.as_deref()))
+            .or_else(|| installed.and_then(|installed| installed.error.as_deref()))
         {
             details = details.child(description("needle-diagnostic", error, cx));
         }

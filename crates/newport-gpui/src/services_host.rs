@@ -2,7 +2,7 @@
 use super::*;
 
 pub(super) struct HostedServices {
-    connection: Value,
+    connection: Option<configuration::ConnectionScope>,
     panel: Entity<services::ServicesPanel>,
     _subscription: Subscription,
 }
@@ -11,32 +11,29 @@ fn retire_obsolete_services(
     hosted: &mut std::collections::HashMap<String, HostedServices>,
     retired: &mut Vec<Entity<services::ServicesPanel>>,
     preferences: &mut std::collections::HashMap<String, services::Preferences>,
-    snapshot: &Value,
+    snapshot: Option<&configuration::Snapshot>,
     available: bool,
     cx: &mut App,
 ) {
-    if !available {
+    let Some(snapshot) = snapshot.filter(|_| available) else {
         return;
-    }
-    let servers = snapshot["config"]["servers"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    preferences.retain(|id, _| servers.iter().any(|server| server["id"] == id.as_str()));
+    };
+    let servers = &snapshot.config.servers;
+    let saved = |id: &str| servers.iter().find(|server| server.id.to_string() == id);
+    preferences.retain(|id, _| saved(id).is_some());
     let obsolete: Vec<_> = hosted
         .iter()
-        .filter_map(|(id, panel)| {
-            let current = servers.iter().find(|server| server["id"] == id.as_str());
-            (current
-                .map(|server| terminal_scope::connection(server, snapshot))
+        .filter(|(id, panel)| {
+            saved(id)
+                .map(|server| Some(snapshot.connection_scope(server)))
                 .as_ref()
-                != Some(&panel.connection))
-            .then(|| id.clone())
+                != Some(&panel.connection)
         })
+        .map(|(id, _)| id.clone())
         .collect();
     for id in obsolete {
         let panel = hosted.remove(&id).expect("collected entry");
-        if servers.iter().any(|server| server["id"] == id.as_str()) {
+        if saved(&id).is_some() {
             preferences.insert(id, panel.panel.read(cx).preferences(cx));
         }
         panel.panel.update(cx, |panel, cx| panel.retire(cx));
@@ -48,14 +45,14 @@ fn poll_services(
     hosted: &mut std::collections::HashMap<String, HostedServices>,
     retired: &mut Vec<Entity<services::ServicesPanel>>,
     preferences: &mut std::collections::HashMap<String, services::Preferences>,
-    configuration: Option<&Value>,
+    configuration: Option<&configuration::Snapshot>,
     visible_server: Option<&str>,
     cx: &mut App,
 ) {
     // Rendering can stop while hidden. Retire obsolete connections before
     // their completion can schedule a read against a reused server ID.
-    if let Some(snapshot) = configuration {
-        retire_obsolete_services(hosted, retired, preferences, snapshot, true, cx);
+    if configuration.is_some() {
+        retire_obsolete_services(hosted, retired, preferences, configuration, true, cx);
     }
     // Keep bounded completion receipts queued during a configuration outage.
     // `poll(false)` only suspends periodic refreshes: accepting a completed
@@ -76,7 +73,7 @@ fn poll_services(
 fn open_service_command(
     terminals: &mut std::collections::HashMap<String, Entity<terminal_workspace::Workspace>>,
     server: &str,
-    connection: Value,
+    connection: Option<configuration::ConnectionScope>,
     endpoint: String,
     command: String,
     cx: &mut App,
@@ -109,7 +106,7 @@ impl Newport {
             &mut self.services_panels,
             &mut self.retired_services,
             &mut self.services_preferences,
-            &self.snapshot,
+            self.snapshot.as_ref(),
             available,
             cx,
         );
@@ -125,8 +122,7 @@ impl Newport {
         }
         if !self.services_panels.contains_key(&self.server) {
             let server = self.server.clone();
-            let connection =
-                terminal_scope::connection(self.selected_server().unwrap(), &self.snapshot);
+            let connection = self.selected_connection();
             let preferences = self.services_preferences.remove(&server);
             let panel = cx.new(|cx| {
                 let mut panel =
@@ -141,15 +137,10 @@ impl Newport {
                 &panel,
                 window,
                 move |this, _, event: &services::ServicesEvent, _, cx| {
-                    let current = rows(&this.snapshot["config"]["servers"])
-                        .into_iter()
-                        .find(|row| row["id"] == server);
                     if !this.configuration_available()
-                        || current
-                            .as_ref()
-                            .map(|row| terminal_scope::connection(row, &this.snapshot))
-                            .as_ref()
-                            != Some(&event_connection)
+                        || this
+                            .connection_of(&server)
+                            .is_none_or(|current| Some(current) != event_connection)
                     {
                         return;
                     }
@@ -163,9 +154,8 @@ impl Newport {
                             } else {
                                 format!(
                                     "{}: {message}",
-                                    current
-                                        .as_ref()
-                                        .map(|row| text(row, "name"))
+                                    this.saved_server(&server)
+                                        .map(|row| row.name.clone())
                                         .unwrap_or_else(|| server.clone())
                                 )
                             };
@@ -204,7 +194,7 @@ impl Newport {
             &mut self.services_panels,
             &mut self.retired_services,
             &mut self.services_preferences,
-            available.then_some(&self.snapshot),
+            self.snapshot.as_ref().filter(|_| available),
             visible_server,
             cx,
         );
@@ -235,14 +225,11 @@ impl Newport {
         command: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(config) = rows(&self.snapshot["config"]["servers"])
-            .into_iter()
-            .find(|row| row["id"] == server)
-        else {
+        let Some(config) = self.saved_server(server) else {
             return;
         };
-        let connection = terminal_scope::connection(&config, &self.snapshot);
-        let endpoint = format!("{}@{}", text(&config, "sshUser"), text(&config, "sshHost"));
+        let connection = self.connection(config);
+        let endpoint = format!("{}@{}", config.ssh_user, config.ssh_host);
         match open_service_command(
             &mut self.terminals,
             server,
@@ -264,11 +251,12 @@ impl Newport {
 #[cfg(test)]
 mod tests {
     use super::{HostedServices, open_service_command, poll_services};
-    use crate::{services::tests::fixture, terminal_scope};
+    use crate::services::tests::fixture;
+    use crate::snapshot_fixture as config_fixture;
     use gpui_kit as gpui;
     use gpui_kit::{Subscription, TestAppContext};
-    use newport_domain::services::{Scope, ServiceVerb};
-    use serde_json::{Value, json};
+    use newport_protocol::desktop::configuration;
+    use newport_protocol::monitor::services::{Scope, Verb};
     use std::{cell::Cell, collections::HashMap, rc::Rc, thread, time::Duration};
 
     #[gpui::test]
@@ -284,7 +272,7 @@ mod tests {
                 let result = open_service_command(
                     &mut terminals,
                     "fixture",
-                    json!({"scope":"fixture"}),
+                    Some(crate::snapshot_fixture::scope("fixture")),
                     "fixture@unconnected.invalid".into(),
                     command,
                     cx,
@@ -305,7 +293,7 @@ mod tests {
                 open_service_command(
                     &mut terminals,
                     "fixture",
-                    json!({"scope":"fixture"}),
+                    Some(crate::snapshot_fixture::scope("fixture")),
                     "fixture@unconnected.invalid".into(),
                     format!("sudo systemctl restart app-{index}.service"),
                     cx,
@@ -327,7 +315,7 @@ mod tests {
                     open_service_command(
                         &mut terminals,
                         "fixture",
-                        json!({"scope":"fixture"}),
+                        Some(crate::snapshot_fixture::scope("fixture")),
                         "fixture@unconnected.invalid".into(),
                         command.into(),
                         cx,
@@ -341,25 +329,26 @@ mod tests {
         });
     }
 
-    fn configured() -> Value {
-        json!({"instanceId":"original-backend","config":{"servers":[{
-            "id":"fixture","name":"Test server","sshHost":"original.example",
-            "sshUser":"user","sshPort":22,"authMethod":"sshAgent"
-        }]},"runtime":{"connectionRevisions":{"fixture":1}}})
+    const ID: &str = "00000000-0000-4000-8000-000000000001";
+    fn configured() -> configuration::Snapshot {
+        let mut server = config_fixture::server(config_fixture::SERVER, "Test server");
+        server.ssh_host = "original.example".into();
+        server.ssh_user = "user".into();
+        config_fixture::snapshot(vec![server])
     }
 
-    fn hidden_retirement(cx: &mut TestAppContext, change: impl FnOnce(&mut Value)) {
+    fn hidden_retirement(
+        cx: &mut TestAppContext,
+        change: impl FnOnce(&mut configuration::Snapshot),
+    ) {
         let (panel, cx, backend) = fixture(cx);
         let original = configured();
         let disconnected = Rc::new(Cell::new(false));
         let on_drop = disconnected.clone();
         let mut hosted = HashMap::from([(
-            "fixture".into(),
+            ID.into(),
             HostedServices {
-                connection: terminal_scope::connection(
-                    &original["config"]["servers"][0],
-                    &original,
-                ),
+                connection: Some(original.connection_scope(&original.config.servers[0])),
                 panel: panel.clone(),
                 _subscription: Subscription::new(move || on_drop.set(true)),
             },
@@ -369,7 +358,7 @@ mod tests {
         let expected_preferences = panel.read_with(cx, |panel, cx| panel.preferences(cx));
         backend.hold_actions();
         panel.update(cx, |panel, cx| {
-            panel.test_action("app.service", Scope::System, ServiceVerb::Restart, cx)
+            panel.test_action("app.service", Scope::System, Verb::Restart, cx)
         });
         for _ in 0..300 {
             if backend.held_actions() == 1 {
@@ -387,7 +376,7 @@ mod tests {
         let mut current = original;
         change(&mut current);
         // A wrongly dispatched read would now return different endpoint data.
-        backend.set_snapshot(newport_domain::services::ServicesSnapshot::default());
+        backend.set_snapshot(newport_protocol::monitor::services::Snapshot::default());
 
         // No draw or sync_services() runs after configuration changes. Exercise
         // the same polling helper used by the real host while its window hides.
@@ -402,13 +391,13 @@ mod tests {
             )
         });
         assert!(hosted.is_empty());
-        if current["config"]["servers"].as_array().unwrap().is_empty() {
+        if current.config.servers.is_empty() {
             assert!(
                 preferences.is_empty(),
                 "deleted servers lose presentation choices"
             );
         } else {
-            assert_eq!(preferences.get("fixture"), Some(&expected_preferences));
+            assert_eq!(preferences.get(ID), Some(&expected_preferences));
         }
         assert_eq!(
             retired.len(),
@@ -416,7 +405,7 @@ mod tests {
             "physical action is retained until drained"
         );
         assert!(disconnected.get(), "obsolete event subscription is removed");
-        backend.release_action(json!({"ok":true}));
+        backend.release_action();
         for _ in 0..300 {
             cx.update(|_, cx| {
                 poll_services(
@@ -446,20 +435,24 @@ mod tests {
     #[gpui::test]
     fn hidden_backend_replacement_retires_before_action_completion(cx: &mut TestAppContext) {
         hidden_retirement(cx, |snapshot| {
-            snapshot["instanceId"] = json!("replacement-backend")
+            snapshot.instance_id = config_fixture::NEXT_INSTANCE
         });
     }
 
     #[gpui::test]
     fn hidden_credential_change_retires_before_action_completion(cx: &mut TestAppContext) {
         hidden_retirement(cx, |snapshot| {
-            snapshot["runtime"]["connectionRevisions"]["fixture"] = json!(2)
+            config_fixture::set(
+                &mut snapshot.runtime.connection_revisions,
+                config_fixture::SERVER,
+                2,
+            )
         });
     }
 
     #[gpui::test]
     fn hidden_server_deletion_retires_before_action_completion(cx: &mut TestAppContext) {
-        hidden_retirement(cx, |snapshot| snapshot["config"]["servers"] = json!([]));
+        hidden_retirement(cx, |snapshot| snapshot.config.servers.clear());
     }
 
     #[gpui::test]
@@ -469,12 +462,9 @@ mod tests {
         let (panel, cx, backend) = fixture(cx);
         let mut snapshot = configured();
         let mut hosted = HashMap::from([(
-            "fixture".into(),
+            ID.into(),
             HostedServices {
-                connection: terminal_scope::connection(
-                    &snapshot["config"]["servers"][0],
-                    &snapshot,
-                ),
+                connection: Some(snapshot.connection_scope(&snapshot.config.servers[0])),
                 panel: panel.clone(),
                 _subscription: Subscription::new(|| {}),
             },
@@ -483,7 +473,7 @@ mod tests {
         let mut preferences = HashMap::new();
         backend.hold_actions();
         panel.update(cx, |panel, cx| {
-            panel.test_action("app.service", Scope::System, ServiceVerb::Restart, cx)
+            panel.test_action("app.service", Scope::System, Verb::Restart, cx)
         });
         for _ in 0..300 {
             if backend.held_actions() == 1 {
@@ -494,21 +484,21 @@ mod tests {
         assert_eq!(backend.held_actions(), 1);
         let snapshots = backend.count("services_snapshot");
         let logs = backend.count("service_logs");
-        backend.release_action(json!({"ok":true}));
+        backend.release_action();
         for _ in 0..20 {
             cx.update(|_, cx| {
                 poll_services(&mut hosted, &mut retired, &mut preferences, None, None, cx)
             });
             thread::sleep(Duration::from_millis(2));
         }
-        assert!(hosted.contains_key("fixture"));
+        assert!(hosted.contains_key(ID));
         assert_eq!(backend.count("services_snapshot"), snapshots);
         assert_eq!(backend.count("service_logs"), logs);
         assert!(
             panel.read_with(cx, |panel, _| panel.has_pending()),
             "completion waits for validated configuration"
         );
-        snapshot["instanceId"] = json!("replacement-backend");
+        snapshot.instance_id = config_fixture::NEXT_INSTANCE;
         for _ in 0..300 {
             cx.update(|_, cx| {
                 poll_services(
@@ -540,12 +530,9 @@ mod tests {
         let (panel, cx, backend) = fixture(cx);
         let mut snapshot = configured();
         let mut hosted = HashMap::from([(
-            "fixture".into(),
+            ID.into(),
             HostedServices {
-                connection: terminal_scope::connection(
-                    &snapshot["config"]["servers"][0],
-                    &snapshot,
-                ),
+                connection: Some(snapshot.connection_scope(&snapshot.config.servers[0])),
                 panel: panel.clone(),
                 _subscription: Subscription::new(|| {}),
             },
@@ -553,20 +540,20 @@ mod tests {
         let mut retired = Vec::new();
         let expected_preferences = panel.read_with(cx, |panel, cx| panel.preferences(cx));
         let mut preferences = HashMap::from([
-            ("fixture".into(), expected_preferences.clone()),
+            (ID.into(), expected_preferences.clone()),
             ("removed-server".into(), expected_preferences.clone()),
         ]);
         let snapshots = backend.count("services_snapshot");
         cx.update(|_, cx| {
             poll_services(&mut hosted, &mut retired, &mut preferences, None, None, cx)
         });
-        assert!(hosted.contains_key("fixture"));
-        assert_eq!(preferences.get("fixture"), Some(&expected_preferences));
+        assert!(hosted.contains_key(ID));
+        assert_eq!(preferences.get(ID), Some(&expected_preferences));
         assert!(
             preferences.contains_key("removed-server"),
             "unavailable configuration must not discard cached choices"
         );
-        snapshot["config"]["servers"][0]["name"] = json!("Renamed server");
+        snapshot.config.servers[0].name = "Renamed server".into();
         cx.update(|_, cx| {
             poll_services(
                 &mut hosted,
@@ -577,7 +564,7 @@ mod tests {
                 cx,
             )
         });
-        assert!(hosted.contains_key("fixture"));
+        assert!(hosted.contains_key(ID));
         assert!(
             !preferences.contains_key("removed-server"),
             "a confirmed deletion prunes cached choices even without a hosted view"

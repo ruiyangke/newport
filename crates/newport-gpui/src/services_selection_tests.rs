@@ -3,12 +3,12 @@ use gpui_kit::{
     self as gpui, AppContext, Context, Entity, IntoElement, ParentElement, Render, ScrollDelta,
     ScrollEvent, Styled, TestAppContext, VisualTestContext, Window, div, point, px, size,
 };
-use newport_domain::services::{ServiceUnit, ServicesSnapshot};
+use newport_protocol::monitor::services::{self as systemd, Service};
 
-fn many_services() -> ServicesSnapshot {
+fn many_services() -> systemd::Snapshot {
     let mut snapshot = tests::snapshot();
     snapshot.services = (0..1000)
-        .map(|i| ServiceUnit {
+        .map(|i| Service {
             name: format!("app-{i:04}.service"),
             load: "loaded".into(),
             active: "active".into(),

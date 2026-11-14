@@ -405,7 +405,6 @@ mod tests {
     use super::ProcessIcon;
     use crate::connections::fixtures::{Listener, publication};
     use newport_domain::port_grouping::Port;
-    use serde_json::json;
 
     #[test]
     fn observed_process_identity_wins_over_ports_and_aliases() {
@@ -422,7 +421,12 @@ mod tests {
             ProcessIcon::Brand("process-icons/vite.svg")
         );
         assert_eq!(
-            ProcessIcon::for_port(&Port::saved(json!({"name":"Postgres"}))),
+            ProcessIcon::for_port(&Port::saved(
+                newport_protocol::desktop::configuration::Tunnel {
+                    name: "Postgres".into(),
+                    ..crate::snapshot_fixture::saved_forward(crate::snapshot_fixture::SERVER)
+                }
+            )),
             ProcessIcon::Network
         );
         assert_eq!(

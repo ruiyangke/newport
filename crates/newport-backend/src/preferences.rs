@@ -96,10 +96,6 @@ impl Preferences {
     }
 }
 
-/// The window's own choices: sidebar width, the icon-only sidebar, the theme
-/// and whether Option is Meta in terminals. The window reads them from the
-/// file at startup and saves them here, so this process stays the file's only
-/// writer. Absent keys are unchanged.
 /// For a deleted server: drops its entries (projects and the installed-agent
 /// record), so they don't outlive it.
 pub async fn forget_server(state: &Preferences, server_id: uuid::Uuid) -> Result<(), String> {
@@ -114,25 +110,24 @@ pub async fn forget_server(state: &Preferences, server_id: uuid::Uuid) -> Result
     .map_err(|e| e.to_string())?
 }
 
-pub async fn set_window_preferences(state: &Preferences, values: Value) -> Result<(), String> {
-    let values = values
-        .as_object()
-        .ok_or("Window preferences must be an object.")?
-        .clone();
-    for (key, value) in &values {
-        let valid = match key.as_str() {
-            "sidebarWidth" => value
-                .as_f64()
-                .is_some_and(|width| (176.0..=300.0).contains(&width)),
-            "sidebarCompact" => value.is_boolean(),
-            "appearance" => matches!(value.as_str(), Some("system" | "light" | "dark")),
-            "terminalOptionAsMeta" => value.is_boolean(),
-            _ => false,
-        };
-        if !valid {
-            return Err(format!("Invalid window preference: {key}"));
-        }
+/// The window's own choices: sidebar width, the icon-only sidebar, the theme
+/// and whether Option is Meta in terminals. The window reads them from the
+/// file at startup and saves them here, so this process stays the file's only
+/// writer. Unset fields are unchanged.
+pub async fn set_window_preferences(
+    state: &Preferences,
+    patch: &newport_protocol::desktop::preferences::WindowPatch,
+) -> Result<(), String> {
+    use newport_protocol::desktop::preferences::SIDEBAR_WIDTH;
+    if patch
+        .sidebar_width
+        .is_some_and(|width| !SIDEBAR_WIDTH.contains(&width))
+    {
+        return Err("Invalid window preference: sidebarWidth".into());
     }
+    let Value::Object(values) = serde_json::to_value(patch).map_err(|e| e.to_string())? else {
+        return Err("Window preferences must be an object.".into());
+    };
     let state = state.clone();
     tokio::task::spawn_blocking(move || {
         state.update(|stored| {

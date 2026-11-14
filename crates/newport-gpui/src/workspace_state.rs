@@ -8,13 +8,13 @@ pub(super) struct Selection {
     pub server: String,
     pub page: Page,
     pub workspace_page: Page,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "destination")]
     pub git: Option<GitDestination>,
     #[serde(default)]
     pub overview_preferences: std::collections::BTreeMap<String, super::overview::Preferences>,
     #[serde(default)]
     pub network_interfaces: std::collections::BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "destinations")]
     pub git_destinations: std::collections::BTreeMap<String, GitDestination>,
     #[serde(default)]
     pub project_preferences:
@@ -37,18 +37,57 @@ impl Default for Selection {
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct GitDestination {
     server: String,
+    project_path: newport_protocol::git::Path,
+    root: newport_protocol::git::Path,
+    tab: usize,
+}
+/// A stored destination as saved: a path that isn't one is dropped with its
+/// destination, while a destination missing a field fails the selection.
+#[derive(Deserialize)]
+struct Stored {
+    server: String,
     project_path: serde_json::Value,
     root: serde_json::Value,
     tab: usize,
 }
-fn valid_path(value: &serde_json::Value) -> bool {
+impl Stored {
+    fn destination(self) -> Option<GitDestination> {
+        Some(GitDestination {
+            server: self.server,
+            project_path: stored_path(self.project_path)?,
+            root: stored_path(self.root)?,
+            tab: self.tab,
+        })
+    }
+}
+fn stored_path(value: serde_json::Value) -> Option<newport_protocol::git::Path> {
+    if !value["display"].is_string() {
+        return None;
+    }
+    serde_json::from_value(value).ok().filter(valid_path)
+}
+/// An absolute path without NUL bytes, no longer than a request allows.
+fn valid_path(value: &newport_protocol::git::Path) -> bool {
     use base64::Engine as _;
-    value["display"].is_string()
-        && value["bytesB64"]
-            .as_str()
-            .filter(|s| s.len() <= 32768)
-            .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
-            .is_some_and(|bytes| bytes.starts_with(b"/") && !bytes.contains(&0))
+    Some(value.bytes_b64.as_str())
+        .filter(|s| s.len() <= 32768)
+        .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
+        .is_some_and(|bytes| bytes.starts_with(b"/") && !bytes.contains(&0))
+}
+fn destination<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<GitDestination>, D::Error> {
+    Ok(Option::<Stored>::deserialize(deserializer)?.and_then(Stored::destination))
+}
+fn destinations<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<std::collections::BTreeMap<String, GitDestination>, D::Error> {
+    Ok(
+        std::collections::BTreeMap::<String, Stored>::deserialize(deserializer)?
+            .into_iter()
+            .filter_map(|(server, stored)| Some((server, stored.destination()?)))
+            .collect(),
+    )
 }
 /// A restored selection with anything invalid dropped; an impossible server
 /// identity refuses the whole selection.
@@ -62,21 +101,15 @@ pub(super) fn sanitize(mut selection: Selection) -> io::Result<Selection> {
     if selection.workspace_page == Page::Settings {
         selection.workspace_page = Page::Overview;
     }
-    if selection.git.as_ref().is_some_and(|git| {
-        git.server != selection.server
-            || git.tab >= 7
-            || !valid_path(&git.project_path)
-            || !valid_path(&git.root)
-    }) {
+    if selection
+        .git
+        .as_ref()
+        .is_some_and(|git| git.server != selection.server || git.tab >= 7)
+    {
         selection.git = None;
     }
     selection.git_destinations.retain(|server, git| {
-        server == &git.server
-            && server.len() <= 256
-            && !server.contains('\0')
-            && git.tab < 7
-            && valid_path(&git.project_path)
-            && valid_path(&git.root)
+        server == &git.server && server.len() <= 256 && !server.contains('\0') && git.tab < 7
     });
     if let Some(git) = &selection.git {
         selection
@@ -96,7 +129,7 @@ impl super::Newport {
         }
         if !self
             .resources
-            .get("page")
+            .get("projects")
             .is_some_and(|r| !r.pending && r.error.is_none())
         {
             return;
@@ -107,16 +140,15 @@ impl super::Newport {
         if saved.server != self.server {
             return;
         }
-        let Some(project) = super::rows(&self.value("page"))
-            .into_iter()
-            .find(|project| {
-                project["serverId"].as_str() == Some(&self.server)
-                    && project["path"]["bytesB64"] == saved.project_path["bytesB64"]
+        let Some(project) = self.library_projects().and_then(|projects| {
+            projects.iter().find(|project| {
+                project.server.to_string() == self.server
+                    && saved.project_path.bytes_b64 == project.path.bytes_b64
             })
-        else {
+        }) else {
             return;
         };
-        self.selection = Some(project);
+        self.selection = Some(project.clone());
         self.git = super::git::Workspace::default();
         self.git.tab = if saved.tab == 2 { 0 } else { saved.tab };
         self.git_request_open(saved.root);
@@ -129,14 +161,14 @@ impl super::Newport {
             return Some(saved.clone());
         }
         let project = self.selection.as_ref()?;
-        let root = if self.git.repo["repoId"].is_string() {
-            &self.git.repo["root"]
-        } else {
-            &self.git.opening_path
+        let root = match self.git.root() {
+            Some(root) => root,
+            None => self.git.opening_path.as_ref()?,
         };
-        (valid_path(&project["path"]) && valid_path(root)).then(|| GitDestination {
+        let project_path = project.path.clone();
+        (valid_path(&project_path) && valid_path(root)).then(|| GitDestination {
             server: self.server.clone(),
-            project_path: project["path"].clone(),
+            project_path,
             root: root.clone(),
             tab: self.git.tab,
         })
@@ -248,6 +280,24 @@ mod tests {
         let restored = decode(&serde_json::to_vec(&valid).unwrap()).unwrap();
         assert_eq!(restored.git_destinations["fixture"].tab, 1);
         assert_eq!(restored.git.unwrap().tab, 1);
+    }
+    #[test]
+    fn a_destination_missing_a_field_fails_the_selection_and_a_bad_path_drops_it() {
+        let path = serde_json::json!({"display":"/repo","bytesB64":"L3JlcG8="});
+        let selection = |git: serde_json::Value| {
+            serde_json::to_vec(&serde_json::json!({
+                "server":"fixture","page":"projects","workspace_page":"projects","git":git
+            }))
+            .unwrap()
+        };
+        let missing_tab = serde_json::json!({"server":"fixture","project_path":path,"root":path});
+        assert!(decode(&selection(missing_tab)).is_err());
+        let no_display = serde_json::json!({
+            "server":"fixture","project_path":path,"root":{"bytesB64":"L3JlcG8="},"tab":1
+        });
+        let restored = decode(&selection(no_display)).unwrap();
+        assert!(restored.git.is_none());
+        assert!(restored.git_destinations.is_empty());
     }
     #[test]
     fn selection_roundtrips_and_rejects_unknown_pages() {

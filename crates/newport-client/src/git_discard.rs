@@ -1,8 +1,7 @@
 //! Immutable discard targets; execution keeps the originally reviewed snapshot.
-use newport_protocol::git::{Action, DiscardSource, HunkSelection};
-use serde_json::Value;
-#[cfg(test)]
-use serde_json::json;
+use newport_protocol::git::{
+    Action, DiscardSource, HunkSelection, Page, StatusEntry, StatusSummary,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -17,37 +16,35 @@ pub struct Review {
     hunks: Option<HunkSelection>,
 }
 impl Review {
-    pub fn file(status: &Value, entry: &Value) -> Result<Self, String> {
+    pub fn file(
+        status: Option<&Page<StatusEntry, StatusSummary>>,
+        entry: Option<&StatusEntry>,
+    ) -> Result<Self, String> {
         let invalid =
             || "Review an individual, non-conflicted file before discarding changes.".to_owned();
-        let snapshot = status["snapshot"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(invalid)?;
-        let id = entry["entryId"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(invalid)?;
-        let entries = status["entries"].as_array().ok_or_else(invalid)?;
-        let known = entries
+        let (Some(status), Some(entry)) = (status, entry) else {
+            return Err(invalid());
+        };
+        if status.snapshot.is_empty() || entry.entry_id.is_empty() {
+            return Err(invalid());
+        }
+        let known = status
+            .entries
             .iter()
-            .find(|row| row["entryId"] == id)
+            .find(|row| row.entry_id == entry.entry_id)
             .ok_or_else(invalid)?;
         if known != entry
-            || !status["metadata"]["integration"].is_null()
-            || entries.iter().any(|row| row["conflicted"] == true)
-            || (entry["untracked"] == true
-                && entry["path"]["display"]
-                    .as_str()
-                    .is_none_or(|p| p.ends_with('/')))
-            || !(entry["staged"] == true || entry["unstaged"] == true || entry["untracked"] == true)
+            || status.metadata.integration.is_some()
+            || status.entries.iter().any(|row| row.conflicted)
+            || (entry.untracked && entry.path.display.ends_with('/'))
+            || !(entry.staged || entry.unstaged || entry.untracked)
         {
             return Err(invalid());
         }
         Ok(Self {
-            snapshot: snapshot.into(),
-            entry: id.into(),
-            index: entry["unstaged"] == true || entry["untracked"] == true,
+            snapshot: status.snapshot.clone(),
+            entry: entry.entry_id.clone(),
+            index: entry.unstaged || entry.untracked,
             hunks: None,
         })
     }
@@ -110,12 +107,57 @@ impl Review {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use newport_protocol::git::{GroupCounts, Head, IntegrationState, Path};
+    fn entry(id: &str, path: &str) -> StatusEntry {
+        StatusEntry {
+            entry_id: id.into(),
+            path: Path::new(path.as_bytes()),
+            old_path: None,
+            flags: 0,
+            staged: false,
+            unstaged: false,
+            untracked: false,
+            conflicted: false,
+            conflict: None,
+        }
+    }
+    fn status(entries: Vec<StatusEntry>) -> Page<StatusEntry, StatusSummary> {
+        Page {
+            snapshot: "s".into(),
+            entries,
+            next_cursor: None,
+            metadata: StatusSummary {
+                head: Head {
+                    oid: None,
+                    name: None,
+                    detached: false,
+                    unborn: true,
+                },
+                operation_state: "none".into(),
+                integration: None,
+                ahead: None,
+                behind: None,
+                basis: "local".into(),
+                upstream_ref: None,
+                upstream: None,
+                truncated: false,
+                total_entries: 0,
+                group_counts: GroupCounts {
+                    staged: 0,
+                    unstaged: 0,
+                    untracked: 0,
+                    conflicted: 0,
+                },
+                matched_entries: None,
+            },
+        }
+    }
     #[test]
     fn whole_file_uses_reviewed_entry_snapshot_and_explicit_restore_source() {
-        let entry =
-            json!({"entryId":"e", "staged":true,"unstaged":false,"path":{"display":"file"}});
-        let mut status = json!({"snapshot":"s","entries":[entry]});
-        let review = Review::file(&status, &entry).unwrap();
+        let mut entry = entry("e", "file");
+        entry.staged = true;
+        let mut status = status(vec![entry.clone()]);
+        let review = Review::file(Some(&status), Some(&entry)).unwrap();
         assert!(review.matches("s", "e"));
         assert!(!review.matches("new", "e"));
         assert!(!review.matches("s", "other"));
@@ -128,9 +170,9 @@ mod tests {
             }
         );
         assert!(review.action(Source::Index).is_err());
-        status["entries"][0]["unstaged"] = json!(true);
-        assert!(Review::file(&status, &entry).is_err());
-        let review = Review::file(&status, &status["entries"][0]).unwrap();
+        status.entries[0].unstaged = true;
+        assert!(Review::file(Some(&status), Some(&entry)).is_err());
+        let review = Review::file(Some(&status), Some(&status.entries[0])).unwrap();
         assert!(matches!(
             review.action(Source::Index).unwrap(),
             Action::Discard {
@@ -138,24 +180,36 @@ mod tests {
                 ..
             }
         ));
-        status["metadata"]["integration"] = json!({"kind":"merge"});
-        assert!(Review::file(&status, &status["entries"][0]).is_err());
-        status["metadata"]["integration"] = Value::Null;
-        status["entries"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({"conflicted":true}));
-        assert!(Review::file(&status, &status["entries"][0]).is_err());
+        status.metadata.integration = Some(IntegrationState {
+            kind: "merge".into(),
+            managed: true,
+            can_continue: false,
+            can_abort: true,
+            can_skip: false,
+        });
+        assert!(Review::file(Some(&status), Some(&status.entries[0])).is_err());
+        status.metadata.integration = None;
+        let mut conflicted = super::tests::entry("c", "conflict");
+        conflicted.conflicted = true;
+        status.entries.push(conflicted);
+        assert!(Review::file(Some(&status), Some(&status.entries[0])).is_err());
+        assert!(Review::file(None, Some(&status.entries[0])).is_err());
+        assert!(Review::file(Some(&status), None).is_err());
     }
     #[test]
     fn collapsed_untracked_directories_are_not_discard_targets() {
-        let entry = json!({"entryId":"e","untracked":true,"path":{"display":"directory/"}});
-        let status = json!({"snapshot":"s","entries":[entry]});
-        assert!(Review::file(&status, &entry).is_err());
+        let mut entry = entry("e", "directory/");
+        entry.untracked = true;
+        let status = status(vec![entry.clone()]);
+        assert!(Review::file(Some(&status), Some(&entry)).is_err());
     }
     #[test]
     fn partial_discard_preserves_ids_and_rejects_staged_or_head_comparisons() {
-        let mut page = json!({"nextCursor":null,"metadata":{"readOnly":false,"totalFiles":1,"sourceSnapshot":"s","entryId":"e","side":"index_to_worktree","contextLines":3},"entries":[{"fileIndex":0,"status":"Modified","oldMode":33188,"newMode":33188,"oldPath":{"bytesB64":"Zg=="},"newPath":{"bytesB64":"Zg=="},"hunks":[{"id":"h","lines":[{"id":"l","origin":"+","lineComplete":true}]}]}]});
+        let mut page = crate::git_diff_page::tests::page(true);
+        page.metadata.source_snapshot = Some("s".into());
+        page.metadata.entry_id = Some("e".into());
+        page.entries[0].hunks[0].id = Some("h".into());
+        page.entries[0].hunks[0].lines[0].id = Some("l".into());
         let selection = crate::git_selection::Review::from_page(&page).unwrap();
         let review = Review::selection(&selection, &["h".into()], Some(&["l".into()])).unwrap();
         assert_eq!(review.line_count(), Some(1));
@@ -173,7 +227,7 @@ mod tests {
         );
         assert!(review.action(Source::Head).is_err());
         assert!(Review::selection(&selection, &["invalid".into()], None).is_err());
-        page["metadata"]["side"] = json!("head_to_index");
+        page.metadata.side = Some(newport_protocol::git::Side::HeadToIndex);
         let staged = crate::git_selection::Review::from_page(&page).unwrap();
         assert!(Review::selection(&staged, &["h".into()], None).is_err());
     }

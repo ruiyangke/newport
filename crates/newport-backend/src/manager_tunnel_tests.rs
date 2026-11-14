@@ -320,7 +320,7 @@ async fn saved_discovery_and_batch_starts_bypass_storage_but_validate_stale_scop
         .is_err()
     );
     let mut stale_instance = expected.clone();
-    stale_instance[9] = serde_json::json!(Uuid::new_v4());
+    stale_instance.backend_instance = Uuid::new_v4();
     assert!(
         commands::forward_tunnel_batch(
             &state,

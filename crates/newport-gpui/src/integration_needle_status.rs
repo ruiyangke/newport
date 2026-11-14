@@ -1,5 +1,8 @@
 //! Presentation of the selected runtime, separately from the server default.
-use serde_json::Value;
+use newport_domain::connectivity::Phase;
+use newport_protocol::desktop::configuration::{
+    BuildRelation, InstallationStatus, RuntimeSnapshot, RuntimeStatus,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Action {
@@ -41,42 +44,54 @@ impl Status {
 }
 
 pub(super) fn present(
-    installed: &Value,
-    runtime: &Value,
-    transport: Option<&str>,
+    installed: Option<&InstallationStatus>,
+    runtime: Option<&RuntimeSnapshot>,
+    transport: Option<Phase>,
     missing: bool,
 ) -> Status {
     if missing {
         return Status::new("Not set up", None, Some((Action::Setup, "Set up Needle")));
     }
     match transport {
-        Some("disconnected") => {
+        Some(Phase::Disconnected) => {
             return Status::new(
                 "Offline",
                 Some("Connect to check the agent."),
                 Some((Action::Inspect, "Connect")),
             );
         }
-        Some("failed") => {
+        Some(Phase::Failed) => {
             return Status::new("Connection failed", None, Some((Action::Inspect, "Retry")));
         }
-        Some("connecting") => return Status::new("Connecting…", None, None),
-        Some("awaitingApproval") => return Status::new("Waiting for SSH approval", None, None),
-        Some("recovering") => return Status::new("Reconnecting…", None, None),
-        _ => {}
+        Some(Phase::Connecting) => return Status::new("Connecting…", None, None),
+        Some(Phase::AwaitingApproval) => {
+            return Status::new("Waiting for SSH approval", None, None);
+        }
+        Some(Phase::Reconnecting) => return Status::new("Reconnecting…", None, None),
+        Some(Phase::Connected) | None => {}
     }
+    let status = runtime.map(|runtime| runtime.status);
+    let relation = installed.map(|installed| installed.build_relation);
     let build = runtime_build(runtime);
-    let ready = runtime["status"] == "ready" && build.is_some();
-    let own = build.is_some_and(|hash| installed["bundledHash"] == hash);
-    let default = build.is_some_and(|hash| installed["installedHash"] == hash);
-    let check_failed = installed["error"].as_str().is_some_and(|s| !s.is_empty());
-    let older = installed["buildRelation"] == "older" && installed["updateAvailable"] == true;
+    let ready = status == Some(RuntimeStatus::Ready) && build.is_some();
+    let own = build.is_some_and(|hash| {
+        installed.and_then(|installed| installed.bundled_hash.as_deref()) == Some(hash)
+    });
+    let default = build.is_some_and(|hash| {
+        installed.and_then(|installed| installed.installed_hash.as_deref()) == Some(hash)
+    });
+    let check_failed = installed
+        .and_then(|installed| installed.error.as_deref())
+        .is_some_and(|s| !s.is_empty());
+    let older = relation == Some(BuildRelation::Older)
+        && installed.is_some_and(|installed| installed.update_available == Some(true));
+    let newer = relation == Some(BuildRelation::Newer);
     if ready && (own || !default || check_failed || !older) {
         return Status {
             label: "Ready",
             note: if check_failed {
                 Some("Server default couldn’t be verified.")
-            } else if default && installed["buildRelation"] == "newer" {
+            } else if default && newer {
                 Some("Update Newport to manage this agent.")
             } else {
                 None
@@ -87,7 +102,7 @@ pub(super) fn present(
         };
     }
     if older {
-        let required = runtime["status"] == "failed" || check_failed;
+        let required = status == Some(RuntimeStatus::Failed) || check_failed;
         return Status {
             label: if required {
                 "Update required"
@@ -107,10 +122,10 @@ pub(super) fn present(
             active: ready,
         };
     }
-    if runtime["status"] == "starting" {
+    if status == Some(RuntimeStatus::Starting) {
         return Status::new("Starting…", None, None);
     }
-    if check_failed || runtime["status"] == "failed" {
+    if check_failed || status == Some(RuntimeStatus::Failed) {
         return Status {
             tone: Tone::Warning,
             ..Status::new(
@@ -120,20 +135,21 @@ pub(super) fn present(
             )
         };
     }
-    if installed["installed"] == true {
+    if installed.is_some_and(|installed| installed.installed == Some(true)) {
         return Status::new(
             "Installed",
-            (installed["buildRelation"] == "newer")
-                .then_some("Update Newport to manage this agent."),
+            newer.then_some("Update Newport to manage this agent."),
             None,
         );
     }
     Status::new("Not checked", None, Some((Action::Inspect, "Check again")))
 }
 
-pub(super) fn runtime_build(runtime: &Value) -> Option<&str> {
-    runtime["hello"]["buildSha256"]
-        .as_str()
+pub(super) fn runtime_build(runtime: Option<&RuntimeSnapshot>) -> Option<&str> {
+    runtime?
+        .hello
+        .as_ref()
+        .map(|hello| hello.build_sha256.as_str())
         .filter(|hash| newport_protocol::product::valid_build(hash))
 }
 
@@ -145,10 +161,13 @@ pub(super) struct Builds<'a> {
     installed: (Option<&'a str>, String),
 }
 impl<'a> Builds<'a> {
-    pub(super) fn of(installed: &'a Value, runtime: &'a Value) -> Self {
-        let valid = |value: &'a Value| {
+    pub(super) fn of(
+        installed: Option<&'a InstallationStatus>,
+        runtime: Option<&'a RuntimeSnapshot>,
+    ) -> Self {
+        let valid = |value: Option<&'a String>| {
             value
-                .as_str()
+                .map(String::as_str)
                 .filter(|hash| newport_protocol::product::valid_build(hash))
         };
         Self {
@@ -157,12 +176,12 @@ impl<'a> Builds<'a> {
                 version(running_version(installed, runtime)),
             ),
             bundled: (
-                valid(&installed["bundledHash"]),
-                version(installed["bundledVersion"].as_str()),
+                valid(installed.and_then(|installed| installed.bundled_hash.as_ref())),
+                version(installed.and_then(|installed| installed.bundled_version.as_deref())),
             ),
             installed: (
-                valid(&installed["installedHash"]),
-                version(installed["installedVersion"].as_str()),
+                valid(installed.and_then(|installed| installed.installed_hash.as_ref())),
+                version(installed.and_then(|installed| installed.installed_version.as_deref())),
             ),
         }
     }
@@ -197,21 +216,30 @@ pub(super) fn version(value: Option<&str>) -> String {
         .to_owned()
 }
 
-pub(super) fn running_version<'a>(installed: &'a Value, runtime: &'a Value) -> Option<&'a str> {
+/// The running build's version: the release Newport knows by its hash, or
+/// else the version the agent reported in its hello.
+pub(super) fn running_version<'a>(
+    installed: Option<&'a InstallationStatus>,
+    runtime: Option<&'a RuntimeSnapshot>,
+) -> Option<&'a str> {
     let hash = runtime_build(runtime)?;
     release(installed, Some(hash))
-        .or_else(|| runtime["hello"]["agentVersion"].as_str())
+        .or_else(|| runtime?.hello.as_ref()?.agent_version.as_deref())
         .filter(|version| newport_protocol::product::valid_version(version))
 }
 
-pub(super) fn release<'a>(installed: &'a Value, hash: Option<&str>) -> Option<&'a str> {
+pub(super) fn release<'a>(
+    installed: Option<&'a InstallationStatus>,
+    hash: Option<&str>,
+) -> Option<&'a str> {
     let hash = hash?;
-    (installed["bundledHash"] == hash)
-        .then(|| installed["bundledVersion"].as_str())
+    let installed = installed?;
+    (installed.bundled_hash.as_deref() == Some(hash))
+        .then_some(installed.bundled_version.as_deref())
         .flatten()
         .or_else(|| {
-            (installed["installedHash"] == hash)
-                .then(|| installed["installedVersion"].as_str())
+            (installed.installed_hash.as_deref() == Some(hash))
+                .then_some(installed.installed_version.as_deref())
                 .flatten()
         })
 }
@@ -219,65 +247,101 @@ pub(super) fn release<'a>(installed: &'a Value, hash: Option<&str>) -> Option<&'
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use crate::snapshot_fixture as fixture;
+
+    /// An agent check that names the server default and the bundled build.
+    fn builds(installed: (&str, &str), bundled: (&str, Option<&str>)) -> InstallationStatus {
+        InstallationStatus {
+            installed_hash: Some(installed.0.into()),
+            installed_version: Some(installed.1.into()),
+            bundled_hash: Some(bundled.0.into()),
+            bundled_version: bundled.1.map(Into::into),
+            ..fixture::installation()
+        }
+    }
+    /// A runtime running `build`, which reported `version` in its hello.
+    fn running(status: RuntimeStatus, build: &str, version: Option<&str>) -> RuntimeSnapshot {
+        let mut hello = fixture::hello(build);
+        hello.agent_version = version.map(Into::into);
+        fixture::agent_runtime(status, Some(hello))
+    }
 
     #[test]
     fn builds_of_one_version_show_their_short_ids() {
         let a = "a1b2c3d".to_owned() + &"0".repeat(57);
         let b = "f289e54".to_owned() + &"0".repeat(57);
-        let installed = json!({"installedHash":a,"installedVersion":"0.7.0","bundledHash":b,"bundledVersion":"0.7.0"});
-        let runtime = json!({"hello":{"buildSha256":a}});
-        let builds = Builds::of(&installed, &runtime);
-        assert_eq!(builds.running(), "0.7.0 · a1b2c3d");
-        assert_eq!(builds.bundled(), "0.7.0 · f289e54");
-        assert_eq!(builds.installed(), "0.7.0 · a1b2c3d");
+        let installed = builds((&a, "0.7.0"), (&b, Some("0.7.0")));
+        let runtime = running(RuntimeStatus::Unknown, &a, None);
+        let builds_shown = Builds::of(Some(&installed), Some(&runtime));
+        assert_eq!(builds_shown.running(), "0.7.0 · a1b2c3d");
+        assert_eq!(builds_shown.bundled(), "0.7.0 · f289e54");
+        assert_eq!(builds_shown.installed(), "0.7.0 · a1b2c3d");
         // One build, or builds whose versions differ: versions alone.
-        let same = json!({"installedHash":b,"installedVersion":"0.7.0","bundledHash":b,"bundledVersion":"0.7.0"});
-        let on_same = json!({"hello":{"buildSha256":b}});
-        let builds = Builds::of(&same, &on_same);
+        let same = builds((&b, "0.7.0"), (&b, Some("0.7.0")));
+        let on_same = running(RuntimeStatus::Unknown, &b, None);
+        let shown = Builds::of(Some(&same), Some(&on_same));
         assert_eq!(
-            (builds.running(), builds.bundled()),
+            (shown.running(), shown.bundled()),
             ("0.7.0".into(), "0.7.0".into())
         );
-        let older = json!({"installedHash":a,"installedVersion":"0.6.4","bundledHash":b,"bundledVersion":"0.7.0"});
-        let builds = Builds::of(&older, &on_same);
+        let older = builds((&a, "0.6.4"), (&b, Some("0.7.0")));
+        let shown = Builds::of(Some(&older), Some(&on_same));
         assert_eq!(
-            (builds.installed(), builds.bundled()),
+            (shown.installed(), shown.bundled()),
             ("0.6.4".into(), "0.7.0".into())
         );
     }
 
     #[test]
     fn versions_follow_the_exact_runtime_and_do_not_fall_back_to_hashes() {
-        let installed = json!({
-            "installedHash":"a".repeat(64),"installedVersion":"0.7.0",
-            "bundledHash":"b".repeat(64),"bundledVersion":"0.6.4"
-        });
-        let runtime = json!({"hello":{"buildSha256":"b".repeat(64),"agentVersion":"0.6.4"}});
-        assert_eq!(running_version(&installed, &runtime), Some("0.6.4"));
-        let other = json!({"hello":{"buildSha256":"c".repeat(64),"agentVersion":"0.8.0-rc.1"}});
-        assert_eq!(running_version(&installed, &other), Some("0.8.0-rc.1"));
-        let unknown = json!({"hello":{"buildSha256":"c".repeat(64)}});
-        assert_eq!(running_version(&installed, &unknown), None);
+        let installed = builds((&"a".repeat(64), "0.7.0"), (&"b".repeat(64), Some("0.6.4")));
+        let runtime = running(RuntimeStatus::Ready, &"b".repeat(64), Some("0.6.4"));
+        assert_eq!(
+            running_version(Some(&installed), Some(&runtime)),
+            Some("0.6.4")
+        );
+        let other = running(RuntimeStatus::Ready, &"c".repeat(64), Some("0.8.0-rc.1"));
+        assert_eq!(
+            running_version(Some(&installed), Some(&other)),
+            Some("0.8.0-rc.1")
+        );
+        let unknown = running(RuntimeStatus::Ready, &"c".repeat(64), None);
+        assert_eq!(running_version(Some(&installed), Some(&unknown)), None);
         assert_eq!(version(None), "Version unavailable");
         assert_eq!(version(Some(&"a".repeat(64))), "Version unavailable");
     }
 
     #[test]
+    fn a_build_newport_does_not_know_shows_the_version_its_agent_reported() {
+        let runtime = running(RuntimeStatus::Ready, &"c".repeat(64), Some("0.7.4"));
+        assert_eq!(running_version(None, Some(&runtime)), Some("0.7.4"));
+        let installed = builds((&"a".repeat(64), "0.7.0"), (&"b".repeat(64), None));
+        assert_eq!(
+            running_version(Some(&installed), Some(&runtime)),
+            Some("0.7.4")
+        );
+        assert_eq!(
+            Builds::of(Some(&installed), Some(&runtime)).running(),
+            "0.7.4"
+        );
+    }
+
+    #[test]
     fn disconnected_transport_invalidates_a_retained_ready_hello() {
-        let runtime = json!({"status":"ready","hello":{"buildSha256":"b".repeat(64)}});
+        let runtime = running(RuntimeStatus::Ready, &"b".repeat(64), None);
+        let installed = fixture::installed(true);
         let status = present(
-            &json!({"installed":true}),
-            &runtime,
-            Some("disconnected"),
+            Some(&installed),
+            Some(&runtime),
+            Some(Phase::Disconnected),
             false,
         );
         assert_eq!(status.label, "Offline");
         assert!(!status.active);
         let approval = present(
-            &json!({"installed":true}),
-            &runtime,
-            Some("awaitingApproval"),
+            Some(&installed),
+            Some(&runtime),
+            Some(Phase::AwaitingApproval),
             false,
         );
         assert_eq!(approval.label, "Waiting for SSH approval");
@@ -286,31 +350,41 @@ mod tests {
 
     #[test]
     fn unknown_check_failure_never_promises_an_automatic_update() {
-        let status = present(
-            &json!({"installed":true,"updateAvailable":true,"error":"failed"}),
-            &Value::Null,
-            None,
-            false,
-        );
+        let installed = InstallationStatus {
+            update_available: Some(true),
+            error: Some("failed".into()),
+            ..fixture::installed(true)
+        };
+        let status = present(Some(&installed), None, None, false);
         assert_eq!(status.label, "Couldn’t check");
         assert_eq!(status.action, Some((Action::Inspect, "Retry")));
     }
 
     #[test]
     fn signed_default_version_does_not_label_another_running_build() {
-        let installed = json!({"installedHash":"a".repeat(64),"installedVersion":"0.7.0","bundledHash":"b".repeat(64)});
-        assert_eq!(release(&installed, Some(&"b".repeat(64))), None);
-        assert_eq!(release(&installed, Some(&"a".repeat(64))), Some("0.7.0"));
+        let installed = InstallationStatus {
+            installed_hash: Some("a".repeat(64)),
+            installed_version: Some("0.7.0".into()),
+            bundled_hash: Some("b".repeat(64)),
+            ..fixture::installation()
+        };
+        assert_eq!(release(Some(&installed), Some(&"b".repeat(64))), None);
+        assert_eq!(
+            release(Some(&installed), Some(&"a".repeat(64))),
+            Some("0.7.0")
+        );
     }
 
     #[test]
     fn a_known_old_protocol_offers_explicit_installation_despite_unknown_product() {
-        let status = present(
-            &json!({"installed":true,"buildRelation":"older","updateAvailable":true,"error":"product unknown"}),
-            &json!({"status":"failed"}),
-            None,
-            false,
-        );
+        let installed = InstallationStatus {
+            build_relation: BuildRelation::Older,
+            update_available: Some(true),
+            error: Some("product unknown".into()),
+            ..fixture::installed(true)
+        };
+        let runtime = fixture::agent_runtime(RuntimeStatus::Failed, None);
+        let status = present(Some(&installed), Some(&runtime), None, false);
         assert_eq!(status.label, "Update required");
         assert_eq!(status.action, Some((Action::Update, "Update")));
     }

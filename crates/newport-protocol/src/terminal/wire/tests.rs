@@ -17,6 +17,7 @@ fn holder() -> Holder {
         started: 7,
         name: None,
         title: Some(String::new()),
+        agent: Some("state=blocked:app=claude-code:kind=permission".into()),
         creator: computer(),
         attached: vec![Attached {
             id: computer().id,
@@ -149,6 +150,25 @@ fn request_sizes_and_identities_are_checked_on_both_sides() {
     invalid.exited = Some(Exit::Signal(0));
     assert!(encode_reply(&Reply::Listed(vec![invalid])).is_err());
     assert!(encode_reply(&Reply::Listed(vec![holder(), holder()])).is_err());
+}
+
+#[test]
+fn a_holders_agent_status_is_bounded_printable_report_text() {
+    for agent in [
+        "x".repeat(crate::terminal::MAX_AGENT + 1),
+        "state=done:msg=\x1b[31m".into(),
+        "state=done msg".into(),
+    ] {
+        let mut invalid = holder();
+        invalid.agent = Some(agent);
+        assert!(encode_reply(&Reply::Listed(vec![invalid])).is_err());
+    }
+    let frame = encode_reply(&Reply::Listed(vec![holder()])).unwrap();
+    assert_eq!(
+        read_reply(&mut frame.as_slice()).unwrap(),
+        Reply::Listed(vec![holder()]),
+        "the report travels unchanged"
+    );
 }
 
 #[test]

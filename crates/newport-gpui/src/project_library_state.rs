@@ -7,7 +7,7 @@ use newport_client::resources::ResourceGroup;
 /// draws it at once and then refreshes it. Dropping it releases the
 /// repository.
 pub(super) struct Checkout {
-    selection: Value,
+    selection: desktop::preferences::Project,
     git: git::Workspace,
     reads: Vec<ResourceGroup>,
 }
@@ -19,7 +19,11 @@ impl Drop for Checkout {
 
 #[derive(Default)]
 pub(super) struct State {
-    connection: Value,
+    connection: Option<configuration::ConnectionScope>,
+    /// This server's saved projects; read them through
+    /// [`Newport::library_projects`], which checks the `projects` read still
+    /// shows them.
+    projects: Option<desktop::preferences::Projects>,
     reads: Option<(ResourceGroup, ResourceGroup)>,
     checkout: Option<Checkout>,
     reload: bool,
@@ -29,19 +33,47 @@ pub(super) struct State {
 }
 
 impl State {
+    /// The rows the library shows for its `projects` read.
+    pub(super) fn prepare_list(
+        &mut self,
+        read: Option<&newport_client::resources::Resource>,
+        preferences: &project_preferences::Preferences,
+        query: &str,
+        width: f32,
+    ) -> std::rc::Rc<Vec<desktop::preferences::Project>> {
+        let projects = self
+            .projects
+            .as_ref()
+            .filter(|_| read.is_some_and(newport_client::resources::Resource::has_value))
+            .map_or(&[][..], |projects| projects.projects.as_slice());
+        let revision = read.map_or(0, |read| read.data_revision);
+        self.list
+            .prepare(revision, projects, preferences, query, width)
+    }
+
     /// Forgets the checkout set aside, releasing its repository.
     pub(super) fn drop_checkout(&mut self) {
         self.checkout = None;
     }
 }
 
+/// The saved projects a project list read replied with.
+pub(super) fn projects_reply(
+    reply: desktop::Reply,
+) -> Result<desktop::preferences::Projects, newport_client::request_error::RequestError> {
+    match reply {
+        desktop::Reply::Preferences(reply) => match *reply {
+            desktop::preferences::Reply::ProjectsList(projects) => Ok(*projects),
+            _ => Err("The backend answered a project list with another reply.".into()),
+        },
+        _ => Err("The backend answered a project list with another reply.".into()),
+    }
+}
+
 impl Newport {
     pub(super) fn project_library_state(&mut self) -> &mut State {
         if !self.project_libraries.contains_key(&self.server) {
-            let connection = self
-                .selected_server()
-                .map(|server| terminal_scope::connection(server, &self.snapshot))
-                .unwrap_or_default();
+            let connection = self.selected_connection();
             self.project_libraries.insert(
                 self.server.clone(),
                 State {
@@ -61,7 +93,68 @@ impl Newport {
             .unwrap_or_default()
     }
 
-    pub(super) fn visible_project_rows(&self) -> &[Value] {
+    /// The selected server's saved projects, while its `projects` read shows
+    /// them.
+    pub(super) fn library_projects(&self) -> Option<&[desktop::preferences::Project]> {
+        let state = self.project_libraries.get(&self.server)?;
+        self.owned("projects", &state.projects)
+            .map(|projects| projects.projects.as_slice())
+    }
+
+    /// Settles a read of the selected server's saved projects.
+    pub(super) fn complete_projects(
+        &mut self,
+        generation: u64,
+        result: Result<desktop::Reply, newport_client::request_error::RequestError>,
+    ) -> bool {
+        let result = result.and_then(projects_reply).map(|projects| {
+            let changed = self.project_library_state().projects.as_ref() != Some(&projects);
+            (projects, changed)
+        });
+        self.complete_owned("projects", generation, result, |this| {
+            &mut this.project_library_state().projects
+        })
+    }
+
+    /// Settles a bookmark rename or removal.
+    pub(super) fn complete_project_edit(
+        &mut self,
+        generation: u64,
+        result: Result<desktop::Reply, newport_client::request_error::RequestError>,
+    ) -> bool {
+        let result = result.and_then(|reply| match reply {
+            desktop::Reply::Preferences(reply)
+                if matches!(
+                    *reply,
+                    desktop::preferences::Reply::ProjectsSave(_)
+                        | desktop::preferences::Reply::ProjectsRemove(_)
+                ) =>
+            {
+                Ok(true)
+            }
+            _ => Err("The backend answered a project change with another reply.".into()),
+        });
+        self.resources
+            .complete_owned("project-edit", generation, result)
+    }
+
+    /// Settles a request that added a project, with the bookmark it saved
+    /// while that request was still current.
+    pub(super) fn complete_added_project(
+        &mut self,
+        key: &str,
+        generation: u64,
+        result: Result<desktop::preferences::Project, newport_client::request_error::RequestError>,
+    ) -> (bool, Option<desktop::preferences::Project>) {
+        let (project, result) = match result {
+            Ok(project) => (Some(project), Ok(true)),
+            Err(error) => (None, Err(error)),
+        };
+        let accepted = self.resources.complete_owned(key, generation, result);
+        (accepted, project.filter(|_| accepted))
+    }
+
+    pub(super) fn visible_project_rows(&self) -> &[desktop::preferences::Project] {
         self.project_libraries
             .get(&self.server)
             .map(|state| state.list.visible_projects())
@@ -96,16 +189,18 @@ impl Newport {
         if !self.configuration_available() {
             return;
         }
-        let servers = self.snapshot["config"]["servers"].as_array();
+        let connections: std::collections::HashMap<String, Option<configuration::ConnectionScope>> =
+            self.servers()
+                .iter()
+                .map(|server| (server.id.to_string(), self.connection(server)))
+                .collect();
         self.project_libraries.retain(|id, state| {
-            let Some(server) =
-                servers.and_then(|rows| rows.iter().find(|server| server["id"] == *id))
-            else {
+            let Some(connection) = connections.get(id).cloned() else {
                 return false;
             };
-            let connection = terminal_scope::connection(server, &self.snapshot);
             if state.connection != connection {
                 state.connection = connection;
+                state.projects = None;
                 state.reads = None;
                 state.checkout = None;
                 state.reload = false;
@@ -124,7 +219,7 @@ impl Newport {
         if self.project_library_state().reads.is_some() {
             return;
         }
-        let reads = self.resources.take_cached(&["page"]);
+        let reads = self.resources.take_cached(&["projects"]);
         let statuses = self.resources.take_cached_prefix("project-status:");
         self.project_library_state().reads = Some((reads, statuses));
         self.project_checks = None;
@@ -132,11 +227,14 @@ impl Newport {
 
     /// Sets the open checkout aside when leaving Projects.
     pub(super) fn suspend_checkout(&mut self) {
-        if self.page != Page::Projects || self.selection.is_none() || !self.git.settled() {
+        if self.page != Page::Projects || !self.git.settled() {
             return;
         }
+        let Some(selection) = self.selection.take() else {
+            return;
+        };
         let checkout = Checkout {
-            selection: self.selection.take().unwrap_or_default(),
+            selection,
             git: std::mem::take(&mut self.git),
             reads: vec![
                 self.resources.take_cached(&["repository"]),
@@ -156,7 +254,7 @@ impl Newport {
         let Some(mut checkout) = self.project_library_state().checkout.take() else {
             return false;
         };
-        self.selection = Some(std::mem::take(&mut checkout.selection));
+        self.selection = Some(checkout.selection.clone());
         self.git = std::mem::take(&mut checkout.git);
         for reads in std::mem::take(&mut checkout.reads) {
             self.resources.restore(reads);
@@ -188,7 +286,7 @@ impl Newport {
         // Bookmarks are local preferences. Keep a short freshness window while
         // visible, and coalesce an already pending read through Resources.
         let due = reload
-            || self.resources.get("page").is_none_or(|resource| {
+            || self.resources.get("projects").is_none_or(|resource| {
                 resource
                     .finished_at
                     .is_none_or(|at| at.elapsed() >= Duration::from_secs(30))
@@ -198,20 +296,20 @@ impl Newport {
                 self.resources.invalidate_prefix("project-status:");
                 self.project_checks = None;
             }
-            let generation = self.resources.begin_refresh("page", manual);
+            let generation = self.resources.begin_refresh("projects", manual);
             self.project_library_state().reload = false;
             let operation = uuid::Uuid::parse_str(&self.server)
                 .map_err(|error| {
                     newport_client::request_error::RequestError::from(error.to_string())
                 })
                 .map(|server| {
-                    newport_protocol::desktop::Operation::Preferences(Box::new(
-                        newport_protocol::desktop::preferences::Operation::ProjectsList(Box::new(
-                            newport_protocol::desktop::preferences::ProjectsListArgs { server },
+                    desktop::Operation::Preferences(Box::new(
+                        desktop::preferences::Operation::ProjectsList(Box::new(
+                            desktop::preferences::ProjectsListArgs { server },
                         )),
                     ))
                 });
-            self.dispatch_result("page", operation, generation);
+            self.dispatch_typed("projects", operation, generation);
         }
     }
 
@@ -221,7 +319,7 @@ impl Newport {
             && self.configuration_available()
             && !self.needle_missing()
             && self.resources.take_poll(
-                "page",
+                "projects",
                 Instant::now(),
                 Duration::from_secs(30),
                 self.window_visible,
@@ -249,7 +347,7 @@ impl Newport {
         if self.server == server && self.page == Page::Projects {
             // A read started before a bookmark write must not satisfy the
             // refresh acknowledging that write. Keep its old display value.
-            let reads = self.resources.take_cached(&["page"]);
+            let reads = self.resources.take_cached(&["projects"]);
             self.resources.restore(reads);
         }
     }
@@ -262,24 +360,22 @@ pub(crate) mod typed_fixture {
     use newport_protocol::{desktop, git};
     pub(crate) const TYPED_SERVER: &str = "00000000-0000-4000-8000-000000000001";
     pub(crate) const TYPED_SECOND: &str = "00000000-0000-4000-8000-000000000002";
-    pub(crate) const TYPED_INSTANCE: &str = "00000000-0000-4000-8000-000000000003";
-    pub(crate) const TYPED_NEXT_INSTANCE: &str = "00000000-0000-4000-8000-000000000004";
     pub(crate) fn kind(work: &Work) -> Option<desktop::Kind> {
         match &work.request {
-            crate::request_dispatch::Request::Desktop(operation) => Some(operation.kind()),
             crate::request_dispatch::Request::Discovery { .. } => {
                 Some(Kind::ConnectionConnectionsQuery)
             }
-            _ => None,
+            crate::request_dispatch::Request::Git(_) => Some(Kind::GitRequest),
+            request => request.operation().map(desktop::Operation::kind),
         }
     }
     pub(crate) fn operation(work: &Work) -> &desktop::Operation {
-        let crate::request_dispatch::Request::Desktop(operation) = &work.request else {
-            panic!("Expected desktop request");
-        };
-        operation
+        work.request.operation().expect("Expected desktop request")
     }
     pub(crate) fn git_request(work: &Work) -> &git::Request {
+        if let crate::request_dispatch::Request::Git(args) = &work.request {
+            return &args.request;
+        }
         let desktop::Operation::Git(operation) = operation(work) else {
             panic!("Expected Git request");
         };
@@ -291,32 +387,79 @@ pub(crate) mod typed_fixture {
     pub(crate) fn server(work: &Work) -> Option<uuid::Uuid> {
         match &work.request {
             crate::request_dispatch::Request::Discovery { server, .. } => Some(*server),
+            crate::request_dispatch::Request::Git(args) => Some(args.server),
             _ => operation(work).server_id(),
         }
     }
-    pub(crate) fn path(value: &serde_json::Value) -> git::Path {
-        let path = git::Path {
-            bytes_b64: value["bytesB64"].as_str().unwrap().into(),
-            display: value["display"].as_str().unwrap().into(),
-        };
-        path.decode().unwrap();
-        path
+    /// A saved project numbered `id` on `server`, at the UTF-8 `path`.
+    pub(crate) fn bookmark(
+        id: u128,
+        server: &str,
+        name: &str,
+        path: &str,
+    ) -> desktop::preferences::Project {
+        desktop::preferences::Project {
+            id: uuid::Uuid::from_u128(id),
+            server: uuid::Uuid::parse_str(server).unwrap(),
+            name: name.into(),
+            path: git::Path::new(path.as_bytes()),
+        }
+    }
+    /// The reply to a project list read of `projects`.
+    pub(crate) fn projects_completion(
+        key: &str,
+        generation: u64,
+        projects: Vec<desktop::preferences::Project>,
+    ) -> crate::Completion {
+        crate::Completion {
+            server: TYPED_SERVER.into(),
+            key: key.into(),
+            generation,
+            result: crate::Outcome::Typed(Ok(desktop::Reply::Preferences(Box::new(
+                desktop::preferences::Reply::ProjectsList(Box::new(
+                    desktop::preferences::Projects { projects },
+                )),
+            )))),
+        }
+    }
+    /// Settles the `projects` read `generation` with `projects`.
+    pub(crate) fn complete_projects(
+        view: &mut Newport,
+        generation: u64,
+        projects: Vec<desktop::preferences::Project>,
+    ) -> bool {
+        view.complete_projects(
+            generation,
+            Ok(desktop::Reply::Preferences(Box::new(
+                desktop::preferences::Reply::ProjectsList(Box::new(
+                    desktop::preferences::Projects { projects },
+                )),
+            ))),
+        )
+    }
+    /// A project list reply holding `projects`.
+    pub(crate) fn projects_reply(projects: Vec<desktop::preferences::Project>) -> desktop::Reply {
+        desktop::Reply::Preferences(Box::new(desktop::preferences::Reply::ProjectsList(
+            Box::new(desktop::preferences::Projects { projects }),
+        )))
+    }
+    /// Starts and settles a `projects` read with `projects`.
+    pub(crate) fn put_projects(view: &mut Newport, projects: Vec<desktop::preferences::Project>) {
+        let generation = view.resources.begin("projects").unwrap();
+        assert!(complete_projects(view, generation, projects));
     }
     pub(crate) fn owner(
         window: &mut gpui_kit::Window,
         cx: &mut gpui_kit::Context<Newport>,
     ) -> Newport {
+        use crate::snapshot_fixture as fixture;
         let mut value = crate::page_perf_tests::owner(window, cx);
-        value.server = TYPED_SERVER.into();
-        value.snapshot["instanceId"] = serde_json::json!(TYPED_INSTANCE);
-        let server = &mut value.snapshot["config"]["servers"][0];
-        server["id"] = serde_json::json!(TYPED_SERVER);
-        server["sshPort"] = serde_json::json!(22);
-        server["authMethod"] = serde_json::json!("publicKey");
-        value.snapshot["runtime"] = serde_json::json!({
-            "clipboard": {(TYPED_SERVER): {"status":"connected"}},
-            "connectionRevisions": {(TYPED_SERVER): 1, (TYPED_SECOND): 1},
-        });
+        assert_eq!(value.server, TYPED_SERVER);
+        fixture::set(
+            &mut value.snapshot_mut().runtime.connection_revisions,
+            fixture::SECOND,
+            1,
+        );
         value.project_libraries.clear();
         value.sync_project_library(window, cx);
         value
@@ -330,13 +473,52 @@ mod tests {
     use crate::project_library_state::typed_fixture::*;
     use crate::{Page, project_library};
     use gpui_kit::{ListOffset, TestAppContext, component::combobox::ComboboxEvent, px};
-    use serde_json::{Value, json};
+    use newport_protocol::desktop::preferences::Project;
 
-    fn projects(server: &str) -> Value {
-        json!((0..100).map(|id| json!({
-            "id":format!("{server}-{id}"), "serverId":server, "name":format!("Project {id:03}"),
-            "path":{"display":format!("/work/{id}"),"bytesB64":newport_protocol::git::Path::new(format!("/work/{id}").as_bytes()).bytes_b64}
-        })).collect::<Vec<_>>())
+    fn projects(server: &str) -> Vec<Project> {
+        (0..100)
+            .map(|id| {
+                bookmark(
+                    id,
+                    server,
+                    &format!("Project {id:03}"),
+                    &format!("/work/{id}"),
+                )
+            })
+            .collect()
+    }
+    fn shown(view: &crate::Newport) -> Option<Vec<Project>> {
+        view.library_projects().map(<[_]>::to_vec)
+    }
+
+    #[test]
+    fn the_list_keeps_its_rows_through_a_failed_refresh_and_empties_when_cleared() {
+        use newport_client::resources::Resources;
+        use std::rc::Rc;
+        let preferences = crate::project_preferences::Preferences::default();
+        let mut state = super::State {
+            projects: Some(newport_protocol::desktop::preferences::Projects {
+                projects: projects(TYPED_SERVER),
+            }),
+            ..Default::default()
+        };
+        let mut resources = Resources::default();
+        let read = resources.begin("projects").unwrap();
+        resources.complete_owned("projects", read, Ok(true));
+        let shown = state.prepare_list(resources.get("projects"), &preferences, "", 900.);
+        assert_eq!(shown.len(), 100);
+        let retry = resources.begin_refresh("projects", false).unwrap();
+        resources.complete_owned("projects", retry, Err("Offline".into()));
+        assert!(Rc::ptr_eq(
+            &shown,
+            &state.prepare_list(resources.get("projects"), &preferences, "", 900.)
+        ));
+        resources.invalidate("projects");
+        assert!(
+            state
+                .prepare_list(resources.get("projects"), &preferences, "", 900.)
+                .is_empty()
+        );
     }
 
     #[gpui_kit::test]
@@ -357,15 +539,23 @@ mod tests {
             let (work, requests) = std::sync::mpsc::sync_channel(64);
             o.work = work.into();
             o.page = Page::Projects;
-            let project = json!({"id":"p","serverId":TYPED_SERVER,"name":"Repo",
-                "path":{"display":"/repo","bytesB64":"L3JlcG8="}});
-            let repo = json!({"repoId":"open","root":{"bytesB64":"L3JlcG8=","display":"/repo"},"bare":false});
+            let project = bookmark(1, TYPED_SERVER, "Repo", "/repo");
+            let repo = crate::git_fixture::read_only_repository("open");
             o.selection = Some(project.clone());
-            o.git.repo = repo.clone();
-            for (key, value) in [("repository", repo), ("git-list", json!({"snapshot":"seen"}))] {
-                let generation = o.resources.begin(key).unwrap();
-                o.resources.complete(key, generation, Ok(value));
-            }
+            o.git.repo = Some(repo.clone());
+            let generation = o.resources.begin("repository").unwrap();
+            o.resources.complete_git(
+                "repository",
+                generation,
+                Ok(newport_protocol::git::Reply::Open(Box::new(repo))),
+            );
+            let generation = o.resources.begin("git-list").unwrap();
+            let seen = crate::git_listing::Listing::Status(Box::new(
+                crate::git_fixture::status_page("seen", vec![], None),
+            ))
+            .into_reply();
+            o.resources
+                .complete_git("git-list", generation, Ok(seen.clone()));
             requests.try_iter().for_each(drop);
 
             o.navigate(Page::Terminal, cx);
@@ -373,18 +563,23 @@ mod tests {
             o.navigate(Page::Projects, cx);
             // Everything is there before any reply: no skeleton, no reopening.
             assert_eq!(o.selection, Some(project));
-            assert_eq!(o.git.repo["repoId"], "open");
+            assert_eq!(o.git.repo_id(), Some("open"));
             assert!(o.resources.get("repository").is_some_and(|r| !r.pending));
-            assert_eq!(o.value("git-list")["snapshot"], "seen");
+            assert_eq!(o.git_reply("git-list"), Some(&seen));
             let sent: Vec<_> = requests.try_iter().collect();
-            assert!(sent.iter().any(|r| kind(r) == Some(Kind::GitRefreshRepository)), "refreshed");
             assert!(
-                !sent.iter().any(|r| kind(r) == Some(Kind::GitRequest) && matches!(git_request(r), newport_protocol::git::Request::Open { .. })),
+                sent.iter()
+                    .any(|r| kind(r) == Some(Kind::GitRefreshRepository)),
+                "refreshed"
+            );
+            assert!(
+                !sent.iter().any(|r| kind(r) == Some(Kind::GitRequest)
+                    && matches!(git_request(r), newport_protocol::git::Request::Open { .. })),
                 "not reopened"
             );
             // A changed connection forgets what was set aside.
             o.navigate(Page::Terminal, cx);
-            o.snapshot["config"]["servers"][0]["sshPort"] = json!(2222);
+            o.snapshot_mut().config.servers[0].ssh_port = 2222;
             o.navigate(Page::Projects, cx);
             assert!(o.selection.is_none());
         });
@@ -432,15 +627,11 @@ mod tests {
         view.update(visual, |view, cx| {
             view.work = work.into();
             view.page = Page::Projects;
-            let mut second = view.snapshot["config"]["servers"][0].clone();
-            second["id"] = json!(TYPED_SECOND);
-            view.snapshot["config"]["servers"]
-                .as_array_mut()
-                .unwrap()
-                .push(second);
-            let generation = view.resources.begin("page").unwrap();
-            view.resources
-                .complete("page", generation, Ok(data.clone()));
+            let servers = &mut view.snapshot_mut().config.servers;
+            let mut second = servers[0].clone();
+            second.id = crate::snapshot_fixture::SECOND;
+            servers.push(second);
+            put_projects(view, data.clone());
             cx.notify();
         });
         let labels = rendered(visual);
@@ -517,7 +708,7 @@ mod tests {
         view.read_with(visual, |view, cx| {
             assert_eq!(view.server, TYPED_SECOND);
             assert_eq!(view.project_query(cx), "");
-            assert!(view.value("page").is_null());
+            assert!(view.library_projects().is_none());
         });
         let work = requests
             .try_iter()
@@ -528,8 +719,11 @@ mod tests {
             Some(uuid::Uuid::parse_str(TYPED_SECOND).unwrap())
         );
         view.update(visual, |view, cx| {
-            view.resources
-                .complete("page", work.generation, Ok(projects(TYPED_SECOND)));
+            assert!(complete_projects(
+                view,
+                work.generation,
+                projects(TYPED_SECOND)
+            ));
             cx.notify();
         });
         assert!(
@@ -575,7 +769,7 @@ mod tests {
             before_rows
         );
         view.read_with(visual, |view, cx| {
-            assert_eq!(view.value("page"), data);
+            assert_eq!(shown(view), Some(data.clone()));
             assert_eq!(view.project_query(cx), "project 0");
             assert_eq!(
                 view.project_libraries[TYPED_SERVER].input.as_ref().unwrap(),
@@ -620,28 +814,37 @@ mod tests {
             view.work = work.into();
             view.page = Page::Projects;
             let data = projects(TYPED_SERVER);
-            let generation = view.resources.begin("page").unwrap();
-            view.resources
-                .complete("page", generation, Ok(data.clone()));
+            put_projects(view, data.clone());
             let key = project_library::status_key(&data[0]);
             let generation = view.resources.begin(&key).unwrap();
+            let mut summary = crate::git_fixture::status_summary();
+            summary.total_entries = 2;
+            let summary = newport_protocol::git::Reply::StatusSummary(Box::new(summary));
             view.resources
-                .complete(&key, generation, Ok(json!({"totalEntries":2})));
-            let pending = view.resources.begin_refresh("page", false).unwrap();
+                .complete_git(&key, generation, Ok(summary.clone()));
+            let pending = view.resources.begin_refresh("projects", false).unwrap();
             let pending_status = view.resources.begin_refresh(&key, false).unwrap();
             let initial_key = project_library::status_key(&data[1]);
             let pending_initial = view.resources.begin(&initial_key).unwrap();
             view.navigate(Page::Integration, cx);
             view.navigate(Page::Projects, cx);
-            assert_eq!(view.value("page"), data);
-            assert_eq!(view.value(&key), json!({"totalEntries":2}));
-            assert!(!view.resources.complete("page", pending, Ok(json!([]))));
-            assert!(!view.resources.complete(&key, pending_status, Ok(json!({}))));
-            assert!(
-                !view
-                    .resources
-                    .complete(&initial_key, pending_initial, Ok(json!({})))
-            );
+            assert_eq!(shown(view), Some(data.clone()));
+            assert_eq!(view.git_reply(&key), Some(&summary));
+            assert!(!complete_projects(view, pending, Vec::new()));
+            assert!(!view.resources.complete_git(
+                &key,
+                pending_status,
+                Ok(newport_protocol::git::Reply::StatusSummary(Box::new(
+                    crate::git_fixture::status_summary()
+                )))
+            ));
+            assert!(!view.resources.complete_git(
+                &initial_key,
+                pending_initial,
+                Ok(newport_protocol::git::Reply::StatusSummary(Box::new(
+                    crate::git_fixture::status_summary()
+                )))
+            ));
             let reads: Vec<_> = requests
                 .try_iter()
                 .filter(|work| kind(work) == Some(Kind::PreferencesProjectsList))
@@ -651,10 +854,7 @@ mod tests {
                 1,
                 "a detached refresh must be reissued exactly once"
             );
-            assert!(
-                view.resources
-                    .complete("page", reads[0].generation, Ok(data.clone()))
-            );
+            assert!(complete_projects(view, reads[0].generation, data.clone()));
             view.project_library_state()
                 .list
                 .sync(&[data[1].clone()], 900.);
@@ -665,7 +865,7 @@ mod tests {
                 retry.key, initial_key,
                 "a detached first status read must remain retryable"
             );
-            assert_eq!(view.value(&key), json!({"totalEntries":2}));
+            assert_eq!(view.git_reply(&key), Some(&summary));
         });
     }
 
@@ -681,31 +881,33 @@ mod tests {
         view.update(visual, |view, _| {
             view.page = Page::Projects;
             let data = projects(TYPED_SERVER);
-            let generation = view.resources.begin("page").unwrap();
-            view.resources
-                .complete("page", generation, Ok(data.clone()));
+            put_projects(view, data.clone());
             view.suspend_project_library();
             let original = view.snapshot.clone();
-            view.snapshot["loadError"] = json!("Unavailable");
-            view.snapshot["config"]["servers"] = json!([]);
+            view.snapshot_mut().load_error = Some("Unavailable".into());
+            view.snapshot_mut().config.servers.clear();
             view.prune_project_libraries();
             assert!(view.project_libraries.contains_key(TYPED_SERVER));
             view.restore_project_library();
             assert!(
-                view.value("page").is_null(),
+                view.library_projects().is_none(),
                 "cannot restore before validating the connection"
             );
             view.snapshot = original;
             view.restore_project_library();
-            assert_eq!(view.value("page"), data);
+            assert_eq!(shown(view), Some(data));
             view.suspend_project_library();
-            view.snapshot["runtime"]["connectionRevisions"][TYPED_SERVER] = json!(2);
+            crate::snapshot_fixture::set(
+                &mut view.snapshot_mut().runtime.connection_revisions,
+                crate::snapshot_fixture::SERVER,
+                2,
+            );
             view.restore_project_library();
             assert!(
-                view.value("page").is_null(),
+                view.library_projects().is_none(),
                 "old connection data cannot enter a replacement"
             );
-            view.snapshot["config"]["servers"] = json!([]);
+            view.snapshot_mut().config.servers.clear();
             view.prune_project_libraries();
             assert!(!view.project_libraries.contains_key(TYPED_SERVER));
         });
@@ -741,18 +943,16 @@ mod tests {
             view.work = work.into();
             view.page = Page::Projects;
             let data = projects(TYPED_SERVER);
-            let generation = view.resources.begin("page").unwrap();
-            view.resources
-                .complete("page", generation, Ok(data.clone()));
+            put_projects(view, data.clone());
             view.navigate(Page::Integration, cx);
             let original = view.snapshot.clone();
-            view.snapshot["loadError"] = json!("Unavailable");
-            view.snapshot["config"]["servers"] = json!([]);
+            view.snapshot_mut().load_error = Some("Unavailable".into());
+            view.snapshot_mut().config.servers.clear();
             view.navigate(Page::Projects, cx);
             view.navigate(Page::Integration, cx);
             view.snapshot = original;
             view.navigate(Page::Projects, cx);
-            assert_eq!(view.value("page"), data);
+            assert_eq!(shown(view), Some(data.clone()));
             assert!(
                 requests
                     .try_iter()
@@ -760,19 +960,18 @@ mod tests {
             );
             view.navigate(Page::Integration, cx);
             let connection = view.project_libraries[TYPED_SERVER].connection.clone();
-            view.file_project_completed(TYPED_SERVER, Some(connection), Ok(data[0].clone()));
+            view.file_project_completed(TYPED_SERVER, connection, Ok(data[0].clone()));
             view.navigate(Page::Projects, cx);
             assert_eq!(
-                view.value("page"),
-                data,
+                shown(view),
+                Some(data.clone()),
                 "a saved bookmark refresh retains the previous list"
             );
             let read = requests
                 .try_iter()
                 .find(|work| kind(work) == Some(Kind::PreferencesProjectsList))
                 .unwrap();
-            view.resources
-                .complete("page", read.generation, Err("Read failed".into()));
+            assert!(view.complete_projects(read.generation, Err("Read failed".into())));
             view.refresh_project_library(false);
             view.poll_project_library();
             assert!(
@@ -787,15 +986,9 @@ mod tests {
             view.refresh_project_library(true);
             let fresh = requests.try_recv().unwrap();
             assert!(fresh.generation > old.generation);
-            assert!(
-                !view
-                    .resources
-                    .complete("page", old.generation, Ok(data.clone()))
-            );
-            assert!(
-                view.resources
-                    .complete("page", fresh.generation, Ok(json!([])))
-            );
+            assert!(!complete_projects(view, old.generation, data.clone()));
+            assert!(complete_projects(view, fresh.generation, Vec::new()));
+            assert_eq!(shown(view), Some(Vec::new()));
         });
     }
 }

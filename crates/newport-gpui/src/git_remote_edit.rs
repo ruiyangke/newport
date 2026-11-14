@@ -2,7 +2,7 @@
 use super::*;
 pub(super) use newport_client::git_configuration::RemoteEdit as Kind;
 use newport_client::git_configuration::{remote_action as action, reviewed_remote};
-use newport_protocol::git::{Action, Request};
+use newport_protocol::git::{Action, Remote, Reply, Request};
 fn title(kind: Kind) -> &'static str {
     match kind {
         Kind::Add => "Add remote",
@@ -15,7 +15,8 @@ pub(super) struct Form {
     pub(super) needs_review: bool,
     id: uuid::Uuid,
     kind: Kind,
-    remote: Value,
+    /// The remote under edit, absent when adding one.
+    remote: Option<Remote>,
     snapshot: String,
     name: Entity<InputState>,
     url: Entity<InputState>,
@@ -34,13 +35,17 @@ impl Form {
         )
     }
 }
-fn review_description(kind: Kind, remote: &Value) -> Div {
+fn review_description(kind: Kind, remote: Option<&Remote>) -> Div {
+    let name = remote.map_or("—", |remote| remote.name.as_str());
+    let url = remote
+        .and_then(|remote| remote.url.as_deref())
+        .unwrap_or("—");
     div().min_w_0().flex().flex_col().gap_2()
         .child(div().id("remote-editor-title")
             .role(accesskit::Role::Heading).aria_label(title(kind))
             .font_weight(FontWeight::SEMIBOLD).child(title(kind)))
         .when(kind != Kind::Add, |view| view.child(project_dialog::description(
-            "remote-editor-identity", format!("{} · {}", text(remote, "name"), text(remote, "url")))))
+            "remote-editor-identity", format!("{name} · {url}"))))
         .when(kind == Kind::Remove, |view| view.child(project_dialog::description(
             "remote-remove-description", "Removes this remote’s configuration and remote-tracking references. The remote repository itself is kept.")))
 }
@@ -50,16 +55,16 @@ impl Newport {
             && self.git.settings.is_none()
             && !self.git.settings_open
             && !self.git_mutation_blocks_write()
-            && self.git.repo["capabilities"]["readOnly"] == false
+            && self.git.writable()
             && self.git.error.is_none()
             && ["git-list", "git-remote-status"].iter().all(|key| {
                 self.resources
                     .get(key)
                     .is_some_and(|r| !r.pending && r.error.is_none())
             })
-            && self.value("git-remote-status")["snapshot"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty())
+            && self
+                .git_status("git-remote-status")
+                .is_some_and(|status| !status.snapshot.is_empty())
     }
     pub(super) fn prepare_remote_edit(
         &mut self,
@@ -70,8 +75,8 @@ impl Newport {
         if !self.can_edit_remote() || self.git.remote_edit.is_some() {
             return;
         }
-        let remote = self.git_selected_remote().unwrap_or(Value::Null);
-        if kind != Kind::Add && (!remote["name"].is_string() || !remote["token"].is_string()) {
+        let remote = self.git_selected_remote().cloned();
+        if kind != Kind::Add && remote.is_none() {
             return;
         }
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Remote name"));
@@ -83,9 +88,10 @@ impl Newport {
             Kind::Remove => {}
         }
         if kind == Kind::Rename {
-            name.update(cx, |input, cx| {
-                input.set_value(text(&remote, "name"), window, cx)
-            });
+            let current = remote
+                .as_ref()
+                .map_or_else(|| "—".into(), |remote| remote.name.clone());
+            name.update(cx, |input, cx| input.set_value(current, window, cx));
         }
         // Display URLs may be redacted. Never submit the displayed URL as config.
         let subscriptions = vec![
@@ -108,7 +114,7 @@ impl Newport {
             id: uuid::Uuid::new_v4(),
             kind,
             remote,
-            snapshot: text(&self.value("git-remote-status"), "snapshot"),
+            snapshot: self.remote_status_snapshot(),
             name,
             url,
             _subscriptions: subscriptions,
@@ -128,7 +134,7 @@ impl Newport {
             return;
         }
         let draft = form.draft(cx);
-        let Some(action) = action(form.kind, &form.remote, &draft.1, &draft.2) else {
+        let Some(action) = action(form.kind, form.remote.as_ref(), &draft.1, &draft.2) else {
             return;
         };
         let snapshot = form.snapshot.clone();
@@ -156,12 +162,12 @@ impl Newport {
         if !self.can_edit_remote() {
             return;
         }
-        let snapshot = text(&self.value("git-remote-status"), "snapshot");
-        let detail = self.git_reviewed_remote();
+        let snapshot = self.remote_status_snapshot();
+        let detail = self.git_reviewed_remote().cloned();
         let Some(form) = self.git.remote_edit.as_mut() else {
             return;
         };
-        let Some(remote) = reviewed_remote(form.kind, &form.remote, &detail) else {
+        let Some(remote) = reviewed_remote(form.kind, form.remote.as_ref(), detail.as_ref()) else {
             return;
         };
         form.remote = remote;
@@ -207,12 +213,13 @@ impl Newport {
         if let Some(form) = &self.git.remote_edit {
             let draft = form.draft(cx);
             let busy = self.git_mutation_blocks_write();
-            let latest = reviewed_remote(form.kind, &form.remote, &self.git_reviewed_remote());
-            view = view.child(review_description(form.kind, &form.remote))
+            let latest =
+                reviewed_remote(form.kind, form.remote.as_ref(), self.git_reviewed_remote());
+            view = view.child(review_description(form.kind, form.remote.as_ref()))
                 .when(form.needs_review, |view| view.child(project_dialog::description("remote-review-required", "Your draft was kept. Review the latest configuration before submitting again."))
                     .when(self.can_edit_remote(), |view| view.child(project_dialog::description("remote-review-current", match &latest {
-                        Some(remote) if form.kind != Kind::Add => format!("Current URL: {}", text(remote,"url")),
-                        Some(_) => "The repository state has been refreshed.".into(),
+                        Some(Some(remote)) => format!("Current URL: {}", remote.url.as_deref().unwrap_or("—")),
+                        Some(None) => "The repository state has been refreshed.".into(),
                         None => "Current configuration is not available. Refresh to check again.".into(),
                     })))
                     .child(div().flex().flex_wrap().gap_2()
@@ -222,7 +229,7 @@ impl Newport {
                 .when(matches!(form.kind,Kind::Add|Kind::Url),|view|view.child(crate::label("Remote URL")).child(crate::controls::input(&form.url).aria_label("Repository URL or server path").disabled(busy)))
                 .child(project_dialog::actions()
                     .child(crate::controls::button("cancel-git-remote").label("Cancel").disabled(busy).on_click(cx.listener(|this,_,_,cx|{this.git.remote_edit=None;cx.notify();})))
-                    .child(crate::controls::button("save-git-remote").loading(self.git_write_pending()).when(form.kind == Kind::Remove, |button| button.danger()).when(form.kind != Kind::Remove, |button| button.primary()).label(title(form.kind)).disabled(form.needs_review || !self.can_edit_remote() || action(form.kind,&form.remote,&draft.1,&draft.2).is_none()).on_click(cx.listener(|this,_,_,cx|this.submit_remote_edit(cx)))));
+                    .child(crate::controls::button("save-git-remote").loading(self.git_write_pending()).when(form.kind == Kind::Remove, |button| button.danger()).when(form.kind != Kind::Remove, |button| button.primary()).label(title(form.kind)).disabled(form.needs_review || !self.can_edit_remote() || action(form.kind,form.remote.as_ref(),&draft.1,&draft.2).is_none()).on_click(cx.listener(|this,_,_,cx|this.submit_remote_edit(cx)))));
         }
         view.into_any_element()
     }
@@ -236,23 +243,27 @@ impl Newport {
         if form.kind == Kind::Add {
             return;
         }
-        let Some(name) = form.remote["name"].as_str() else {
+        let Some(name) = form.remote.as_ref().map(|remote| remote.name.clone()) else {
             return;
         };
-        self.request_git(
+        self.request_git_typed(
             "git-remote-review",
             Request::Remote {
                 repo_id: self.git_repository_id(),
-                name: name.to_owned(),
+                name,
             },
         );
     }
-    fn git_reviewed_remote(&self) -> Value {
-        self.resources
+    fn git_reviewed_remote(&self) -> Option<&Remote> {
+        match self
+            .resources
             .get("git-remote-review")
-            .filter(|r| !r.pending && r.error.is_none())
-            .map(|r| r.value.clone())
-            .unwrap_or(Value::Null)
+            .filter(|r| !r.pending && r.error.is_none())?
+            .git()?
+        {
+            Reply::Remote(remote) => Some(remote),
+            _ => None,
+        }
     }
 }
 
@@ -271,16 +282,14 @@ mod tests {
     use super::{Kind, review_description};
     use gpui_kit::base::test_support::snapshots;
     use gpui_kit::{self as gpui, Context, IntoElement, Render, Window, div, prelude::*, px};
-    use serde_json::{Value, json};
-
-    struct ReviewHost(Value);
+    struct ReviewHost(newport_protocol::git::Remote);
     impl Render for ReviewHost {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
                 .w_full()
                 .flex()
                 .flex_col()
-                .child(review_description(Kind::Remove, &self.0))
+                .child(review_description(Kind::Remove, Some(&self.0)))
                 .child(
                     div()
                         .debug_selector(|| "remote-review-footer".into())
@@ -302,7 +311,14 @@ mod tests {
             "a".repeat(180)
         );
         let name = "upstream-开发";
-        let (_, visual) = cx.add_window_view(|_, _| ReviewHost(json!({"name":name,"url":url})));
+        let (_, visual) = cx.add_window_view(|_, _| {
+            ReviewHost(newport_protocol::git::Remote {
+                name: name.into(),
+                url: Some(url.clone()),
+                push_url: None,
+                token: "token".into(),
+            })
+        });
         for width in [520., 280.] {
             visual.simulate_resize(gpui::size(px(width), px(600.)));
             visual.update(|window, cx| window.draw(cx).clear(cx));

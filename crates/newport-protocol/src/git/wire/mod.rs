@@ -12,6 +12,8 @@ pub(crate) mod convert;
 mod scan;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use {convert::enum_maps, scan::tables};
 
 pub const FRAME_LIMITS: Limits = Limits {
     message: MAX_FRAME,

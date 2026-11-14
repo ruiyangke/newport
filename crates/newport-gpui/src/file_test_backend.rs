@@ -137,7 +137,8 @@ fn failure(message: String) -> desktop::Outcome {
         detail: None,
     }))
 }
-fn scope(v: &configuration::ConnectionScope) -> Value {
+/// A request's connection scope, as observations show it.
+pub(crate) fn scope(v: &configuration::ConnectionScope) -> Value {
     let proxy = v.settings.proxy.as_ref().map(|v| match v {
         configuration::Proxy::Command(v) => json!({"command":v}),
         configuration::Proxy::Jump(v) => json!({"jump":v}),
@@ -268,11 +269,11 @@ pub(crate) struct Host {
     directory: std::path::PathBuf,
     path: std::path::PathBuf,
     listener: ipc::Listener,
-    connection: Value,
+    connection: configuration::ConnectionScope,
 }
 impl Host {
-    pub(crate) fn with_connection(connection: Value) -> Self {
-        newport_client::desktop_inputs::connection_scope(&connection)
+    pub(crate) fn with_connection(connection: Option<configuration::ConnectionScope>) -> Self {
+        let connection = newport_client::desktop_inputs::captured(connection.as_ref())
             .expect("file fixture needs a valid connection scope");
         let directory =
             std::env::temp_dir().join(format!("np-files-{}", uuid::Uuid::new_v4().simple()));
@@ -320,8 +321,11 @@ impl Host {
             "files_list" | "files_cancel"
         ));
         if request.method == "files_list" {
-            assert_eq!(request.args["expectedConnection"], self.connection);
-            assert_eq!(request.args["id"], self.connection[0]);
+            assert_eq!(request.args["expectedConnection"], scope(&self.connection));
+            assert_eq!(
+                request.args["id"],
+                self.connection.settings.server_id.to_string()
+            );
         }
         uuid::Uuid::parse_str(request.args["operation"].as_str().unwrap()).unwrap();
         Some((peer, request))

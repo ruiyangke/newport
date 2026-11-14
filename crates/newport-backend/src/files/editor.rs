@@ -4,7 +4,7 @@ use super::{Operations, Remote, canonical, child, path_valid, status};
 use crate::{manager::Shared, remote::sftp::Session};
 use anyhow::{Context, Result, bail, ensure};
 use russh_sftp::protocol::{FileAttributes, OpenFlags, Packet, StatusCode};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -13,21 +13,15 @@ use uuid::Uuid;
 pub(crate) mod page;
 
 pub const LIMIT: usize = newport_domain::text_file::EDIT_LIMIT;
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
     pub(crate) id: Uuid,
     pub(crate) operation: Uuid,
     pub(crate) root: String,
     pub(crate) path: String,
-    pub(crate) expected_connection: Vec<serde_json::Value>,
-    #[serde(default)]
+    pub(crate) expected_connection: newport_protocol::desktop::configuration::ConnectionScope,
     pub(crate) content: Option<String>,
-    #[serde(default)]
     pub(crate) revision: Option<String>,
-    #[serde(default)]
     pub(crate) offset: Option<u64>,
-    #[serde(default)]
     pub(crate) allow_cached: bool,
 }
 #[derive(Clone, Debug, Serialize)]
@@ -205,7 +199,7 @@ async fn save(
     let parent = path.rsplit_once('/').context("Invalid file path")?.0;
     let staging = child(parent, &format!(".newport-upload-{}", Uuid::new_v4()))?;
     let record = operations
-        .track_upload(remote.cleanup_scope()?, staging.clone())
+        .track_upload(remote.cleanup_scope(), staging.clone())
         .await?;
     let mut cleanup = super::transfer::RemoteTemp {
         operations,
@@ -310,7 +304,7 @@ pub async fn dispatch(
     request: Request,
     write: bool,
 ) -> Result<Document, String> {
-    let expected = serde_json::Value::Array(request.expected_connection.clone());
+    let expected = request.expected_connection.clone();
     operations
         .run_with_connection(
             state,
@@ -429,7 +423,7 @@ mod tests {
             operation: Uuid::new_v4(),
             root: "/Documents".into(),
             path: path.clone(),
-            expected_connection: vec![],
+            expected_connection: server.connection_scope(0, Uuid::nil()),
             offset: None,
             allow_cached: false,
             revision: Some(before.revision.clone()),
@@ -515,7 +509,7 @@ mod tests {
                 operation: Uuid::new_v4(),
                 root: "/repo".into(),
                 path: "/repo/file".into(),
-                expected_connection: vec![],
+                expected_connection: server.connection_scope(0, Uuid::new_v4()),
                 offset: None,
                 allow_cached: false,
                 content: Some("changed".into()),

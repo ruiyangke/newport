@@ -1,7 +1,10 @@
 //! UI ownership survives navigation; writes are never automatically replayed.
 use super::*;
-use newport_gpui::git_operation::{Operation, State};
-use newport_protocol::{desktop, git::Request as GitRequest};
+use newport_protocol::{
+    desktop,
+    git::{Operation, OperationResult, OperationState as State, Request as GitRequest, code},
+    runtime::service,
+};
 pub(super) struct GitNotice;
 enum Reply {
     Rejected(String),
@@ -24,7 +27,7 @@ pub struct Mutation {
     pub(super) transfer_draft: Option<(uuid::Uuid, String)>,
     pub(super) branch_form: Option<(uuid::Uuid, String)>,
     pub(super) branch_management: Option<git_branch_manage::Draft>,
-    pub(super) commit_draft: Option<(String, String, String)>,
+    pub(super) commit_draft: Option<(super::git_commit::DraftKey, String, String)>,
     server: String,
     repo: String,
     id: uuid::Uuid,
@@ -34,7 +37,7 @@ pub struct Mutation {
     not_started: bool,
     context: String,
     title: String,
-    receipt: Option<newport_gpui::git_operation::ReceiptState>,
+    receipt: Option<desktop::git::ReceiptState>,
     recovery_at: Option<Instant>,
     recovery_attempt: u8,
     last_notice: Option<String>,
@@ -140,11 +143,11 @@ impl Newport {
             context: format!(
                 "{} · {}",
                 self.selected_server()
-                    .map(|s| text(s, "name"))
+                    .map(|s| s.name.clone())
                     .unwrap_or_default(),
                 self.selection
                     .as_ref()
-                    .map(|s| text(s, "name"))
+                    .map(|s| s.name.clone())
                     .unwrap_or_default()
             ),
         };
@@ -290,10 +293,14 @@ impl Newport {
         let mut refresh_remote_refs = false;
         match reply {
             Reply::Rejected(error) => {
-                state.receipt = Some(newport_gpui::git_operation::ReceiptState::Rejected);
+                state.receipt = Some(desktop::git::ReceiptState::Rejected);
                 // The backend durably confirmed rejection before execution. This
                 // is not an uncertain write and must not block recovery controls.
-                state.error = Some(error);
+                state.error = Some(explain_missing_git(
+                    self.snapshot.as_ref(),
+                    &state.server,
+                    error,
+                ));
                 refresh = self.server == state.server
                     && self.page == Page::Projects
                     && current_repo == state.repo;
@@ -307,19 +314,10 @@ impl Newport {
                     {
                         form.created = true;
                     }
-                    if let Some(path) = outcome.result.as_ref().and_then(|r| r.get("path"))
-                        && let Some(bytes_b64) = path["bytesB64"].as_str()
+                    if let Some(path) = outcome.result.as_ref().and_then(created_path)
                         && let Ok(server) = uuid::Uuid::parse_str(&state.server)
                     {
-                        created_bookmark = Some((
-                            id,
-                            server,
-                            name,
-                            newport_protocol::git::Path {
-                                bytes_b64: bytes_b64.into(),
-                                display: text(path, "display"),
-                            },
-                        ));
+                        created_bookmark = Some((id, server, name, path.clone()));
                     } else {
                         state.error=Some("Repository created, but no canonical path was returned. Add the existing repository; do not repeat creation.".into());
                     }
@@ -485,15 +483,14 @@ impl Newport {
             Reply::Write(Err(error)) => {
                 // Needle refuses Git where it isn't installed, with the reason
                 // it reported when it started, before anything runs.
-                let missing = git_missing(&self.snapshot, &state.server)
+                let missing = git_missing(self.snapshot.as_ref(), &state.server)
                     .is_some_and(|(reason, _)| reason == error.message);
                 state.not_started = !error.dispatched || missing;
-                state.error = Some(match git_missing(&self.snapshot, &state.server) {
-                    Some((_, server)) if missing => format!(
-                        "Git isn’t installed on {server}. Install the git package there, then try again."
-                    ),
-                    _ => error.message,
-                });
+                state.error = Some(explain_missing_git(
+                    self.snapshot.as_ref(),
+                    &state.server,
+                    error.message,
+                ));
             }
         }
         if let Some(state) = &mut self.git_mutation {
@@ -545,8 +542,12 @@ impl Newport {
             if let Some(mut form) = form {
                 form.needs_review = true;
                 let remote = form.remote().to_owned();
-                self.git.selected = json!({"name":remote});
-                self.request_git(
+                self.git.selected = Some(git_listing::Entry::Remote(
+                    newport_protocol::git::RemoteName {
+                        name: remote.clone(),
+                    },
+                ));
+                self.request_git_typed(
                     "git-remote-detail",
                     GitRequest::Remote {
                         repo_id: self.git_repository_id(),
@@ -603,7 +604,7 @@ impl Newport {
             .outcome
             .as_ref()
             .and_then(|o| o.error.as_ref())
-            .is_some_and(|e| e.code == IDENTITY_REQUIRED);
+            .is_some_and(|e| e.code == code::IDENTITY_REQUIRED);
         let message = if identity {
             "Git on this server needs your name and email. Set them in Repository settings, then try again.".into()
         } else {
@@ -681,28 +682,47 @@ impl Newport {
     }
 }
 
-const IDENTITY_REQUIRED: &str = "IDENTITY_REQUIRED";
 /// The Git page's Remotes view.
 const REMOTES: usize = 6;
 
 /// Why Needle said Git is unavailable on `server`, and the server's name.
-fn git_missing<'a>(snapshot: &'a Value, server: &str) -> Option<(&'a str, &'a str)> {
-    let git = &snapshot["runtime"]["agentRuntime"][server]["hello"]["capabilities"]["git"];
-    let reason = git["reason"]
-        .as_str()
-        .filter(|_| git["available"] == false)?;
-    let name = snapshot["config"]["servers"]
-        .as_array()?
-        .iter()
-        .find(|s| s["id"] == server)
-        .and_then(|s| s["name"].as_str())?;
+fn git_missing<'a>(
+    snapshot: Option<&'a configuration::Snapshot>,
+    server: &str,
+) -> Option<(&'a str, &'a str)> {
+    let snapshot = snapshot?;
+    let server = uuid::Uuid::parse_str(server).ok()?;
+    let reason = snapshot
+        .runtime
+        .agent_runtime(server)?
+        .hello
+        .as_ref()?
+        .services
+        .get(service::GIT)?
+        .unavailable
+        .as_deref()?;
+    let name = snapshot.config.server(server)?.name.as_str();
     Some((reason, name))
+}
+
+/// Says what to do when `message` is Needle's reason for refusing Git.
+fn explain_missing_git(
+    snapshot: Option<&configuration::Snapshot>,
+    server: &str,
+    message: String,
+) -> String {
+    match git_missing(snapshot, server) {
+        Some((reason, name)) if reason == message => {
+            format!("Git isn’t installed on {name}. Install the git package there, then try again.")
+        }
+        _ => message,
+    }
 }
 
 fn needs_recovery(
     not_started: bool,
     state: Option<&State>,
-    receipt: Option<newport_gpui::git_operation::ReceiptState>,
+    receipt: Option<desktop::git::ReceiptState>,
 ) -> bool {
     !not_started
         && !confirmed_write_outcome(state, receipt)
@@ -711,6 +731,16 @@ fn needs_recovery(
 
 fn recovery_delay(attempt: u8) -> Duration {
     Duration::from_secs((1_u64 << attempt.min(5)).min(30))
+}
+
+/// The path a write reports it created.
+fn created_path(result: &OperationResult) -> Option<&newport_protocol::git::Path> {
+    match result {
+        OperationResult::Initialized(result) => Some(&result.path),
+        OperationResult::Cloned(result) => Some(&result.path),
+        OperationResult::WorktreeAdded(result) => Some(&result.path),
+        _ => None,
+    }
 }
 
 fn retire_completed_receipt(
@@ -775,7 +805,7 @@ fn failure_notice(
     state: Option<&State>,
     error: Option<&str>,
     not_started: bool,
-    receipt: Option<newport_gpui::git_operation::ReceiptState>,
+    receipt: Option<desktop::git::ReceiptState>,
 ) -> Option<(String, Option<bool>)> {
     if state == Some(&State::OutcomeUnknown) {
         return Some(("The command was interrupted. Inspect the repository before continuing; it may have made changes.".into(), Some(true)));
@@ -798,9 +828,9 @@ fn failure_notice(
 
 fn confirmed_write_outcome(
     state: Option<&State>,
-    receipt: Option<newport_gpui::git_operation::ReceiptState>,
+    receipt: Option<desktop::git::ReceiptState>,
 ) -> bool {
-    receipt == Some(newport_gpui::git_operation::ReceiptState::Rejected)
+    receipt == Some(desktop::git::ReceiptState::Rejected)
         || matches!(
             state,
             Some(
@@ -810,7 +840,10 @@ fn confirmed_write_outcome(
 }
 #[cfg(test)]
 mod mutation_tests {
-    use super::{State, confirmed_write_outcome, failure_notice, needs_recovery, recovery_delay};
+    use super::{
+        State, confirmed_write_outcome, created_path, failure_notice, needs_recovery,
+        recovery_delay,
+    };
     #[test]
     fn routine_commands_are_silent_and_failures_have_no_outcome_controls() {
         for state in [
@@ -859,7 +892,7 @@ mod mutation_tests {
         assert!(!needs_recovery(
             false,
             None,
-            Some(newport_gpui::git_operation::ReceiptState::Rejected)
+            Some(newport_protocol::desktop::git::ReceiptState::Rejected)
         ));
         for state in [
             State::Succeeded,
@@ -875,8 +908,33 @@ mod mutation_tests {
         assert_eq!(recovery_delay(u8::MAX).as_secs(), 30);
     }
     #[test]
+    fn created_repositories_report_their_exact_path() {
+        use newport_protocol::git::{Cloned, Initialized, OperationResult, Path, Refresh};
+        let path = Path::new(b"/srv/\xff checkout");
+        let initialized = OperationResult::Initialized(Initialized {
+            initialized: true,
+            path: path.clone(),
+            initial_branch: "main".into(),
+            bare: false,
+            open_required: true,
+        });
+        assert_eq!(created_path(&initialized), Some(&path));
+        let cloned = OperationResult::Cloned(Cloned {
+            cloned: true,
+            path: path.clone(),
+            bare: false,
+            oid: None,
+            open_required: true,
+        });
+        assert_eq!(created_path(&cloned), Some(&path));
+        let refreshed = OperationResult::Refresh(Refresh {
+            refresh_required: true,
+        });
+        assert_eq!(created_path(&refreshed), None);
+    }
+    #[test]
     fn rejection_is_confirmed_but_missing_or_running_outcome_is_not() {
-        use newport_gpui::git_operation::ReceiptState;
+        use newport_protocol::desktop::git::ReceiptState;
         assert!(confirmed_write_outcome(None, Some(ReceiptState::Rejected)));
         assert!(!confirmed_write_outcome(None, None));
         assert!(!confirmed_write_outcome(Some(&State::Running), None));
@@ -893,23 +951,41 @@ mod mutation_tests {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use crate::snapshot_fixture::{self as fixture, SECOND, SERVER};
+    use newport_protocol::desktop::configuration::RuntimeStatus;
 
     #[test]
     fn git_counts_as_missing_only_where_needle_said_so() {
-        let mut snapshot = json!({
-            "config": {"servers": [{"id": "s", "name": "Debian Clean"}]},
-            "runtime": {"agentRuntime": {"s": {"hello": {"capabilities": {"git": {
-                "available": false, "reason": "Git is not available on this server."
-            }}}}}}
-        });
+        let mut snapshot = fixture::snapshot(vec![fixture::server(SERVER, "Debian Clean")]);
+        let mut hello = fixture::hello(&"0".repeat(64));
+        hello.services.insert(
+            "git".into(),
+            newport_protocol::runtime::Capability {
+                contract_id: None,
+                versions: vec![1],
+                unavailable: Some("Git is not available on this server.".into()),
+            },
+        );
+        fixture::set(
+            &mut snapshot.runtime.agent_runtime,
+            SERVER,
+            fixture::agent_runtime(RuntimeStatus::Ready, Some(hello.clone())),
+        );
+        let server = SERVER.to_string();
         assert_eq!(
-            super::git_missing(&snapshot, "s"),
+            super::git_missing(Some(&snapshot), &server),
             Some(("Git is not available on this server.", "Debian Clean"))
         );
-        assert_eq!(super::git_missing(&snapshot, "other"), None);
-        snapshot["runtime"]["agentRuntime"]["s"]["hello"]["capabilities"]["git"]["available"] =
-            json!(true);
-        assert_eq!(super::git_missing(&snapshot, "s"), None);
+        assert_eq!(
+            super::git_missing(Some(&snapshot), &SECOND.to_string()),
+            None
+        );
+        hello.services.get_mut("git").unwrap().unavailable = None;
+        fixture::set(
+            &mut snapshot.runtime.agent_runtime,
+            SERVER,
+            fixture::agent_runtime(RuntimeStatus::Ready, Some(hello)),
+        );
+        assert_eq!(super::git_missing(Some(&snapshot), &server), None);
     }
 }

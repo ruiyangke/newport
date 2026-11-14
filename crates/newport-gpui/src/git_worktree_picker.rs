@@ -530,9 +530,7 @@ impl Render for WorktreeBranchPicker {
 #[cfg(test)]
 mod tests {
     use super::{BranchChoices, WorktreeBranchPicker, WorktreeBranchUse};
-    use base64::Engine as _;
     use gpui_kit::{self as gpui, TestAppContext};
-    use serde_json::json;
 
     struct SearchMenu(gpui::Entity<WorktreeBranchPicker>);
     impl gpui::Render for SearchMenu {
@@ -599,23 +597,42 @@ mod tests {
                 cx,
             )
         });
-        let wire = |s: &str| json!({"display":s,"bytesB64":base64::engine::general_purpose::STANDARD.encode(s)});
-        let local = json!({"name":wire("origin/topic"),"reference":wire("refs/heads/origin/topic"),"remote":false,"current":true,"oid":{"algorithm":"sha1","hex":"a".repeat(40)}});
-        let remote = json!({"name":wire("origin/topic"),"reference":wire("refs/remotes/origin/topic"),"remote":true,"current":false,"oid":{"algorithm":"sha1","hex":"b".repeat(40)}});
+        let mut local = crate::git_fixture::branch("origin/topic", &"a".repeat(40));
+        local.current = true;
+        let mut remote = crate::git_fixture::branch("origin/topic", &"b".repeat(40));
+        remote.reference = newport_protocol::git::Path::new(b"refs/remotes/origin/topic");
+        remote.remote = true;
         picker.update(visual, |picker, cx| {
-            assert!(!picker.names_pending, "Closed pickers must not eagerly read branches");
-            picker.page = Some(BranchChoices::from_page(&json!({"snapshot":"s","metadata":{},"entries":[local,remote],"nextCursor":null})).unwrap());
+            assert!(
+                !picker.names_pending,
+                "Closed pickers must not eagerly read branches"
+            );
+            picker.page = Some(
+                BranchChoices::from_page(&newport_protocol::git::Page {
+                    snapshot: "s".into(),
+                    entries: vec![local.clone(), remote.clone()],
+                    next_cursor: None,
+                    metadata: newport_protocol::git::TotalEntries { total_entries: 2 },
+                })
+                .unwrap(),
+            );
             picker.choose("refs/heads/origin/topic".into(), cx);
             assert_eq!(picker.branch().unwrap().oid, "a".repeat(40));
             assert_eq!(picker.name, "origin/topic · Local");
             picker.choose("refs/remotes/origin/topic".into(), cx);
             assert_eq!(picker.branch().unwrap().oid, "b".repeat(40));
             assert_eq!(picker.name, "origin/topic · Remote");
-            assert!(!picker.detail_pending, "A starting point needs no occupancy request");
+            assert!(
+                !picker.detail_pending,
+                "A starting point needs no occupancy request"
+            );
             picker.page = None;
             picker.names_pending = true;
             picker.set_enabled(false, cx);
-            assert_eq!(picker.branch().unwrap().reference, "refs/remotes/origin/topic");
+            assert_eq!(
+                picker.branch().unwrap().reference,
+                "refs/remotes/origin/topic"
+            );
         });
     }
 }

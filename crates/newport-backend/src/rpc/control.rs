@@ -70,27 +70,33 @@ pub async fn configuration(
             let tunnels = crate::commands::forward_tunnel_batch(
                 services.manager,
                 args.server,
-                args.create.iter().map(convert::model_tunnel).collect(),
-                args.connect.iter().map(convert::model_tunnel).collect(),
-                args.expected.as_ref().map(convert::scope),
+                args.create.iter().map(crate::model::Tunnel::from).collect(),
+                args.connect
+                    .iter()
+                    .map(crate::model::Tunnel::from)
+                    .collect(),
+                args.expected.clone(),
             )
             .await
             .map_err(operation)?;
             R::ForwardTunnelBatch(Box::new(config::Tunnels {
-                tunnels: tunnels.into_iter().map(convert::tunnel).collect(),
+                tunnels: tunnels.iter().map(config::Tunnel::from).collect(),
             }))
         }
         O::SaveTunnel(args) => {
-            crate::commands::save_tunnel(services.manager, convert::model_tunnel(&args.tunnel))
-                .await
-                .map_err(operation)?;
+            crate::commands::save_tunnel(
+                services.manager,
+                crate::model::Tunnel::from(&args.tunnel),
+            )
+            .await
+            .map_err(operation)?;
             R::SaveTunnel(Box::new(Present {}))
         }
         O::UpdateTunnel(args) => {
             crate::commands::update_tunnel(
                 services.manager,
-                convert::model_tunnel(&args.tunnel),
-                convert::model_tunnel(&args.expected),
+                crate::model::Tunnel::from(&args.tunnel),
+                crate::model::Tunnel::from(&args.expected),
             )
             .await
             .map_err(operation)?;
@@ -105,7 +111,10 @@ pub async fn configuration(
         O::DeleteTunnels(args) => {
             crate::commands::delete_tunnels(
                 services.manager,
-                args.expected.iter().map(convert::model_tunnel).collect(),
+                args.expected
+                    .iter()
+                    .map(crate::model::Tunnel::from)
+                    .collect(),
             )
             .await
             .map_err(operation)?;
@@ -123,7 +132,7 @@ pub async fn configuration(
                 services.desktop.clone(),
                 args.server,
                 args.enabled,
-                convert::scope(&args.expected),
+                args.expected.clone(),
                 services.integration_access,
             )
             .await
@@ -140,7 +149,7 @@ pub async fn configuration(
                     config::Feature::Browser => crate::commands::IntegrationFeature::Browser,
                 },
                 args.enabled,
-                convert::scope(&args.expected),
+                args.expected.clone(),
                 services.integration_access,
             )
             .await
@@ -153,8 +162,8 @@ pub async fn configuration(
                 services.desktop.clone(),
                 args.tunnel,
                 args.remote_port,
-                args.expected.as_ref().map(convert::model_tunnel),
-                args.expected_connection.as_ref().map(convert::scope),
+                args.expected.as_ref().map(crate::model::Tunnel::from),
+                args.expected_connection.clone(),
             )
             .await
             .map_err(operation)?;
@@ -264,7 +273,7 @@ pub async fn connection(
                         user: host.user,
                         port: host.port,
                         identity_file: host.identity_file,
-                        proxy: host.proxy.map(convert::proxy),
+                        proxy: host.proxy.as_ref().map(config::Proxy::from),
                         through: host.through,
                         importable: host.importable,
                         suggested: host.suggested,

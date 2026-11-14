@@ -48,8 +48,8 @@ keep an existing install working:
 - **Prefer a library to hand-rolled code**, and reuse the shared controls,
   theme and helpers before adding new ones.
 - **Never commit a dependency's source.** To change a crate, keep only its
-  patch, `patches/<name>.patch`, and pin its crates.io release in
-  `patches/patched.toml`; `cargo xtask patched` generates the rest.
+  patches, numbered `patches/<crate>/NNN-<subject>.patch`, and pin its crates.io
+  release in `patches/patched.toml`; `cargo xtask patched` generates the rest.
 - **User-facing changes update the docs** under `docs/`.
 - **No tombstones.** Leave no comments, docs or tests about what was removed or
   replaced; git history keeps it.

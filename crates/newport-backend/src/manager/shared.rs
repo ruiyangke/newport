@@ -75,7 +75,7 @@ impl SharedState {
         id: Uuid,
         remote_port: Option<u16>,
         expected: Option<&crate::model::Tunnel>,
-        expected_connection: Option<&serde_json::Value>,
+        expected_connection: Option<&newport_protocol::desktop::configuration::ConnectionScope>,
     ) -> Result<std::net::SocketAddrV4, String> {
         self.forwarding.open_endpoint(
             self.instance_id,
@@ -106,7 +106,7 @@ impl SharedState {
         &self,
         server: Uuid,
         tunnels: &[crate::model::Tunnel],
-        expected: Option<&serde_json::Value>,
+        expected: Option<&newport_protocol::desktop::configuration::ConnectionScope>,
     ) -> Result<Vec<crate::model::Tunnel>, String> {
         self.forwarding
             .connect_batch(self.instance_id, server, tunnels, expected)

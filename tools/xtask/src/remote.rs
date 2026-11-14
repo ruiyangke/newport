@@ -53,7 +53,15 @@ pub(crate) fn rust_version() -> Result<String> {
         .map(str::to_owned)
         .context("Missing pinned Rust version")
 }
-fn docker_build(stage: &str, arch: &str, output: &std::path::Path) -> Result<()> {
+/// The directory, inside Docker's shared Cargo cache, that an agent build
+/// compiles in. Cargo decides what to rebuild by modification time, so the
+/// shared one can hand one checkout's build to another; a clean build empties
+/// its own before and after.
+fn agent_build(clean: bool) -> &'static str {
+    if clean { "clean" } else { "shared" }
+}
+
+fn docker_build(stage: &str, arch: &str, output: &std::path::Path, build: &str) -> Result<()> {
     let version = rust_version()?;
     let agent_version = agent_version()?;
     let platform = if arch == "x86_64" {
@@ -76,6 +84,8 @@ fn docker_build(stage: &str, arch: &str, output: &std::path::Path) -> Result<()>
                 &format!("RUST_VERSION={version}"),
                 "--build-arg",
                 &format!("NEWPORT_AGENT_VERSION={agent_version}"),
+                "--build-arg",
+                &format!("NEWPORT_AGENT_BUILD={build}"),
                 "--target",
                 stage,
                 "--output",
@@ -105,14 +115,14 @@ pub(crate) fn architectures(names: &[String]) -> Result<Vec<&'static str>> {
 pub fn runtime(names: &[String]) -> Result<()> {
     let temp = tempfile::tempdir()?;
     for arch in architectures(names)? {
-        docker_build("runtime-check", arch, temp.path())?;
+        docker_build("runtime-check", arch, temp.path(), agent_build(false))?;
     }
     Ok(())
 }
 
 /// Builds the Linux agents, or only the named architectures, into
 /// resources/agents; binaries of other architectures are left as they are.
-pub fn build_agents(names: &[String]) -> Result<()> {
+pub fn build_agents(names: &[String], clean: bool) -> Result<()> {
     let selected = architectures(names)?;
     if std::env::var("NEWPORT_PREBUILT").as_deref() == Ok("1") {
         return crate::artifact::verify(Path::new("resources/agents"));
@@ -132,7 +142,7 @@ pub fn build_agents(names: &[String]) -> Result<()> {
     // Build every selected one successfully before replacing the bundled binaries.
     let staging = tempfile::tempdir_in(&output)?;
     for arch in &selected {
-        docker_build("artifact", arch, staging.path())?;
+        docker_build("artifact", arch, staging.path(), agent_build(clean))?;
     }
     publish_agents(staging.path(), &output, &selected)
 }
@@ -321,7 +331,7 @@ pub fn run(args: &[String]) -> Result<()> {
         std::env::set_var("DOCKER_CONTEXT", context);
         std::env::set_var("NEWPORT_TEST_DOCKER", &docker);
     }
-    build_agents(&[])?;
+    build_agents(&[], false)?;
     let toolchain = fs::read_to_string(root().join("rust-toolchain.toml"))?;
     let channel = toolchain
         .lines()

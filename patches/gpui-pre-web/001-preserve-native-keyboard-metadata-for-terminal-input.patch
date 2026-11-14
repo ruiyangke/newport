@@ -1,0 +1,67 @@
+gpui: Preserve native keyboard metadata for terminal input
+
+Key events carry the physical key and the original layout and modifier
+metadata, without changing shortcut matching. macOS and Windows supply
+layout metadata; Linux and web keep optional fallbacks. Window::numlock()
+reads the current lock state, implemented on Windows. Synthetic events carry
+no native metadata.
+
+Newport needs it for terminal key encoding. KeyDownEvent and KeyUpEvent gain
+optional fields, so struct literals downstream must set them.
+
+Remove when GPUI exposes physical keys and layout metadata on key events.
+
+diff --git a/src/events.rs b/src/events.rs
+index 96fb383..ff4c552 100644
+--- a/src/events.rs
++++ b/src/events.rs
+@@ -549,11 +549,17 @@ impl WebWindowInner {
+             key_char: None,
+         };
+         self.dispatch_input(PlatformInput::KeyDown(KeyDownEvent {
++            physical_key: None,
++            key_metadata: None,
+             keystroke: keystroke.clone(),
+             is_held: false,
+             prefer_character_input: false,
+         }));
+-        self.dispatch_input(PlatformInput::KeyUp(KeyUpEvent { keystroke }));
++        self.dispatch_input(PlatformInput::KeyUp(KeyUpEvent {
++            physical_key: None,
++            key_metadata: None,
++            keystroke,
++        }));
+     }
+ 
+     fn register_pointer_move(self: &Rc<Self>) -> EventListenerHandle {
+@@ -745,6 +751,8 @@ impl WebWindowInner {
+             };
+ 
+             let result = this.dispatch_input(PlatformInput::KeyDown(KeyDownEvent {
++                physical_key: physical_key_from_dom(&event),
++                key_metadata: None,
+                 keystroke,
+                 is_held,
+                 prefer_character_input: false,
+@@ -808,7 +816,11 @@ impl WebWindowInner {
+                 key_char,
+             };
+ 
+-            let result = this.dispatch_input(PlatformInput::KeyUp(KeyUpEvent { keystroke }));
++            let result = this.dispatch_input(PlatformInput::KeyUp(KeyUpEvent {
++                physical_key: physical_key_from_dom(&event),
++                key_metadata: None,
++                keystroke,
++            }));
+             if let Some(result) = result {
+                 if !result.propagate {
+                     event.prevent_default();
+@@ -1479,3 +1491,8 @@ mod tests {
+         assert_ne!(reused, concurrent);
+     }
+ }
++
++fn physical_key_from_dom(event: &web_sys::KeyboardEvent) -> Option<gpui::PhysicalKey> {
++    let code = event.code();
++    (!code.is_empty() && code != "Unidentified").then(|| gpui::PhysicalKey::Web(code.into()))
++}

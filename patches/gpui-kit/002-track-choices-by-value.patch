@@ -1,0 +1,34 @@
+select, combobox: Track choices by value
+
+Row indices are positions in the filtered or paged list, not items. A search
+or page response can replace a row between Enter and the deferred confirm.
+
+- The searchable list confirms the item itself. Select's deferred confirm,
+  cancel and query reset find the item by value again.
+- Combobox compares selected values, not rows, before and after
+  on_will_change. Replacing A at row 0 with filtered B at row 0 now emits
+  Change and Confirm; moving the same value to another row does not.
+- ComboboxEvent::Activate reports an accepted activation, separately from
+  Confirm, which also fires on dismissal. Activating the current item closes
+  a single-select combobox without a false Change.
+- ComboboxState::close dismisses without focus changes or selection events.
+- Select::is_open, Select::menu_scroll_handle and
+  Select::menu_item_min_height (a minimum row height independent of the
+  trigger size).
+- List rows report to test-support snapshots, so tests can measure menu
+  rows.
+
+Remove when upstream confirms by value and offers these hooks.
+
+diff --git a/tests/integration/search.rs b/tests/integration/search.rs
+index fd521c8..7e88959 100644
+--- a/tests/integration/search.rs
++++ b/tests/integration/search.rs
+@@ -239,6 +239,7 @@ fn languages(
+                 cx.subscribe(&state, |this: &mut Languages, _, event, _| match event {
+                     ComboboxEvent::Change(values) => this.changes.push(values.clone()),
+                     ComboboxEvent::Confirm(values) => this.confirmations.push(values.clone()),
++                    ComboboxEvent::Activate(_) => {}
+                 });
+             Languages {
+                 state,

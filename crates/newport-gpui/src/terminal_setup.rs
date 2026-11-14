@@ -4,7 +4,8 @@
 //! dismissed or fails.
 use super::*;
 use crate::terminal_view::TerminalView;
-use newport_client::account::{Action, NoticeKind};
+use newport_client::account::Action;
+use newport_protocol::desktop::account::{NoticeKind, Phase};
 use remote_apps::Entitlement;
 use std::{collections::HashMap, rc::Rc};
 
@@ -157,12 +158,12 @@ fn step(entitlement: Entitlement, seat_message: Option<&str>) -> Step {
 }
 /// Needle can open apps: it is installed, and nothing every app needs is
 /// missing. Otherwise Set up leads to Remote apps, which says what to install.
-pub(crate) fn setup_ready(status: &Value) -> bool {
+pub(crate) fn setup_ready(status: &newport_protocol::desktop::applications::Availability) -> bool {
     remote_apps::launch_agent(status).is_ok()
-        && serde_json::from_value::<Vec<crate::remote_apps_api::Gap>>(status["gaps"].clone())
-            .unwrap_or_default()
+        && status
+            .gaps
             .iter()
-            .all(crate::remote_apps_api::Gap::optional)
+            .all(newport_domain::requirements::optional)
 }
 impl Newport {
     fn begin_terminal_readiness(&mut self, cx: &mut Context<Self>) {
@@ -191,11 +192,7 @@ impl Newport {
                         .terminal_setup
                         .dismissed
                         .is_some_and(|at| at.elapsed() < Duration::from_secs(3));
-                if quiet
-                    || !rows(&self.snapshot["config"]["servers"])
-                        .iter()
-                        .any(|s| text(s, "id") == request.server)
-                {
+                if quiet || self.saved_server(&request.server).is_none() {
                     continue;
                 }
                 self.terminal_setup.current = Some(request);
@@ -208,10 +205,7 @@ impl Newport {
         let Some(request) = &self.terminal_setup.current else {
             return changed;
         };
-        if !rows(&self.snapshot["config"]["servers"])
-            .iter()
-            .any(|s| text(s, "id") == request.server)
-        {
+        if self.saved_server(&request.server).is_none() {
             self.dismiss_terminal_setup();
             return true;
         }
@@ -230,12 +224,15 @@ impl Newport {
                 changed = true;
             }
             Stage::Setup => {
-                let ready = self
-                    .resources
-                    .get(&remote_apps::status_key(&request.server))
-                    .is_some_and(|read| {
-                        !read.pending && read.error.is_none() && setup_ready(&read.value)
-                    });
+                let key = remote_apps::status_key(&request.server);
+                let ready = self.resources.get(&key).is_some_and(|read| {
+                    !read.pending
+                        && read.error.is_none()
+                        && self
+                            .remote_apps_readings
+                            .status(&self.resources, &key)
+                            .is_some_and(setup_ready)
+                });
                 if ready {
                     self.begin_terminal_readiness(cx);
                     changed = true;
@@ -310,8 +307,8 @@ impl Newport {
     fn terminal_setup_anchor(&self, cx: &App) -> Option<Entity<TerminalView>> {
         let request = self.terminal_setup.current.as_ref()?;
         let status = self.account.status();
-        let loading = Entitlement::of(status) == Entitlement::Unknown
-            && status.phase != newport_client::account::Phase::SignedIn;
+        let loading =
+            Entitlement::of(status) == Entitlement::Unknown && status.state != Phase::SignedIn;
         if loading || self.terminal_setup.stage == Stage::Starting {
             return None;
         }
@@ -423,8 +420,8 @@ impl Newport {
         };
         let status = self.account.status();
         let entitlement = Entitlement::of(status);
-        let license_missing = entitlement == Entitlement::Unknown
-            && status.phase == newport_client::account::Phase::SignedIn;
+        let license_missing =
+            entitlement == Entitlement::Unknown && status.state == Phase::SignedIn;
         let busy = self.account.pending().is_some() || status.signing_out;
         let mut step = step(
             entitlement,
@@ -443,10 +440,9 @@ impl Newport {
         }
         let primary = match self.terminal_setup.stage {
             Stage::Setup => {
-                let server = rows(&self.snapshot["config"]["servers"])
-                    .iter()
-                    .find(|s| text(s, "id") == request.server)
-                    .map(|s| text(s, "name"))
+                let server = self
+                    .saved_server(&request.server)
+                    .map(|s| s.name.clone())
                     .filter(|name| !name.is_empty())
                     .unwrap_or_else(|| request.server.clone());
                 step.detail = format!("Set up {server} to open GUI apps on {computer}.");
@@ -605,7 +601,7 @@ mod tests {
         Styled, TestAppContext, VisualTestContext, Window, div, prelude::*, px, size,
     };
     use newport_client::account::{Account, Action};
-    use serde_json::{Value, json};
+    use newport_protocol::desktop::account::{License, Phase, Status};
     use std::{cell::RefCell, rc::Rc};
 
     /// Newport above two terminals on the same server.
@@ -736,14 +732,17 @@ mod tests {
         assert!(!labels.iter().any(|label| label == unexpected));
     }
 
-    fn account(status: Value) -> Account {
+    fn account(status: Status) -> Account {
         let mut account = Account::with_replies(move |_| Ok(status.clone()));
         account.poll();
         account.poll();
         account
     }
 
-    fn fixture(cx: &mut TestAppContext, status: Value) -> (Fixture, &mut VisualTestContext) {
+    /// The owner's selected server.
+    const SERVER_ID: &str = "00000000-0000-4000-8000-000000000001";
+
+    fn fixture(cx: &mut TestAppContext, status: Status) -> (Fixture, &mut VisualTestContext) {
         cx.update(|cx| {
             gpui::component::init(cx);
             crate::theme::install(false, cx);
@@ -758,8 +757,8 @@ mod tests {
                 view.account = account(status);
                 view
             });
-            let origin = cx.new(|cx| attached(&peer, "fixture", cx));
-            let other = cx.new(|cx| attached(&other_peer, "fixture", cx));
+            let origin = cx.new(|cx| attached(&peer, SERVER_ID, cx));
+            let other = cx.new(|cx| attached(&other_peer, SERVER_ID, cx));
             parts = Some((view.clone(), origin.clone(), other.clone()));
             let host = cx.new(|_| Host {
                 newport: view,
@@ -775,7 +774,7 @@ mod tests {
             wait(terminal, visual, |view| view.ready());
             visual.update(|_, cx| {
                 let id = terminal.read(cx).session_id().unwrap();
-                super::register(id, "fixture", terminal.downgrade(), cx);
+                super::register(id, SERVER_ID, terminal.downgrade(), cx);
             });
         }
         // The person is in the origin terminal, in the window in front.
@@ -797,14 +796,14 @@ mod tests {
 
     fn request_setup(view: &Entity<Newport>, cx: &mut VisualTestContext) {
         view.update(cx, |view, cx| {
-            request("fixture", cx);
+            request(SERVER_ID, cx);
             view.poll_terminal_setup(cx);
             cx.notify();
         });
         frame(cx);
     }
 
-    fn sign_in(f: &Fixture, cx: &mut VisualTestContext, status: Value) {
+    fn sign_in(f: &Fixture, cx: &mut VisualTestContext, status: Status) {
         f.view.update(cx, |v, cx| {
             v.account = account(status);
             cx.notify();
@@ -814,7 +813,7 @@ mod tests {
 
     #[gpui::test]
     fn opening_a_terminal_without_a_license_does_not_request_setup(cx: &mut TestAppContext) {
-        let (f, cx) = fixture(cx, json!({"status":"signedOut"}));
+        let (f, cx) = fixture(cx, crate::account_fixture::status(Phase::SignedOut));
         f.view.update(cx, |v, cx| {
             v.page = Page::Terminal;
             assert!(!v.poll_terminal_setup(cx));
@@ -834,7 +833,7 @@ mod tests {
 
     #[gpui::test]
     fn terminal_setup_dismissal_is_respected(cx: &mut TestAppContext) {
-        let (f, cx) = fixture(cx, json!({"status":"signedOut"}));
+        let (f, cx) = fixture(cx, crate::account_fixture::status(Phase::SignedOut));
         request_setup(&f.view, cx);
         assert!(labels(cx).contains(&"Sign in".into()));
         // Esc belongs to the shell.
@@ -866,14 +865,17 @@ mod tests {
 
     #[gpui::test]
     fn terminal_setup_waits_for_account_and_does_not_upsell_pro(cx: &mut TestAppContext) {
-        let (f, cx) = fixture(cx, json!({"status":"loading"}));
+        let (f, cx) = fixture(cx, crate::account_fixture::status(Phase::Loading));
         cx.update(|_, cx| cx.set_global(crate::terminal_gui::TestProbe(Ok(false))));
         request_setup(&f.view, cx);
         assert_eq!(card(cx), None);
         sign_in(
             &f,
             cx,
-            json!({"status":"signedIn","license":{"state":"active","seat":"pro"}}),
+            crate::account_fixture::signed_in(Some(crate::account_fixture::license(
+                "active",
+                Some("pro"),
+            ))),
         );
         assert!(!labels(cx).contains(&"Start free trial".into()));
         assert!(labels(cx).contains(&"Set up".into()));
@@ -883,7 +885,7 @@ mod tests {
 
     #[gpui::test]
     fn terminal_setup_missing_license_offers_recovery(cx: &mut TestAppContext) {
-        let (f, cx) = fixture(cx, json!({"status":"signedIn","license":null}));
+        let (f, cx) = fixture(cx, crate::account_fixture::signed_in(None));
         request_setup(&f.view, cx);
         assert!(labels(cx).contains(&"Refresh account".into()));
         assert!(!labels(cx).contains(&"Start free trial".into()));
@@ -893,8 +895,10 @@ mod tests {
 
     #[gpui::test]
     fn terminal_setup_updates_in_place_and_displays_action_errors(cx: &mut TestAppContext) {
-        let (f, cx) = fixture(cx, json!({"status":"signedOut"}));
-        let status = Rc::new(RefCell::new(json!({"status":"signedOut"})));
+        let (f, cx) = fixture(cx, crate::account_fixture::status(Phase::SignedOut));
+        let status = Rc::new(RefCell::new(crate::account_fixture::status(
+            Phase::SignedOut,
+        )));
         let calls = Rc::new(RefCell::new(Vec::new()));
         f.view.update(cx, |v, _| {
             let (status, calls) = (status.clone(), calls.clone());
@@ -904,7 +908,7 @@ mod tests {
                     return Err("Network unavailable".into());
                 }
                 if method == newport_protocol::desktop::Kind::AccountSignIn {
-                    *status.borrow_mut() = json!({"status":"waiting"});
+                    *status.borrow_mut() = crate::account_fixture::status(Phase::Waiting);
                 }
                 Ok(status.borrow().clone())
             });
@@ -925,7 +929,8 @@ mod tests {
                 .contains(&newport_protocol::desktop::Kind::AccountSignIn)
         );
         assert!(labels(cx).contains(&"Open sign-in page".into()));
-        *status.borrow_mut() = json!({"status":"signedIn","license":{"state":"none"}});
+        *status.borrow_mut() =
+            crate::account_fixture::signed_in(Some(crate::account_fixture::license("none", None)));
         f.view.update(cx, |v, cx| {
             let (status, calls) = (status.clone(), calls.clone());
             v.account = Account::with_replies(move |method| {
@@ -966,21 +971,27 @@ mod tests {
 
     #[test]
     fn terminal_setup_actions_match_license_and_seat_requirements() {
+        let license = crate::account_fixture::license;
         for (license, action) in [
-            (json!({"state":"none"}), Action::StartTrial),
+            (license("none", None), Action::StartTrial),
             (
-                json!({"state":"none","trialUsedHere":true}),
+                License {
+                    trial_used_here: Some(true),
+                    ..license("none", None)
+                },
                 Action::OpenBilling,
             ),
             (
-                json!({"state":"expired","trialUsed":true}),
+                License {
+                    trial_used: Some(true),
+                    ..license("expired", None)
+                },
                 Action::OpenBilling,
             ),
-            (json!({"state":"active","seat":"free"}), Action::OpenPortal),
-            (json!({"state":"trial","seat":"free"}), Action::OpenBilling),
+            (license("active", Some("free")), Action::OpenPortal),
+            (license("trial", Some("free")), Action::OpenBilling),
         ] {
-            let status =
-                serde_json::from_value(json!({"status":"signedIn","license":license})).unwrap();
+            let status = crate::account_fixture::signed_in(Some(license));
             assert_eq!(
                 step(Entitlement::of(&status), None).action.unwrap().1,
                 action
@@ -990,7 +1001,7 @@ mod tests {
 
     #[gpui::test]
     fn the_card_shows_in_a_terminal_and_never_takes_the_keyboard(cx: &mut TestAppContext) {
-        let (f, cx) = fixture(cx, json!({"status":"signedOut"}));
+        let (f, cx) = fixture(cx, crate::account_fixture::status(Phase::SignedOut));
         request_setup(&f.view, cx);
         assert!(card(cx).is_some());
         assert!(labels(cx).contains(&"Dismiss".into()));
@@ -1019,7 +1030,10 @@ mod tests {
     fn a_ready_licensed_server_needs_no_card(cx: &mut TestAppContext) {
         let (f, cx) = fixture(
             cx,
-            json!({"status":"signedIn","license":{"state":"active","seat":"pro"}}),
+            crate::account_fixture::signed_in(Some(crate::account_fixture::license(
+                "active",
+                Some("pro"),
+            ))),
         );
         cx.update(|_, cx| cx.set_global(crate::terminal_gui::TestProbe(Ok(true))));
         request_setup(&f.view, cx);
@@ -1034,14 +1048,17 @@ mod tests {
 
     #[gpui::test]
     fn signing_in_removes_the_card(cx: &mut TestAppContext) {
-        let (f, cx) = fixture(cx, json!({"status":"signedOut"}));
+        let (f, cx) = fixture(cx, crate::account_fixture::status(Phase::SignedOut));
         cx.update(|_, cx| cx.set_global(crate::terminal_gui::TestProbe(Ok(true))));
         request_setup(&f.view, cx);
         assert!(labels(cx).contains(&"Sign in".into()));
         sign_in(
             &f,
             cx,
-            json!({"status":"signedIn","license":{"state":"trial","seat":"pro"}}),
+            crate::account_fixture::signed_in(Some(crate::account_fixture::license(
+                "trial",
+                Some("pro"),
+            ))),
         );
         assert_eq!(card(cx), None);
         assert!(
@@ -1055,50 +1072,50 @@ mod tests {
     fn missing_software_waits_for_set_up_then_closes_once_set_up(cx: &mut TestAppContext) {
         let (f, cx) = fixture(
             cx,
-            json!({"status":"signedIn","license":{"state":"active","seat":"pro"}}),
+            crate::account_fixture::signed_in(Some(crate::account_fixture::license(
+                "active",
+                Some("pro"),
+            ))),
         );
         f.view.update(cx, |v, _| {
-            let mut other = v.snapshot["config"]["servers"][0].clone();
-            other["id"] = json!("other");
-            other["name"] = json!("Other");
-            v.snapshot["config"]["servers"]
-                .as_array_mut()
-                .unwrap()
-                .push(other);
-            v.server = "other".into();
+            let servers = &mut v.snapshot_mut().config.servers;
+            let mut other = servers[0].clone();
+            other.id = crate::snapshot_fixture::SECOND;
+            other.name = "Other".into();
+            servers.push(other);
+            v.server = crate::snapshot_fixture::SECOND.to_string();
             v.page = Page::Terminal;
         });
         cx.update(|_, cx| cx.set_global(crate::terminal_gui::TestProbe(Ok(false))));
         request_setup(&f.view, cx);
         // Nothing moves until Set up is pressed.
         assert!(card(cx).is_some());
-        let name = f.view.read_with(cx, |v, _| {
-            crate::text(&v.snapshot["config"]["servers"][0], "name")
-        });
+        let name = f.view.read_with(cx, |v, _| v.servers()[0].name.clone());
         assert_host_label(
             cx,
             &format!("Set up {name} to open GUI apps on your Mac."),
             &format!("Set up {name} to open GUI apps on this computer."),
         );
-        assert!(
-            f.view
-                .read_with(cx, |v, _| v.server == "other" && v.page == Page::Terminal)
-        );
+        assert!(f.view.read_with(cx, |v, _| v.server
+            == crate::snapshot_fixture::SECOND.to_string()
+            && v.page == Page::Terminal));
         assert!(focused(&f, cx));
         click(cx, "Set up");
-        assert!(f.view.read_with(cx, |v, _| v.server == "fixture"
+        assert!(f.view.read_with(cx, |v, _| v.server == SERVER_ID
             && v.page == Page::RemoteApps));
         assert!(no_dialog(cx));
         cx.update(|_, cx| cx.set_global(crate::terminal_gui::TestProbe(Ok(true))));
         f.view.update(cx, |v, cx| {
-            let key = remote_apps::status_key("fixture");
+            let key = remote_apps::status_key(SERVER_ID);
             v.resources.fence(&key);
             let generation = v.resources.begin_refresh(&key, true).unwrap();
-            v.resources.complete(
+            v.answer_remote_apps(
                 &key,
                 generation,
-                Ok(json!({"agent":"newport-agent","installedVariant":"full",
-                    "selectedRuntime":{"product":"full", "buildSha256":"ours"},"missing":[]})),
+                crate::remote_apps_fixture::status_reply(crate::remote_apps_fixture::installed(
+                    "newport-agent",
+                    "ours",
+                )),
             );
             cx.notify();
         });
@@ -1114,7 +1131,10 @@ mod tests {
     fn connection_failure_offers_retry_without_installation(cx: &mut TestAppContext) {
         let (f, cx) = fixture(
             cx,
-            json!({"status":"signedIn","license":{"state":"active","seat":"pro"}}),
+            crate::account_fixture::signed_in(Some(crate::account_fixture::license(
+                "active",
+                Some("pro"),
+            ))),
         );
         cx.update(|_, cx| {
             cx.set_global(crate::terminal_gui::TestProbe(Err(
@@ -1138,7 +1158,7 @@ mod tests {
 
     #[gpui::test]
     fn guidance_leaves_the_terminal_connected(cx: &mut TestAppContext) {
-        let (f, cx) = fixture(cx, json!({"status":"signedOut"}));
+        let (f, cx) = fixture(cx, crate::account_fixture::status(Phase::SignedOut));
         let connected = |cx: &mut VisualTestContext| {
             f.terminal.read_with(cx, |terminal, _| {
                 terminal.status.connected()
@@ -1154,8 +1174,9 @@ mod tests {
         assert!(connected(cx));
         // A failed readiness check offers Retry; ignoring it changes nothing.
         f.view.update(cx, |v, cx| {
-            v.account =
-                account(json!({"status":"signedIn","license":{"state":"active","seat":"pro"}}));
+            v.account = account(crate::account_fixture::signed_in(Some(
+                crate::account_fixture::license("active", Some("pro")),
+            )));
             v.terminal_setup.dismissed = None;
             cx.notify();
         });
@@ -1172,15 +1193,16 @@ mod tests {
 
     #[test]
     fn setup_is_ready_once_the_server_has_what_every_app_needs() {
-        let mut status = json!({"agent":"newport-agent", "installedVariant":"full",
-            "selectedRuntime":{"product":"full", "buildSha256":"ours"},
-            "gaps": [{"requirement": "audio", "state": "missing"}]});
+        use crate::remote_apps_fixture::{installed, missing};
+        use newport_protocol::desktop::applications::Requirement;
+        let mut status = installed("newport-agent", "ours");
+        status.gaps = vec![missing(Requirement::Audio)];
         assert!(super::setup_ready(&status), "only some apps need sound");
-        status["gaps"] = json!([{"requirement": "xwayland", "state": "missing"}]);
+        status.gaps = vec![missing(Requirement::Xwayland)];
         assert!(super::setup_ready(&status), "only X11 apps need XWayland");
-        for requirement in ["dbus", "fonts"] {
-            status["gaps"] = json!([{"requirement": requirement, "state": "missing"}]);
-            assert!(!super::setup_ready(&status), "{requirement}");
+        for requirement in [Requirement::Dbus, Requirement::Fonts] {
+            status.gaps = vec![missing(requirement)];
+            assert!(!super::setup_ready(&status), "{requirement:?}");
         }
     }
 }

@@ -2,7 +2,7 @@
 use super::*;
 use gpui_kit::base::Selectable;
 use gpui_kit::component::skeleton::Skeleton;
-use newport_protocol::git::Request as GitRequest;
+use newport_protocol::git::{Remote, RemoteReference, Reply, Request as GitRequest};
 
 use newport_client::git_remote_refs::{Listing, PAGE_SIZE};
 
@@ -47,8 +47,8 @@ fn pending_reference(index: usize) -> AnyElement {
         ))
         .into_any_element()
 }
-fn reference_button(index: usize, entry: &Value, selected: bool, cx: &App) -> Button {
-    let name = text(&entry["reference"], "display");
+fn reference_button(index: usize, entry: &RemoteReference, selected: bool, cx: &App) -> Button {
+    let name = entry.reference.display.clone();
     git_file_row::row_focus(crate::controls::button(("remote-ref", index)), cx)
         .accessibility_label(name.clone())
         .custom(git_file_row::selection_style(selected, cx))
@@ -62,25 +62,20 @@ fn reference_button(index: usize, entry: &Value, selected: bool, cx: &App) -> Bu
         .hover_hint(name.clone())
         .child(reference_columns(
             name,
-            crate::label(text(entry, "kind")).text_size(px(crate::ui::FONT_SIZE)),
-            crate::label(
-                text(&entry["oid"], "hex")
-                    .chars()
-                    .take(8)
-                    .collect::<String>(),
-            )
-            .text_size(px(crate::ui::FONT_SIZE)),
+            crate::label(entry.kind.clone()).text_size(px(crate::ui::FONT_SIZE)),
+            crate::label(entry.oid.hex.chars().take(8).collect::<String>())
+                .text_size(px(crate::ui::FONT_SIZE)),
         ))
 }
 pub(super) struct Browser {
-    pub(super) remote: Value,
+    pub(super) remote: Remote,
     input: Entity<InputState>,
     filter: String,
     pub(super) debounce: Option<Instant>,
     listing: Listing,
     cursor: Option<String>,
     pub(super) error: Option<String>,
-    pub(super) selected: Value,
+    pub(super) selected: Option<RemoteReference>,
     scroll: UniformListScrollHandle,
     _subscription: Subscription,
 }
@@ -127,6 +122,7 @@ impl Newport {
         self.git.remote_refs = Some(Browser {
             remote: self
                 .git_selected_remote()
+                .cloned()
                 .expect("validated selected remote"),
             input,
             filter: String::new(),
@@ -134,7 +130,7 @@ impl Newport {
             listing: Listing::default(),
             cursor: None,
             error: None,
-            selected: Value::Null,
+            selected: None,
             scroll: UniformListScrollHandle::new(),
             _subscription: subscription,
         });
@@ -156,7 +152,7 @@ impl Newport {
             browser.listing = Listing::default();
             browser.cursor = None;
             browser.error = None;
-            browser.selected = Value::Null;
+            browser.selected = None;
             browser.scroll = UniformListScrollHandle::new();
         }
     }
@@ -181,9 +177,10 @@ impl Newport {
             return;
         }
         let cursor = if more {
-            browser.listing.page()["nextCursor"]
-                .as_str()
-                .map(str::to_owned)
+            browser
+                .listing
+                .page()
+                .and_then(|page| page.next_cursor.clone())
         } else {
             None
         };
@@ -193,17 +190,20 @@ impl Newport {
         browser.cursor = cursor.clone();
         let request = GitRequest::RemoteRefs {
             repo_id: repo,
-            remote: text(&browser.remote, "name"),
-            expected_token: text(&browser.remote, "token"),
+            remote: browser.remote.name.clone(),
+            expected_token: browser.remote.token.clone(),
             for_push: true,
             filter: browser.filter.clone(),
             page_size: PAGE_SIZE,
             cursor,
         };
-        self.request_git(key, request);
+        self.request_git_typed(key, request);
     }
     pub(super) fn remote_refs_completed(&mut self, key: &str) {
-        let value = self.value(key);
+        let page = match self.git_reply(key) {
+            Some(Reply::RemoteRefs(page)) => Some((**page).clone()),
+            _ => None,
+        };
         let error = self.resources.get(key).and_then(|r| r.error.clone());
         let Some(browser) = self.git.remote_refs.as_mut() else {
             return;
@@ -217,10 +217,15 @@ impl Newport {
         if key != "git-remote-refs-first" && cursor.is_none() {
             return;
         }
-        if let Err(error) = browser
-            .listing
-            .accept(value, &browser.remote, cursor.as_deref())
-        {
+        let result = match page {
+            Some(page) => browser
+                .listing
+                .accept(page, &browser.remote, cursor.as_deref()),
+            None => {
+                Err("The remote returned an invalid reference listing. Refresh to retry.".into())
+            }
+        };
+        if let Err(error) = result {
             browser.error = Some(error);
         }
     }
@@ -245,14 +250,17 @@ impl Newport {
         }
         let ready = browser.debounce.is_none()
             && browser.error.is_none()
-            && browser.listing.page()["nextCursor"].is_string()
+            && browser
+                .listing
+                .page()
+                .is_some_and(|page| page.next_cursor.is_some())
             && !["git-remote-refs-first", "git-remote-refs-more"]
                 .iter()
                 .any(|key| self.resources.get(key).is_some_and(|r| r.pending));
         if ready
             && git_page_demand::near_uniform_end(
                 &browser.scroll,
-                rows(&browser.listing.page()["entries"]).len(),
+                browser.listing.page().map_or(0, |page| page.entries.len()),
                 ROW_HEIGHT,
             )
         {
@@ -265,7 +273,11 @@ impl Newport {
         let Some(browser) = &self.git.remote_refs else {
             return div().into_any_element();
         };
-        let entries = rows(&browser.listing.page()["entries"]);
+        let entries = browser
+            .listing
+            .page()
+            .map(|page| page.entries.clone())
+            .unwrap_or_default();
         let loading = browser.debounce.is_some()
             || ["git-remote-refs-first", "git-remote-refs-more"]
                 .iter()
@@ -286,7 +298,11 @@ impl Newport {
             "Filter is too long (maximum 1,024 bytes).".into()
         } else if browser.error.is_some() {
             "Couldn’t finish loading. Refresh to try again.".into()
-        } else if browser.listing.page()["metadata"]["truncated"] == true {
+        } else if browser
+            .listing
+            .page()
+            .is_some_and(|page| page.metadata.truncated)
+        {
             format!("{} references · Listing incomplete", entries.len())
         } else if entries.is_empty() {
             "No remote references match.".into()
@@ -315,10 +331,13 @@ impl Newport {
                                 cx.notify();
                             })),
                     )
-                    .child(div().flex_1().min_w_0().truncate().child(format!(
-                        "{} · Branches and tags",
-                        text(&browser.remote, "name")
-                    )))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(format!("{} · Branches and tags", browser.remote.name)),
+                    )
                     .child(
                         crate::controls::icon_button("refresh-remote-refs")
                             .ghost()
@@ -336,9 +355,11 @@ impl Newport {
             .child(
                 crate::label(format!(
                     "Remote destination: {}",
-                    browser.remote["pushUrl"]
-                        .as_str()
-                        .or(browser.remote["url"].as_str())
+                    browser
+                        .remote
+                        .push_url
+                        .as_deref()
+                        .or(browser.remote.url.as_deref())
                         .unwrap_or("Unavailable")
                 ))
                 .px(px(12.))
@@ -372,14 +393,16 @@ impl Newport {
                                 let entry = entries[index].clone();
                                 let selected =
                                     this.git.remote_refs.as_ref().is_some_and(|browser| {
-                                        browser.selected["reference"]["bytesB64"]
-                                            == entry["reference"]["bytesB64"]
+                                        browser.selected.as_ref().is_some_and(|selected| {
+                                            selected.reference.bytes_b64
+                                                == entry.reference.bytes_b64
+                                        })
                                     });
                                 reference_button(index, &entry, selected, cx)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.git.remote_ref_review = None;
                                         if let Some(browser) = this.git.remote_refs.as_mut() {
-                                            browser.selected = entry.clone();
+                                            browser.selected = Some(entry.clone());
                                         }
                                         cx.notify();
                                     }))
@@ -392,11 +415,10 @@ impl Newport {
                 .flex_1()
                 .min_h_0(),
             )
-            .when(browser.selected["oid"].is_object(), |view| {
+            .when_some(browser.selected.as_ref(), |view, selected| {
                 view.child(div().px(px(12.)).py(px(8.)).child(crate::label(format!(
                     "{} · {}",
-                    text(&browser.selected["reference"], "display"),
-                    text(&browser.selected["oid"], "hex")
+                    selected.reference.display, selected.oid.hex
                 ))))
             })
             .child(
@@ -423,7 +445,6 @@ mod layout_tests {
         uniform_list,
     };
     use gpui_kit as gpui;
-    use serde_json::json;
 
     struct Listing {
         loaded: usize,
@@ -439,16 +460,55 @@ mod layout_tests {
             } else {
                 1
             };
-            div().size_full().flex().flex_col()
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
                 .child(div().h(px(40.)).flex_shrink_0().child("Filter"))
-                .child(uniform_list("references", self.loaded + placeholders, cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                    range.map(|i| div().debug_selector(move || format!("row-{i}")).child(
-                        if i >= this.loaded { super::pending_reference(i) } else {
-                            super::reference_button(i, &json!({"reference":{"display":"refs/heads/main"},"kind":"branch","oid":{"hex":"a".repeat(40)}}), false, cx).into_any_element()
-                        }
-                    )).collect()
-                })).track_scroll(&self.scroll).flex_1().min_h_0())
-                .child(div().debug_selector(|| "footer".into()).h(px(36.)).flex_shrink_0().child("References"))
+                .child(
+                    uniform_list(
+                        "references",
+                        self.loaded + placeholders,
+                        cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                            range
+                                .map(|i| {
+                                    div().debug_selector(move || format!("row-{i}")).child(
+                                        if i >= this.loaded {
+                                            super::pending_reference(i)
+                                        } else {
+                                            super::reference_button(
+                                                i,
+                                                &newport_protocol::git::RemoteReference {
+                                                    reference: newport_protocol::git::Path::new(
+                                                        b"refs/heads/main",
+                                                    ),
+                                                    kind: "branch".into(),
+                                                    oid: crate::git_fixture::object(
+                                                        &"a".repeat(40),
+                                                    ),
+                                                    symbolic_target: None,
+                                                },
+                                                false,
+                                                cx,
+                                            )
+                                            .into_any_element()
+                                        },
+                                    )
+                                })
+                                .collect()
+                        }),
+                    )
+                    .track_scroll(&self.scroll)
+                    .flex_1()
+                    .min_h_0(),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "footer".into())
+                        .h(px(36.))
+                        .flex_shrink_0()
+                        .child("References"),
+                )
         }
     }
     #[gpui::test]

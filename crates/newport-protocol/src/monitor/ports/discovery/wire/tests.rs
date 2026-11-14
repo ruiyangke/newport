@@ -203,9 +203,9 @@ fn diagnostic_fields_reject_duplicates_and_wide_enum_aliases_before_decoding() {
     let mut wire = sample().to_wire();
     wire.diagnostics = None;
     let mut duplicate = wire.encode_to_vec();
-    duplicate.extend(message(11, &[24, 1, 24, 2]));
+    duplicate.extend(message(11, &[8, 1, 8, 2]));
     assert!(decode(duplicate.into()).is_err());
-    let mut diagnostics = vec![24];
+    let mut diagnostics = vec![8];
     prost::encoding::encode_varint((1u64 << 32) | 1, &mut diagnostics);
     let mut wide = wire.encode_to_vec();
     wide.extend(message(11, &diagnostics));

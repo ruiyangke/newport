@@ -137,7 +137,12 @@ impl Needle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .is_some_and(|runtime| runtime.hello().require("gui-notices", 1).is_ok())
+            .is_some_and(|runtime| {
+                runtime
+                    .hello()
+                    .require(newport_protocol::runtime::service::GUI_NOTICES, 1)
+                    .is_ok()
+            })
     }
     pub(crate) fn runtime_hello(&self) -> Result<newport_protocol::runtime::Hello, String> {
         self.validate()?;

@@ -6,31 +6,28 @@ mod animation;
 mod text;
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::{Selectable, button::ButtonGroup};
+use newport_protocol::desktop::files;
 use std::{cell::RefCell, rc::Rc};
 
 #[derive(Clone)]
 struct Identity {
     name: String,
     path: String,
-    kind: String,
+    kind: files::EntryKind,
     metadata: String,
 }
 impl Identity {
-    fn from_entry(entry: &Value) -> Self {
-        let size = if entry["size"].is_null() {
-            "—".into()
-        } else {
-            bytes(&entry["size"])
-        };
-        let permissions = text(entry, "permissions");
+    fn from_entry(entry: &files::Entry) -> Self {
+        let size = entry
+            .size
+            .map_or_else(|| "—".into(), |size| byte_size(size as f64));
         Self {
-            name: text(entry, "name"),
-            path: text(entry, "path"),
-            kind: text(entry, "kind"),
-            metadata: if permissions.is_empty() {
-                size
-            } else {
-                format!("{size} · Permissions {permissions}")
+            name: entry.name.clone(),
+            path: entry.path.clone(),
+            kind: entry.kind,
+            metadata: match entry.permissions.as_deref().unwrap_or("—") {
+                "" => size,
+                permissions => format!("{size} · Permissions {permissions}"),
             },
         }
     }
@@ -51,7 +48,7 @@ fn header(identity: &Identity, actions: AnyElement, cx: &App) -> AnyElement {
                 .flex_shrink_0()
                 .flex()
                 .items_center()
-                .child(file_icon::icon(&identity.name, &identity.kind)),
+                .child(file_icon::icon(&identity.name, identity.kind)),
         )
         .child(
             div()
@@ -201,7 +198,7 @@ impl Newport {
         let Some(entry) = entry else { return };
         self.close_file_preview();
         if let Some(browser) = self.file_browsers.get_mut(&self.server) {
-            let path = entry["path"].as_str().unwrap_or_default().to_owned();
+            let path = entry.path.clone();
             if browser.reads.open_preview(path.clone()).is_some() {
                 self.file_preview_path = Some(path);
                 self.prepare_file_preview(&entry, window, cx);
@@ -209,18 +206,21 @@ impl Newport {
         }
         cx.notify();
     }
-    fn file_preview_entry(&self) -> Option<Value> {
+    fn file_preview_entry(&self) -> Option<files::Entry> {
         let path = self.file_preview_path.as_ref()?;
-        self.file_browsers.get(&self.server)?.reads.listing()?["entries"]
-            .as_array()?
+        self.file_browsers
+            .get(&self.server)?
+            .reads
+            .listing()?
+            .entries
             .iter()
-            .find(|entry| entry["path"] == *path)
+            .find(|entry| entry.path == *path)
             .cloned()
     }
     /// Reset presentation for a newly selected file; reads are already open.
     pub(super) fn prepare_file_preview(
         &mut self,
-        entry: &Value,
+        entry: &files::Entry,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -250,11 +250,8 @@ impl Newport {
         let Some(target) = self.file_preview_target() else {
             return div().into_any_element();
         };
-        let data = self
-            .resources
-            .get("preview")
-            .map(|row| &row.value)
-            .unwrap_or(&Value::Null);
+        let prepared = self.file_preview_data();
+        let kind = prepared.map(|prepared| prepared.preview.kind);
         let zoom = self.file_preview_viewport.zoom;
         let name = &identity.name;
         let download = self.file_action_target(&identity.path).filter(|target| {
@@ -326,7 +323,7 @@ impl Newport {
             );
         let error = self.file_preview_error();
         let body = content
-            .when(data.is_null() || error.is_some(), |view| {
+            .when(prepared.is_none() || error.is_some(), |view| {
                 let retry = error
                     .is_some_and(|error| {
                         !error.contains("Only text and supported images can be previewed")
@@ -347,37 +344,47 @@ impl Newport {
                     });
                 view.child(message(error, retry, cx))
             })
-            .when(error.is_none() && data["truncated"] == true, |panel| {
-                panel.child(
-                    div()
-                        .id("file-preview-truncated")
-                        .role(Role::Status)
-                        .aria_label(
-                            "Showing the first 1 MiB. Search and copy apply to this preview.",
-                        )
-                        .px_4()
-                        .py_2()
-                        .text_size(px(crate::ui::FONT_SIZE))
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Showing the first 1 MiB · Search and copy apply to this preview"),
-                )
-            })
-            .when(error.is_none() && data["kind"] == "text", |panel| {
-                let content = data["content"].as_str().unwrap_or_default();
-                let wrap = self.file_preview_viewport.wrap;
-                panel.when_some(
-                    self.file_preview_viewport.text.as_ref(),
-                    |panel, preview| panel.child(preview.view(content, wrap, window, cx)),
-                )
-            })
+            .when(
+                error.is_none() && prepared.is_some_and(|prepared| prepared.preview.truncated),
+                |panel| {
+                    panel.child(
+                        div()
+                            .id("file-preview-truncated")
+                            .role(Role::Status)
+                            .aria_label(
+                                "Showing the first 1 MiB. Search and copy apply to this preview.",
+                            )
+                            .px_4()
+                            .py_2()
+                            .text_size(px(crate::ui::FONT_SIZE))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                "Showing the first 1 MiB · Search and copy apply to this preview",
+                            ),
+                    )
+                },
+            )
+            .when(
+                error.is_none() && kind == Some(files::PreviewKind::Text),
+                |panel| {
+                    let content = prepared
+                        .and_then(file_image::Prepared::text)
+                        .unwrap_or_default();
+                    let wrap = self.file_preview_viewport.wrap;
+                    panel.when_some(
+                        self.file_preview_viewport.text.as_ref(),
+                        |panel, preview| panel.child(preview.view(content, wrap, window, cx)),
+                    )
+                },
+            )
             .when_some(
-                self.file_preview_image
-                    .clone()
-                    .filter(|_| error.is_none() && data["kind"] == "image"),
+                prepared
+                    .and_then(|prepared| prepared.image.as_ref())
+                    .filter(|_| error.is_none()),
                 |panel, image| {
                     let raster = animation::raster(
-                        image,
-                        data["animationPlays"].as_u64(),
+                        image.raster.clone(),
+                        image.plays.map(u64::from),
                         self.file_preview_viewport.animation.clone(),
                         zoom.is_none(),
                     );
@@ -399,10 +406,8 @@ impl Newport {
                                 .when(zoom.is_none(), |frame| frame.relative().overflow_hidden())
                                 .child(if let Some(percent) = zoom {
                                     let scale = f32::from(percent) / 100.;
-                                    let width =
-                                        px(data["width"].as_u64().unwrap_or(1) as f32 * scale);
-                                    let height =
-                                        px(data["height"].as_u64().unwrap_or(1) as f32 * scale);
+                                    let width = px(image.width as f32 * scale);
+                                    let height = px(image.height as f32 * scale);
                                     // Center within the viewport when the raster fits. Let
                                     // the canvas grow with larger zooms so its leading edge
                                     // remains reachable instead of overflowing negatively.
@@ -431,7 +436,7 @@ impl Newport {
                                 .py_2()
                                 .flex_shrink_0()
                                 .child(
-                                    label(format!("{} × {} pixels", data["width"], data["height"]))
+                                    label(format!("{} × {} pixels", image.width, image.height))
                                         .text_size(px(crate::ui::FONT_SIZE)),
                                 )
                                 .child(div().flex_1())
@@ -517,7 +522,7 @@ impl Newport {
             .items_center()
             .gap(px(8.))
             .flex_shrink_0()
-            .when(data["kind"] == "text", |row| {
+            .when(kind == Some(files::PreviewKind::Text), |row| {
                 let wrap = self.file_preview_viewport.wrap;
                 row.child(
                     crate::controls::compact_button("text-copy")
@@ -535,9 +540,8 @@ impl Newport {
                                     return;
                                 }
                                 let content = this
-                                    .resources
-                                    .get("preview")
-                                    .and_then(|row| row.value["content"].as_str())
+                                    .file_preview_data()
+                                    .and_then(file_image::Prepared::text)
                                     .unwrap_or_default()
                                     .to_owned();
                                 cx.write_to_clipboard(ClipboardItem::new_string(content));

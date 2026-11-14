@@ -137,7 +137,7 @@ impl Fixture {
 }
 
 #[test]
-#[ignore = "Starts the real native executable; requires staged grammars and Windows PDFium"]
+#[ignore = "Starts the real native executable; requires staged grammars"]
 fn standalone_health_preserves_profile_and_releases_ownership() {
     let fixture = Fixture::new();
     let before = fixture.profiles();
@@ -165,7 +165,7 @@ fn standalone_health_preserves_profile_and_releases_ownership() {
 }
 
 #[test]
-#[ignore = "Starts the real native executable; requires staged grammars and Windows PDFium"]
+#[ignore = "Starts the real native executable; requires staged grammars"]
 fn standalone_upgrade_backs_up_the_profile_and_refuses_a_failed_backup() {
     let fixture = Fixture::new();
     let profiles = fixture.profiles();

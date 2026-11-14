@@ -8,6 +8,7 @@ use gpui_kit::component::{
     button::{ButtonCustomVariant, ButtonGroup},
     progress::Progress,
 };
+use newport_protocol::{desktop::metrics, monitor::metrics::Snapshot};
 
 #[derive(Default)]
 pub(super) struct OverviewState {
@@ -21,6 +22,10 @@ pub(super) struct OverviewState {
     pub(super) charts: std::cell::RefCell<Option<(String, std::rc::Rc<PreparedCharts>)>>,
     pub processes: std::collections::BTreeMap<String, overview_process::State>,
     pub interfaces: std::collections::BTreeMap<String, String>,
+    /// The latest reading; read it through [`Newport::overview_reading`].
+    pub(super) reading: Option<metrics::Reading>,
+    /// Recorded history; read it through [`Newport::overview_history`].
+    pub(super) history: Option<metrics::History>,
 }
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(default)]
@@ -91,20 +96,19 @@ struct Point {
     value: Option<f64>,
     gap: bool,
 }
-fn resource_reading(data: &Value, metric: usize) -> Option<f64> {
-    let finite = |value: &Value| value.as_f64().filter(|v| v.is_finite() && *v >= 0.);
+fn resource_reading(data: Option<&Snapshot>, metric: usize) -> Option<f64> {
+    let data = data?;
+    let finite = |value: f64| Some(value).filter(|v| v.is_finite() && *v >= 0.);
     match metric {
-        0 => finite(&data["cpu"]),
+        0 => finite(data.cpu),
         1 => {
-            let total = finite(&data["memoryTotal"])?;
-            (total > 0.)
-                .then(|| finite(&data["memoryUsed"]).map(|used| used / total * 100.))
-                .flatten()
+            let total = data.memory_total as f64;
+            (total > 0.).then(|| data.memory_used as f64 / total * 100.)
         }
         2 => {
-            let cores = finite(&data["cores"])?;
+            let cores = f64::from(data.cores);
             (cores > 0.)
-                .then(|| finite(&data["load"][0]).map(|load| load / cores * 100.))
+                .then(|| finite(data.load[0]).map(|load| load / cores * 100.))
                 .flatten()
         }
         _ => None,
@@ -127,20 +131,14 @@ fn resource_level(value: Option<f64>, metric: usize) -> Option<&'static str> {
         None
     }
 }
-fn card_level(data: &Value, metric: usize) -> Option<&'static str> {
+fn card_level(data: Option<&Snapshot>, metric: usize) -> Option<&'static str> {
     let direct = resource_level(resource_reading(data, metric), metric);
     if metric != 1 {
         return direct;
     }
-    let swap = data["swapTotal"]
-        .as_f64()
-        .filter(|total| *total > 0.)
-        .and_then(|total| {
-            data["swapUsed"]
-                .as_f64()
-                .filter(|used| *used >= 0.)
-                .map(|used| used / total * 100.)
-        });
+    let swap = data
+        .filter(|data| data.swap_total > 0)
+        .map(|data| data.swap_used as f64 / data.swap_total as f64 * 100.);
     let swap = resource_level(swap, 4);
     if direct == Some("Critical") || swap == Some("Critical") {
         Some("Critical")
@@ -178,38 +176,66 @@ fn interface_rank(name: &str) -> usize {
         0
     }
 }
-fn ordered_interfaces(mut interfaces: Vec<Value>) -> Vec<Value> {
-    interfaces.retain(|value| value["name"].as_str().is_some_and(|name| !name.is_empty()));
+/// Named interfaces, ordinary ones first and busiest first within a rank.
+/// `traffic` is an interface's bytes received and sent.
+fn ordered_interfaces<T>(
+    mut interfaces: Vec<T>,
+    name: impl Fn(&T) -> &str,
+    traffic: impl Fn(&T) -> f64,
+) -> Vec<T> {
+    interfaces.retain(|value| !name(value).is_empty());
     interfaces.sort_by(|a, b| {
-        let a_name = a["name"].as_str().unwrap();
-        let b_name = b["name"].as_str().unwrap();
+        let (a_name, b_name) = (name(a), name(b));
         interface_rank(a_name)
             .cmp(&interface_rank(b_name))
-            .then_with(|| {
-                (number(&b["received"]) + number(&b["sent"]))
-                    .total_cmp(&(number(&a["received"]) + number(&a["sent"])))
-            })
+            .then_with(|| traffic(b).total_cmp(&traffic(a)))
             .then_with(|| a_name.cmp(b_name))
     });
     interfaces
 }
-fn selected_interface<'a>(interfaces: &'a [Value], preferred: Option<&String>) -> &'a str {
+/// The interfaces the network chart can draw, by name: the latest history
+/// sample's, or the reading's before any history arrives.
+fn chart_interfaces<'a>(
+    history: &'a [metrics::Sample],
+    data: Option<&'a Snapshot>,
+) -> Vec<&'a str> {
+    match history.last() {
+        Some(sample) => ordered_interfaces(
+            sample.value.network().iter().collect(),
+            |row| row.name.as_str(),
+            |row| counter(row.received) + counter(row.sent),
+        )
+        .into_iter()
+        .map(|row| row.name.as_str())
+        .collect(),
+        None => ordered_interfaces(
+            data.map_or(&[][..], |data| &data.network).iter().collect(),
+            |row| row.name.as_str(),
+            |row| row.received as f64 + row.sent as f64,
+        )
+        .into_iter()
+        .map(|row| row.name.as_str())
+        .collect(),
+    }
+}
+fn selected_interface<'a>(interfaces: &[&'a str], preferred: Option<&String>) -> &'a str {
     interfaces
         .iter()
-        .find(|entry| entry["name"].as_str() == preferred.map(String::as_str))
+        .find(|name| Some(**name) == preferred.map(String::as_str))
         .or_else(|| interfaces.first())
-        .and_then(|entry| entry["name"].as_str())
+        .copied()
         .unwrap_or("")
 }
-fn number(v: &Value) -> f64 {
-    v.as_f64().filter(|v| v.is_finite()).unwrap_or(0.)
+/// A recorded counter, or zero when it wasn't recorded.
+fn counter(value: Option<u64>) -> f64 {
+    value.map_or(0., |value| value as f64)
 }
-fn ratio(used: &Value, total: &Value) -> f64 {
-    if number(total) > 0. {
-        number(used) / number(total) * 100.
-    } else {
-        0.
-    }
+/// A recorded measure, or zero when it wasn't recorded or isn't finite.
+fn number(value: Option<f64>) -> f64 {
+    value.filter(|v| v.is_finite()).unwrap_or(0.)
+}
+fn ratio(used: f64, total: f64) -> f64 {
+    if total > 0. { used / total * 100. } else { 0. }
 }
 fn rate(n: f64) -> String {
     if n >= 1048576. {
@@ -235,61 +261,66 @@ fn network_axis(value: f64, peak: f64) -> String {
         format!("{value:.0} {unit}")
     }
 }
-fn series(history: &[Value], metric: usize, interface: &str, outgoing: bool) -> Vec<Point> {
+fn series(
+    history: &[metrics::Sample],
+    metric: usize,
+    interface: &str,
+    outgoing: bool,
+) -> Vec<Point> {
+    let resolution =
+        |value: &metrics::SampleValue| value.resolution_ms().map_or(0., |ms| ms as f64);
+    // Chart and minute buckets carry rates; raw samples carry counters.
+    let carries_rates = |value: &metrics::SampleValue| {
+        matches!(value, metrics::SampleValue::Chart(_)) || value.resolution_ms() == Some(60_000)
+    };
     history
         .iter()
         .enumerate()
         .map(|(i, sample)| {
-            let data = &sample["data"];
+            let data = &sample.value;
+            let measures = data.measures();
             let previous = i.checked_sub(1).map(|j| &history[j]);
             let elapsed = previous
-                .map(|p| number(&sample["at"]) - number(&p["at"]))
+                .map(|p| sample.at as f64 - p.at as f64)
                 .unwrap_or(0.);
-            let gap = data["gap"] == true
+            let gap = data.gap()
                 || previous.is_some_and(|p| {
-                    p["data"]["gap"] == true
-                        || elapsed
-                            > 30000f64
-                                .max(number(&data["resolutionMs"]))
-                                .max(number(&p["data"]["resolutionMs"]))
+                    p.value.gap()
+                        || elapsed > 30000f64.max(resolution(data)).max(resolution(&p.value))
                 });
             let value = match metric {
-                0 => data["cpu"].as_f64(),
-                1 => (number(&data["memoryTotal"]) > 0.)
-                    .then(|| ratio(&data["memoryUsed"], &data["memoryTotal"])),
-                2 => data["load"][0].as_f64(),
+                0 => measures.cpu,
+                1 => (number(measures.memory_total) > 0.)
+                    .then(|| ratio(number(measures.memory_used), number(measures.memory_total))),
+                2 => measures.load_one,
                 _ => {
-                    let current = data["network"]
-                        .as_array()
-                        .and_then(|a| a.iter().find(|n| n["name"] == interface));
+                    let current = data.network().iter().find(|n| n.name == interface);
                     current.and_then(|n| {
-                        if data["historyBucket"] == true || number(&data["resolutionMs"]) == 60000.
-                        {
-                            return n[if outgoing { "tx" } else { "rx" }].as_f64();
+                        if carries_rates(data) {
+                            return if outgoing { n.tx } else { n.rx };
                         }
-                        let old = previous?.get("data")?;
+                        let old = &previous?.value;
                         if gap
                             || elapsed <= 0.
                             || elapsed > 30000.
-                            || old["historyBucket"] == true
-                            || number(&old["resolutionMs"]) == 60000.
-                            || number(&data["uptime"]) < number(&old["uptime"])
+                            || carries_rates(old)
+                            || number(data.uptime()) < number(old.uptime())
                         {
                             return None;
                         }
-                        let old = old["network"]
-                            .as_array()?
-                            .iter()
-                            .find(|n| n["name"] == interface)?;
-                        let key = if outgoing { "sent" } else { "received" };
-                        let delta = n[key].as_f64()? - old[key].as_f64()?;
+                        let old = old.network().iter().find(|n| n.name == interface)?;
+                        let delta = if outgoing {
+                            n.sent? as f64 - old.sent? as f64
+                        } else {
+                            n.received? as f64 - old.received? as f64
+                        };
                         (delta >= 0.).then_some(delta * 1000. / elapsed)
                     })
                 }
             }
             .filter(|v| v.is_finite());
             Point {
-                at: number(&sample["at"]),
+                at: sample.at as f64,
                 value,
                 gap,
             }
@@ -308,13 +339,13 @@ fn history_start(first: Option<f64>, end: f64, minutes: u64) -> f64 {
 
 fn history_points(
     points: &[Point],
-    history: &[Value],
+    history: &[metrics::Sample],
     domain: (f64, f64),
     minutes: u64,
 ) -> Vec<Point> {
     if history
         .iter()
-        .any(|sample| sample["data"]["historyBucket"] == true)
+        .any(|sample| matches!(sample.value, metrics::SampleValue::Chart(_)))
     {
         return chart_points(points, 400);
     }
@@ -335,10 +366,11 @@ fn history_points(
         let Some(value) = point.value.filter(|value| value.is_finite()) else {
             continue;
         };
-        let weight = sample["data"]["resolutionMs"]
-            .as_f64()
-            .filter(|weight| weight.is_finite() && *weight > 0.)
-            .unwrap_or(10_000.);
+        let weight = sample
+            .value
+            .resolution_ms()
+            .filter(|weight| *weight > 0)
+            .map_or(10_000., |weight| weight as f64);
         let index = (((point.at - domain.0) / interval).floor() as usize).min(count - 1);
         sums[index].0 += value * weight;
         sums[index].1 += weight;
@@ -580,6 +612,55 @@ fn step_sample(
     }
 }
 impl Newport {
+    /// The latest metrics reading, while its read is shown.
+    pub(super) fn overview_reading(&self) -> Option<&metrics::Reading> {
+        self.owned("overview", &self.overview_state.reading)
+    }
+    /// Recorded metrics history, oldest first, while its read is shown.
+    pub(super) fn overview_history(&self) -> &[metrics::Sample] {
+        self.owned("history", &self.overview_state.history)
+            .map_or(&[], |history| &history.samples)
+    }
+    /// Settles a metrics reading or history read.
+    pub(super) fn complete_metrics(
+        &mut self,
+        key: &str,
+        generation: u64,
+        result: Result<desktop::Reply, newport_client::request_error::RequestError>,
+    ) -> bool {
+        let reply = result.and_then(|reply| match reply {
+            desktop::Reply::Metrics(reply) => Ok(*reply),
+            _ => Err("The backend answered a metrics read with another reply.".into()),
+        });
+        match key {
+            "overview" => {
+                let reading = reply.and_then(|reply| match reply {
+                    metrics::Reply::Collect(reading) => Ok(*reading),
+                    _ => Err("The backend answered a metrics read with another reply.".into()),
+                });
+                let reading = reading.map(|reading| {
+                    let changed = self.overview_state.reading.as_ref() != Some(&reading);
+                    (reading, changed)
+                });
+                self.complete_owned(key, generation, reading, |this| {
+                    &mut this.overview_state.reading
+                })
+            }
+            _ => {
+                let history = reply.and_then(|reply| match reply {
+                    metrics::Reply::History(history) => Ok(*history),
+                    _ => Err("The backend answered a history read with another reply.".into()),
+                });
+                let history = history.map(|history| {
+                    let changed = self.overview_state.history.as_ref() != Some(&history);
+                    (history, changed)
+                });
+                self.complete_owned(key, generation, history, |this| {
+                    &mut this.overview_state.history
+                })
+            }
+        }
+    }
     fn inspectable_history(
         &self,
         drawing: (Series, Series),
@@ -592,10 +673,9 @@ impl Newport {
         let (points, second) = inspection;
         let metric = self.overview_state.prefs(&self.server).metric;
         let core_capacity = self
-            .resources
-            .get("page")
-            .and_then(|resource| resource.value["cores"].as_f64())
-            .filter(|cores| metric == 2 && cores.is_finite() && *cores > 0.);
+            .overview_reading()
+            .map(|reading| f64::from(reading.sample.cores))
+            .filter(|cores| metric == 2 && *cores > 0.);
         let selected = self
             .overview_state
             .inspection
@@ -850,11 +930,12 @@ impl Newport {
             .when_some(tooltip, |view, tip| view.child(tip))
             .into_any_element()
     }
-    fn overview_storage(&self, data: &Value, cx: &mut Context<Self>) -> AnyElement {
-        let mut disks = rows(&data["disks"]);
-        disks.sort_by(|a, b| {
-            ratio(&b["used"], &b["total"]).total_cmp(&ratio(&a["used"], &a["total"]))
-        });
+    fn overview_storage(&self, data: Option<&Snapshot>, cx: &mut Context<Self>) -> AnyElement {
+        let usage = |disk: &newport_protocol::monitor::metrics::Disk| {
+            ratio(disk.used as f64, disk.total as f64)
+        };
+        let mut disks: Vec<_> = data.map_or(&[][..], |data| &data.disks).iter().collect();
+        disks.sort_by(|a, b| usage(b).total_cmp(&usage(a)));
         div()
             .mt(px(24.))
             .flex()
@@ -871,9 +952,8 @@ impl Newport {
                     .gap_x(px(28.))
                     .gap_y(px(12.))
                     .children(disks.into_iter().enumerate().map(|(index, disk)| {
-                        let used = ratio(&disk["used"], &disk["total"]);
-                        let known = disk["total"].as_f64().is_some_and(|total| total > 0.)
-                            && disk["used"].is_number();
+                        let used = usage(disk);
+                        let known = disk.total > 0;
                         let color = if used >= 95. {
                             theme::error(cx.theme().is_dark())
                         } else if used >= 85. {
@@ -881,7 +961,7 @@ impl Newport {
                         } else {
                             crate::theme::chart_primary(cx.theme().is_dark())
                         };
-                        let mount = text(&disk, "mount");
+                        let mount = disk.mount.clone();
                         div()
                             .min_w_0()
                             .flex()
@@ -906,8 +986,8 @@ impl Newport {
                                         label(if known {
                                             format!(
                                                 "{used:.0}% · {} free of {}",
-                                                bytes(&disk["available"]),
-                                                bytes(&disk["total"])
+                                                byte_size(disk.available as f64),
+                                                byte_size(disk.total as f64)
                                             )
                                         } else {
                                             "Usage unavailable".into()
@@ -939,19 +1019,28 @@ impl Newport {
             )
             .into_any_element()
     }
-    fn overview_network_totals(&self, data: &Value, cx: &mut Context<Self>) -> AnyElement {
-        let interfaces = ordered_interfaces(rows(&data["network"]));
+    fn overview_network_totals(
+        &self,
+        data: Option<&Snapshot>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let interfaces = ordered_interfaces(
+            data.map_or(&[][..], |data| &data.network).iter().collect(),
+            |n| n.name.as_str(),
+            |n| n.received as f64 + n.sent as f64,
+        );
         let (primary, folded): (Vec<_>, Vec<_>) = interfaces
             .iter()
-            .partition(|n| interface_rank(&text(n, "name")) < 2);
+            .copied()
+            .partition(|n| interface_rank(&n.name) < 2);
         let open = self.overview_state.prefs(&self.server).virtual_open;
-        let total = |key: &str| {
-            bytes(&json!(
+        let total = |count: fn(&newport_protocol::monitor::metrics::Network) -> u64| {
+            byte_size(
                 folded
                     .iter()
-                    .map(|n| n[key].as_u64().unwrap_or(0))
-                    .fold(0u64, u64::saturating_add)
-            ))
+                    .map(|n| count(n))
+                    .fold(0u64, u64::saturating_add) as f64,
+            )
         };
         let counter = |value: String| div().w(px(120.)).flex_shrink_0().text_right().child(value);
         div()
@@ -994,9 +1083,9 @@ impl Newport {
                     .py_2()
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    .child(div().flex_1().min_w_0().truncate().child(text(n, "name")))
-                    .child(counter(bytes(&n["received"])))
-                    .child(counter(bytes(&n["sent"])))
+                    .child(div().flex_1().min_w_0().truncate().child(n.name.clone()))
+                    .child(counter(byte_size(n.received as f64)))
+                    .child(counter(byte_size(n.sent as f64)))
             }))
             .when(!folded.is_empty(), |v| {
                 v.child(
@@ -1027,8 +1116,8 @@ impl Newport {
                                     })),
                             ),
                         )
-                        .child(counter(total("received")))
-                        .child(counter(total("sent"))),
+                        .child(counter(total(|n| n.received)))
+                        .child(counter(total(|n| n.sent))),
                 )
             })
             .when(open, |v| {
@@ -1051,9 +1140,9 @@ impl Newport {
                                 .border_b_1()
                                 .border_color(cx.theme().border)
                                 .text_size(px(crate::ui::FONT_SIZE))
-                                .child(div().flex_1().min_w_0().truncate().child(text(n, "name")))
-                                .child(label(format!("↓ {}", bytes(&n["received"]))))
-                                .child(label(format!("↑ {}", bytes(&n["sent"]))))
+                                .child(div().flex_1().min_w_0().truncate().child(n.name.clone()))
+                                .child(label(format!("↓ {}", byte_size(n.received as f64))))
+                                .child(label(format!("↑ {}", byte_size(n.sent as f64))))
                         })),
                 )
             })
@@ -1066,16 +1155,13 @@ impl Newport {
         if self.needle_missing() {
             return self.needle_required("Monitoring", cx);
         }
-        let data = self
-            .resources
-            .get("page")
-            .map(|resource| &resource.value)
-            .unwrap_or(&Value::Null);
+        let reading = self.overview_reading();
+        let data = reading.map(|reading| &reading.sample);
         let collection_error = self
             .resources
-            .get("page")
+            .get("overview")
             .and_then(|r| r.error.as_deref())
-            .or_else(|| data["collectionError"].as_str())
+            .or_else(|| reading.and_then(|reading| reading.collection_error.as_deref()))
             .filter(|error| !error.is_empty());
         // While the connection is down its failures are expected.
         let offline = self.connection_down(cx);
@@ -1083,8 +1169,8 @@ impl Newport {
             offline.is_none()
                 && *error != "Waiting for the background sampler’s first reading. Refresh shortly."
         });
-        let history_error = data["historyError"]
-            .as_str()
+        let history_error = reading
+            .and_then(|reading| reading.history_error.as_deref())
             .filter(|error| !error.is_empty())
             .or_else(|| {
                 self.resources
@@ -1093,32 +1179,22 @@ impl Newport {
             })
             .filter(|_| offline.is_none());
         let offline = offline
-            .filter(|_| data.is_object())
+            .filter(|_| data.is_some())
             .map(crate::connection_wait::last_reading);
-        let history = self
-            .resources
-            .get("history")
-            .and_then(|r| r.value.as_array())
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let end = history.last().map(|p| number(&p["at"])).unwrap_or(0.);
+        let history = self.overview_history();
+        let end = history.last().map(|p| p.at as f64).unwrap_or(0.);
         let minutes = self.overview_state.prefs(&self.server).minutes;
         let domain = (
-            history_start(history.first().and_then(|p| p["at"].as_f64()), end, minutes),
+            history_start(history.first().map(|p| p.at as f64), end, minutes),
             end,
         );
-        let network = history
-            .last()
-            .map(|sample| &sample["data"]["network"])
-            .filter(|network| network.is_array())
-            .unwrap_or(&data["network"]);
-        let interfaces = ordered_interfaces(rows(network));
+        let interfaces = chart_interfaces(history, data);
         let interface = selected_interface(
             &interfaces,
             self.overview_state.interfaces.get(&self.server),
         );
-        let cores = number(&data["cores"]);
-        let load = number(&data["load"][0]);
+        let cores = data.map_or(0., |data| f64::from(data.cores));
+        let load = number(data.map(|data| data.load[0]));
         let revision = self
             .resources
             .get("history")
@@ -1190,16 +1266,16 @@ impl Newport {
             latest(&plots[3]),
         ];
         let contexts = [
-            if data["cores"].as_u64().is_some_and(|v| v > 0) {
+            if data.is_some_and(|data| data.cores > 0) {
                 format!("{cores:.0} cores")
             } else {
                 "Core count unavailable".into()
             },
-            if readings[1].is_some() {
+            if let Some(data) = data.filter(|_| readings[1].is_some()) {
                 format!(
                     "{} of {}",
-                    bytes(&data["memoryUsed"]),
-                    bytes(&data["memoryTotal"])
+                    byte_size(data.memory_used as f64),
+                    byte_size(data.memory_total as f64)
                 )
             } else {
                 "Memory unavailable".into()
@@ -1244,8 +1320,10 @@ impl Newport {
 
         let cpus = self.overview_state.cores.get(
             &self.server,
-            self.resources.get("page").map_or(0, |r| r.data_revision),
-            &data["cpus"],
+            self.resources
+                .get("overview")
+                .map_or(0, |r| r.data_revision),
+            data.map_or(&[], |data| &data.cpus),
         );
         let grid_width = (self.content_width - crate::controls::PAGE_PADDING * 2. - 30.).max(112.);
         let min_width = if cpus.len() > 32 { 76. } else { 112. };
@@ -1313,7 +1391,7 @@ impl Newport {
                         .mb_2()
                         .child(format!(
                             "{error}{}",
-                            if data.is_object() {
+                            if data.is_some() {
                                 " Showing the last available reading."
                             } else {
                                 ""
@@ -1339,29 +1417,22 @@ impl Newport {
                     .gap(px(10.))
                     .children((0..4).map(|index| {
                         let level = card_level(data, index);
-                        let hint = if index == 1
-                            && data["swapTotal"].as_f64().is_some_and(|total| total > 0.)
-                        {
-                            Some(format!(
+                        let hint = data.and_then(|data| match index {
+                            1 if data.swap_total > 0 => Some(format!(
                                 "Swap {} of {}",
-                                bytes(&data["swapUsed"]),
-                                bytes(&data["swapTotal"])
-                            ))
-                        } else if index == 2 && data["load"].is_array() {
-                            Some(format!(
+                                byte_size(data.swap_used as f64),
+                                byte_size(data.swap_total as f64)
+                            )),
+                            2 => Some(format!(
                                 "Load average {} over 1 / 5 / 15 minutes",
-                                rows(&data["load"])
+                                data.load
                                     .iter()
-                                    .map(|v| v
-                                        .as_f64()
-                                        .map(|v| format!("{v:.2}"))
-                                        .unwrap_or_else(|| "—".into()))
+                                    .map(|v| format!("{v:.2}"))
                                     .collect::<Vec<_>>()
                                     .join(" / ")
-                            ))
-                        } else {
-                            None
-                        };
+                            )),
+                            _ => None,
+                        });
                         let accent = crate::theme::chart_primary(cx.theme().is_dark());
                         div()
                             .min_w_0()
@@ -1571,7 +1642,7 @@ impl Newport {
                             .when(metric == 3 && interfaces.len() > 1, |view| {
                                 let names = interfaces
                                     .iter()
-                                    .map(|entry| text(entry, "name"))
+                                    .map(|name| (*name).to_owned())
                                     .collect::<Vec<_>>();
                                 let server = self.server.clone();
                                 let weak = cx.entity().downgrade();
@@ -1786,6 +1857,62 @@ impl Newport {
     }
 }
 
+/// A reading of `sample` with no collection or history errors.
+#[cfg(test)]
+pub(crate) fn reading(sample: Snapshot) -> metrics::Reading {
+    metrics::Reading {
+        sample,
+        sampled_at: None,
+        collection_error: None,
+        history_error: None,
+    }
+}
+/// A raw history sample at `at` with only its CPU recorded.
+#[cfg(test)]
+pub(crate) fn cpu_sample(at: i64, cpu: f64) -> metrics::Sample {
+    metrics::Sample {
+        at,
+        value: metrics::SampleValue::Raw(Box::new(metrics::HistoricalRaw {
+            measures: metrics::NumericMeasures {
+                cpu: Some(cpu),
+                memory_used: None,
+                memory_total: None,
+                swap_used: None,
+                swap_total: None,
+                load_one: None,
+                load_five: None,
+                load_fifteen: None,
+            },
+            uptime: None,
+            network: Vec::new(),
+            disks: None,
+        })),
+    }
+}
+#[cfg(test)]
+impl Newport {
+    /// Settles a metrics read with `reply`, as the backend answers it.
+    pub(crate) fn put_metrics(&mut self, reply: metrics::Reply) {
+        let key = match reply {
+            metrics::Reply::Collect(_) => "overview",
+            _ => "history",
+        };
+        let generation = self.resources.begin_refresh(key, false).unwrap();
+        assert!(self.complete_metrics(
+            key,
+            generation,
+            Ok(desktop::Reply::Metrics(Box::new(reply)))
+        ));
+    }
+    pub(crate) fn put_reading(&mut self, sample: Snapshot) {
+        self.put_metrics(metrics::Reply::Collect(Box::new(reading(sample))));
+    }
+    pub(crate) fn put_history(&mut self, samples: Vec<metrics::Sample>) {
+        self.put_metrics(metrics::Reply::History(Box::new(metrics::History {
+            samples,
+        })));
+    }
+}
 #[cfg(test)]
 #[path = "overview_offline_tests.rs"]
 mod offline_tests;
@@ -1796,7 +1923,77 @@ mod tests {
         ordered_interfaces, pixel_envelope, resource_level, resource_reading, selected_interface,
         series, step_sample,
     };
-    use serde_json::{Value, json};
+    use newport_protocol::{
+        desktop::metrics::{
+            ChartBucket, HistoricalRaw, MinuteRollup, NetworkHistory, NumericMeasures, Sample,
+            SampleValue,
+        },
+        monitor::metrics::Snapshot,
+    };
+
+    fn measures(cpu: Option<f64>) -> NumericMeasures {
+        NumericMeasures {
+            cpu,
+            memory_used: Some(25.),
+            memory_total: Some(100.),
+            swap_used: None,
+            swap_total: None,
+            load_one: Some(2.),
+            load_five: None,
+            load_fifteen: None,
+        }
+    }
+    fn interface(name: &str, received: u64, sent: u64) -> NetworkHistory {
+        NetworkHistory {
+            name: name.into(),
+            received: Some(received),
+            sent: Some(sent),
+            rx: None,
+            tx: None,
+            rx_peak: None,
+            tx_peak: None,
+        }
+    }
+    fn raw(
+        at: i64,
+        measures: NumericMeasures,
+        uptime: f64,
+        network: Vec<NetworkHistory>,
+    ) -> Sample {
+        Sample {
+            at,
+            value: SampleValue::Raw(Box::new(HistoricalRaw {
+                measures,
+                uptime: Some(uptime),
+                network,
+                disks: None,
+            })),
+        }
+    }
+    /// A summarized bucket whose eth0 interface carries `rx` bytes a second.
+    fn bucket(resolution_ms: u64, gap: bool, rx: f64) -> ChartBucket {
+        ChartBucket {
+            resolution_ms,
+            sample_count: 1,
+            gap,
+            means: measures(Some(12.)),
+            peaks: measures(Some(12.)),
+            network: vec![NetworkHistory {
+                rx: Some(rx),
+                ..interface("eth0", 0, 0)
+            }],
+        }
+    }
+    fn minute(at: i64, summary: ChartBucket) -> Sample {
+        Sample {
+            at,
+            value: SampleValue::Minute(Box::new(MinuteRollup {
+                summary,
+                uptime: None,
+                disks: None,
+            })),
+        }
+    }
     #[test]
     fn dashed_graph_keeps_phase_around_corners_and_skips_repeated_points() {
         use crate::gpui::{point, px};
@@ -1907,14 +2104,23 @@ mod tests {
     #[ignore = "manual chart preparation benchmark; excludes GPUI layout and paint"]
     fn benchmark_overview_history_render_work() {
         use std::{hint::black_box, time::Instant};
-        let history: Vec<Value> = (0..3600).map(|i| json!({
-            "at": i * 10_000, "data": {
-                "cpu": 17, "memoryUsed": 20, "memoryTotal": 100,
-                "load": [1.2], "uptime": i * 10,
-                "network": (0..40).map(|n| json!({"name": format!("eth{n}"), "received": i * 1000, "sent": i * 500})).collect::<Vec<_>>()
-            }
-        })).collect();
-        let prepare = |history: &[Value]| {
+        let history: Vec<Sample> = (0..3600)
+            .map(|i: u64| {
+                raw(
+                    i as i64 * 10_000,
+                    NumericMeasures {
+                        memory_used: Some(20.),
+                        load_one: Some(1.2),
+                        ..measures(Some(17.))
+                    },
+                    i as f64 * 10.,
+                    (0..40)
+                        .map(|n| interface(&format!("eth{n}"), i * 1000, i * 500))
+                        .collect(),
+                )
+            })
+            .collect();
+        let prepare = |history: &[Sample]| {
             let plots: Vec<_> = (0..4)
                 .map(|metric| series(history, metric, "eth0", false))
                 .collect();
@@ -1976,9 +2182,9 @@ mod tests {
             },
         ];
         let history = vec![
-            json!({"data":{"resolutionMs":10000}}),
-            json!({"data":{"resolutionMs":60000}}),
-            json!({"data":{}}),
+            minute(0, bucket(10_000, false, 0.)),
+            minute(10_000, bucket(60_000, false, 0.)),
+            raw(3_600_000, measures(None), 0., Vec::new()),
         ];
         let week = history_points(&points, &history, (0., 604_800_000.), 10080);
         assert_eq!(week.len(), 336);
@@ -1997,39 +2203,52 @@ mod tests {
     }
     #[test]
     fn memory_card_includes_swap_pressure_without_flagging_absent_swap() {
-        let mut data = json!({"memoryUsed":20,"memoryTotal":100,"swapUsed":49,"swapTotal":100});
-        assert_eq!(card_level(&data, 1), None);
-        data["swapUsed"] = json!(50);
-        assert_eq!(card_level(&data, 1), Some("High"));
-        data["swapUsed"] = json!(90);
-        assert_eq!(card_level(&data, 1), Some("Critical"));
-        data["swapTotal"] = json!(0);
-        assert_eq!(card_level(&data, 1), None);
-        data["memoryUsed"] = json!(96);
-        assert_eq!(card_level(&data, 1), Some("Critical"));
-        assert_eq!(card_level(&json!({}), 1), None);
+        let mut data = Snapshot {
+            memory_used: 20,
+            memory_total: 100,
+            swap_used: 49,
+            swap_total: 100,
+            ..Default::default()
+        };
+        assert_eq!(card_level(Some(&data), 1), None);
+        data.swap_used = 50;
+        assert_eq!(card_level(Some(&data), 1), Some("High"));
+        data.swap_used = 90;
+        assert_eq!(card_level(Some(&data), 1), Some("Critical"));
+        data.swap_total = 0;
+        assert_eq!(card_level(Some(&data), 1), None);
+        data.memory_used = 96;
+        assert_eq!(card_level(Some(&data), 1), Some("Critical"));
+        assert_eq!(card_level(None, 1), None);
     }
     #[test]
     fn resource_health_distinguishes_zero_from_unavailable_and_normalizes_load() {
+        let reading = |data: Snapshot, metric| resource_reading(Some(&data), metric);
         for metric in 0..3 {
-            assert_eq!(resource_reading(&json!({}), metric), None);
+            assert_eq!(resource_reading(None, metric), None);
         }
-        assert_eq!(resource_reading(&json!({"cpu":0}), 0), Some(0.));
-        assert_eq!(resource_reading(&json!({"cpu":-1}), 0), None);
-        assert_eq!(
-            resource_reading(&json!({"memoryUsed":0,"memoryTotal":100}), 1),
-            Some(0.)
-        );
-        assert_eq!(
-            resource_reading(&json!({"memoryUsed":20,"memoryTotal":0}), 1),
-            None
-        );
-        assert_eq!(resource_reading(&json!({"memoryTotal":100}), 1), None);
-        assert_eq!(
-            resource_reading(&json!({"cores":32,"load":[8]}), 2),
-            Some(25.)
-        );
-        assert_eq!(resource_reading(&json!({"cores":32}), 2), None);
+        assert_eq!(reading(Snapshot::default(), 0), Some(0.));
+        let cpu = |cpu| Snapshot {
+            cpu,
+            ..Default::default()
+        };
+        assert_eq!(reading(cpu(-1.), 0), None);
+        assert_eq!(reading(cpu(f64::NAN), 0), None);
+        let memory = |memory_used, memory_total| Snapshot {
+            memory_used,
+            memory_total,
+            ..Default::default()
+        };
+        assert_eq!(reading(memory(0, 100), 1), Some(0.));
+        assert_eq!(reading(memory(20, 0), 1), None);
+        let load = |cores, load| Snapshot {
+            cores,
+            load: [load, 0., 0.],
+            ..Default::default()
+        };
+        assert_eq!(reading(load(32, 8.), 2), Some(25.));
+        assert_eq!(reading(load(32, f64::NAN), 2), None);
+        assert_eq!(reading(load(0, 8.), 2), None);
         assert_eq!(resource_level(None, 0), None);
         assert_eq!(resource_level(Some(79.9), 0), None);
         assert_eq!(resource_level(Some(80.), 0), Some("High"));
@@ -2161,20 +2380,22 @@ mod tests {
     }
     #[test]
     fn interface_choice_prioritizes_uplinks_and_preserves_explicit_virtual_choice() {
-        let interfaces = ordered_interfaces(vec![
-            json!({"name":"lo","received":9000}),
-            json!({"name":"wg0","received":8000}),
-            json!({"name":"eth1","received":20}),
-            json!({"name":"eth0","received":100}),
-            json!({"name":"cilium0","received":7000}),
-        ]);
-        assert_eq!(
-            interfaces
-                .iter()
-                .map(|v| v["name"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            vec!["eth0", "eth1", "wg0", "lo", "cilium0"]
-        );
+        let interfaces: Vec<&str> = ordered_interfaces(
+            vec![
+                ("lo", 9000.),
+                ("wg0", 8000.),
+                ("", 1e9),
+                ("eth1", 20.),
+                ("eth0", 100.),
+                ("cilium0", 7000.),
+            ],
+            |(name, _)| name,
+            |(_, traffic)| *traffic,
+        )
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+        assert_eq!(interfaces, vec!["eth0", "eth1", "wg0", "lo", "cilium0"]);
         assert_eq!(selected_interface(&interfaces, None), "eth0");
         assert_eq!(selected_interface(&interfaces, Some(&"lo".into())), "lo");
         assert_eq!(
@@ -2183,8 +2404,13 @@ mod tests {
         );
         assert_eq!(selected_interface(&[], Some(&"eth0".into())), "");
     }
-    fn sample(at: u64, received: u64, uptime: u64) -> Value {
-        json!({"at": at, "data": {"cpu":12,"memoryUsed":25,"memoryTotal":100,"load":[2.],"uptime":uptime,"network":[{"name":"eth0","received":received,"sent":0}]}})
+    fn sample(at: i64, received: u64, uptime: u64) -> Sample {
+        raw(
+            at,
+            measures(Some(12.)),
+            uptime as f64,
+            vec![interface("eth0", received, 0)],
+        )
     }
     #[test]
     fn rate_requires_continuous_samples_without_counter_reset_or_reboot() {
@@ -2204,24 +2430,19 @@ mod tests {
     }
     #[test]
     fn summarized_rates_and_resolution_do_not_create_false_gaps() {
-        let mut a = sample(60000, 100, 60);
-        let mut b = sample(120000, 200, 120);
-        for row in [&mut a, &mut b] {
-            row["data"]["resolutionMs"] = json!(60000);
-            row["data"]["network"][0]["rx"] = json!(3.);
-        }
+        let a = minute(60000, bucket(60000, false, 3.));
+        let b = minute(120000, bucket(60000, false, 3.));
         let result = series(&[a, b], 3, "eth0", false);
         assert_eq!(result[1].value, Some(3.));
         assert!(!result[1].gap);
     }
     #[test]
     fn chart_buckets_use_explicit_rates_and_keep_the_live_tail() {
-        let mut bucket = sample(1_800_000, 100, 1800);
-        bucket["data"]["historyBucket"] = json!(true);
-        bucket["data"]["resolutionMs"] = json!(1_800_000);
-        bucket["data"]["network"][0]["rx"] = json!(40.);
         let history = vec![
-            bucket,
+            Sample {
+                at: 1_800_000,
+                value: SampleValue::Chart(Box::new(bucket(1_800_000, false, 40.))),
+            },
             sample(1_803_000, 200, 1803),
             sample(1_806_000, 260, 1806),
         ];
@@ -2237,10 +2458,8 @@ mod tests {
 
     #[test]
     fn missing_values_and_explicit_gaps_are_preserved() {
-        let mut a = sample(10000, 100, 10);
-        a["data"]["gap"] = json!(true);
-        let mut b = sample(20000, 200, 20);
-        b["data"]["cpu"] = Value::Null;
+        let a = minute(10000, bucket(60000, true, 0.));
+        let b = raw(20000, measures(None), 20., vec![interface("eth0", 200, 0)]);
         let result = series(&[a, b], 0, "eth0", false);
         assert!(result[0].gap && result[1].gap);
         assert_eq!(result[1].value, None);

@@ -11,20 +11,22 @@ use std::{
 };
 
 pub(super) const SERVER: &str = "12345678-1234-4234-8234-123456789abc";
-pub(super) fn connection() -> Value {
-    json!([
-        SERVER,
-        "original.example",
-        "alice",
-        22,
-        "publicKey",
-        null,
-        null,
-        null,
-        null,
-        1,
-        "00000000-0000-0000-0000-000000000002"
-    ])
+pub(super) fn connection() -> configuration::ConnectionScope {
+    configuration::ConnectionScope {
+        settings: configuration::ConnectionSettings {
+            server_id: uuid::Uuid::parse_str(SERVER).unwrap(),
+            ssh_host: "original.example".into(),
+            ssh_user: "alice".into(),
+            ssh_port: 22,
+            auth_method: configuration::AuthMethod::PublicKey,
+            identity_file: None,
+            agent_source: None,
+            agent_key_fingerprint: None,
+            proxy: None,
+        },
+        connection_revision: 1,
+        backend_instance: uuid::Uuid::from_u128(2),
+    }
 }
 pub(super) struct Observation {
     pub method: String,
@@ -153,7 +155,8 @@ fn failure(message: String) -> desktop::Outcome {
         detail: None,
     }))
 }
-fn scope(v: &configuration::ConnectionScope) -> Value {
+/// A request's connection scope, as observations show it.
+pub(super) fn scope(v: &configuration::ConnectionScope) -> Value {
     let proxy = v.settings.proxy.as_ref().map(|v| match v {
         configuration::Proxy::Command(v) => json!({"command":v}),
         configuration::Proxy::Jump(v) => json!({"jump":v}),

@@ -1,6 +1,7 @@
 //! Bound repeated metadata and reject duplicate known fields before prost.
 use super::*;
 #[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug))]
 enum Shape {
     Empty,
     Hello,
@@ -17,16 +18,21 @@ enum Kind {
     Formats,
     Boolean,
 }
-fn scan(mut body: &[u8], shape: Shape) -> Result<(), Error> {
+/// The fields `shape` knows, and how it reads them.
+fn known(shape: Shape) -> &'static [(u32, Kind)] {
     use Kind::*;
-    let fields: &[(u32, Kind)] = match shape {
+    match shape {
         Shape::Empty => &[],
         Shape::Hello => &[(1, Unsigned)],
         Shape::Read => &[(1, Integer), (2, Bytes)],
         Shape::Offer => &[(1, Integer), (2, Formats)],
         Shape::Chunk => &[(1, Bytes), (2, Boolean)],
         Shape::Error => &[(1, Bytes), (2, Bytes), (3, Unsigned)],
-    };
+    }
+}
+fn scan(mut body: &[u8], shape: Shape) -> Result<(), Error> {
+    use Kind::*;
+    let fields = known(shape);
     let mut seen = 0u8;
     let mut formats = 0;
     while !body.is_empty() {
@@ -69,22 +75,62 @@ fn scan(mut body: &[u8], shape: Shape) -> Result<(), Error> {
     }
     Ok(())
 }
-pub(super) fn request(body: &[u8]) -> Result<(), Error> {
-    let field = fields::single(body)?;
-    match field.number {
-        1 => scan(field.bytes()?, Shape::Empty),
-        2 => scan(field.bytes()?, Shape::Read),
-        _ => Err(Invalid("request operation").into()),
-    }
+fn request_shape(number: u32) -> Option<Shape> {
+    Some(match number {
+        1 => Shape::Empty,
+        2 => Shape::Read,
+        _ => return None,
+    })
 }
-pub(super) fn response(body: &[u8]) -> Result<(), Error> {
-    let field = fields::single(body)?;
-    let shape = match field.number {
+fn response_shape(number: u32) -> Option<Shape> {
+    Some(match number {
         1 => Shape::Hello,
         2 => Shape::Offer,
         3 => Shape::Chunk,
         4 => Shape::Error,
-        _ => return Err(Invalid("response operation").into()),
-    };
+        _ => return None,
+    })
+}
+pub(super) fn request(body: &[u8]) -> Result<(), Error> {
+    let field = fields::single(body)?;
+    let shape = request_shape(field.number).ok_or(Invalid("request operation"))?;
     scan(field.bytes()?, shape)
+}
+pub(super) fn response(body: &[u8]) -> Result<(), Error> {
+    let field = fields::single(body)?;
+    let shape = response_shape(field.number).ok_or(Invalid("response operation"))?;
+    scan(field.bytes()?, shape)
+}
+
+#[cfg(test)]
+pub(crate) fn tables() -> Vec<(Table, &'static str)> {
+    let shape = |number| request_shape(number).map(table);
+    let request = Table::dispatch("clipboard source request", shape);
+    let shape = |number| response_shape(number).map(table);
+    let response = Table::dispatch("clipboard source response", shape);
+    vec![
+        (request, "newport.clipboard.source.ClientFrame"),
+        (response, "newport.clipboard.source.ServerFrame"),
+    ]
+}
+
+#[cfg(test)]
+use crate::desktop::wire::wire_tables::{Row, Table, Wire};
+
+#[cfg(test)]
+fn table(shape: Shape) -> Table {
+    Table::new(format!("clipboard source {shape:?}"), move || {
+        known(shape)
+            .iter()
+            .map(|&(number, kind)| {
+                let wire = match kind {
+                    Kind::Integer => Wire::Varint,
+                    Kind::Unsigned => Wire::Varint32,
+                    Kind::Bytes | Kind::Formats => Wire::Len,
+                    Kind::Boolean => Wire::Bool,
+                };
+                Row::new(number, wire).repeated(matches!(kind, Kind::Formats))
+            })
+            .collect()
+    })
 }

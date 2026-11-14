@@ -1,33 +1,8 @@
 //! Plain data for the Remote apps page and its session engine.
-pub use newport_domain::requirements::{Finding, Gap, Host, Remedy, Requirement};
+pub use newport_domain::requirements::Remedy;
 pub use newport_domain::server_os::ServerOs;
+pub use newport_protocol::desktop::applications::{Elevation, Finding, Gap, Host, Requirement};
 use std::sync::Arc;
-
-/// Remote apps' rendered cache, after the typed desktop reply is projected for
-/// the UI. This presentation model is never serialized or sent over IPC.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Display {
-    pub shown_on: Option<ShownOn>,
-    pub applications: Vec<Shown>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Shown {
-    pub app_id: String,
-    // Tiles only need the identity, but retain checked count decoding so a
-    // malformed cached reading cannot silently become a valid display.
-    #[serde(rename = "windows")]
-    _windows: u32,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ShownOn {
-    pub computer: Option<String>,
-    pub session: Option<String>,
-}
 
 /// Whether a server can run remote apps yet.
 #[derive(Clone, Debug, PartialEq)]
@@ -218,40 +193,5 @@ impl SessionState {
     /// Running or starting here, where Quit reaches it.
     pub fn is_active(&self) -> bool {
         !matches!(self, Self::Ended { .. } | Self::ShownElsewhere { .. })
-    }
-}
-
-#[cfg(test)]
-mod display_tests {
-    use super::Display;
-    use serde_json::json;
-
-    #[test]
-    fn projected_display_preserves_unknown_computer_and_exact_session() {
-        let display: Display = serde_json::from_value(json!({
-            "shownOn": {"computer": null, "session": "session-1"},
-            "applications": [{"appId": "editor.desktop", "windows": 2}]
-        }))
-        .unwrap();
-        let shown = display.shown_on.unwrap();
-        assert_eq!(shown.computer, None);
-        assert_eq!(shown.session.as_deref(), Some("session-1"));
-        assert_eq!(display.applications[0].app_id, "editor.desktop");
-    }
-
-    #[test]
-    fn malformed_display_count_or_identity_is_not_rendered() {
-        for application in [
-            json!({"appId": "editor.desktop", "windows": -1}),
-            json!({"appId": "editor.desktop", "windows": u64::from(u32::MAX) + 1}),
-            json!({"appId": 7, "windows": 1}),
-        ] {
-            assert!(
-                serde_json::from_value::<Display>(
-                    json!({"shownOn": null, "applications": [application]})
-                )
-                .is_err()
-            );
-        }
     }
 }

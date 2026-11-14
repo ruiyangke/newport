@@ -3,6 +3,7 @@
 //! and plugged into each editor's LSP hooks. gpui-kit counts columns in
 //! characters; positions convert to the server's encoding at this boundary.
 use super::*;
+use serde_json::{Value, json};
 #[path = "project_editor_lsp_completion.rs"]
 mod completion;
 #[path = "project_editor_lsp_edits.rs"]
@@ -16,6 +17,7 @@ use gpui_kit::component::input::{
     CompletionProvider, DefinitionProvider, HoverProvider, Rope, RopeExt, ShowDocumentHandler,
 };
 use newport_client::lsp::{Connection, Event, Open};
+use newport_protocol::lsp as worker;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -213,38 +215,43 @@ impl Status {
         )
     }
 
-    /// The status a worker notification reports, if it changes one.
-    fn from_worker(method: &str, params: &Value, current: &Status) -> Option<Status> {
-        let path = || params["path"].as_str().unwrap_or(".envrc").to_owned();
-        match (method, params["state"].as_str()?) {
-            ("$/newport/environment", "loading") => Some(Self::LoadingEnvironment),
-            ("$/newport/environment", "blocked") => Some(Self::EnvrcBlocked {
-                path: path(),
+    /// The status the worker's environment state shows.
+    fn from_environment(state: &worker::Environment) -> Status {
+        use worker::Environment as E;
+        match state {
+            E::NoEnvrc | E::Skipped { .. } | E::Loaded { .. } => Self::Starting,
+            E::Loading { .. } => Self::LoadingEnvironment,
+            E::Blocked { path } => Self::EnvrcBlocked {
+                path: path.clone(),
                 denied: false,
-            }),
-            ("$/newport/environment", "denied") => Some(Self::EnvrcBlocked {
-                path: path(),
+            },
+            E::Denied { path } => Self::EnvrcBlocked {
+                path: path.clone(),
                 denied: true,
-            }),
-            ("$/newport/environment", "unavailable") => Some(Self::DirenvMissing { path: path() }),
-            ("$/newport/environment", "failed") => Some(Self::EnvironmentFailed(
-                params["message"]
-                    .as_str()
-                    .unwrap_or("direnv couldn't load the .envrc.")
-                    .to_owned(),
-            )),
-            ("$/newport/environment", "changed") => Some(Self::EnvironmentChanged),
-            ("$/newport/environment", _) => Some(Self::Starting),
-            ("$/newport/server", "missing") => Some(Self::NotInstalled),
-            ("$/newport/server", "exited") if !current.explains_stop() => {
-                let stderr = params["stderr"].as_str().unwrap_or_default().trim();
-                let error = params["error"].as_str().map(str::to_owned).or_else(|| {
-                    let last = stderr.lines().last()?;
+            },
+            E::Unavailable { path } => Self::DirenvMissing { path: path.clone() },
+            E::Failed { message, .. } => Self::EnvironmentFailed(
+                message
+                    .clone()
+                    .unwrap_or_else(|| "direnv couldn't load the .envrc.".to_owned()),
+            ),
+            E::Changed => Self::EnvironmentChanged,
+        }
+    }
+
+    /// The status the worker's server state shows, if it changes one.
+    fn from_server(state: &worker::Server, current: &Status) -> Option<Status> {
+        match state {
+            worker::Server::Missing { .. } => Some(Self::NotInstalled),
+            worker::Server::Started { .. } => None,
+            worker::Server::Exited { .. } if current.explains_stop() => None,
+            worker::Server::Exited { stderr, error, .. } => {
+                let error = error.clone().or_else(|| {
+                    let last = stderr.as_deref()?.trim().lines().last()?;
                     Some(last.to_owned())
                 });
                 Some(Self::Stopped(error))
             }
-            _ => None,
         }
     }
 
@@ -1238,7 +1245,7 @@ impl CodeWorkspace {
         let opening = cx.background_executor().spawn(async move {
             let stream = backend::Backend::discover().open_lsp(Open {
                 server_id: &remote,
-                expected_connection: &scope,
+                expected_connection: scope.as_ref(),
                 root: &root,
                 server: id,
                 envrc,
@@ -1380,32 +1387,21 @@ impl CodeWorkspace {
         };
         match event {
             Event::Request(request) => self.language_server_request(server, request, window, cx),
-            Event::Notification { method, params } => match method.as_str() {
-                "$/newport/configuration" => {
-                    self.configure_language_server(server.clone(), params, cx)
-                }
-                "$/newport/filesChanged" => {
-                    let changes = server
-                        .protocol
-                        .borrow()
-                        .watched_changes(&params, &self.root);
-                    if !changes.is_empty()
-                        && let Some(connection) = server.connection()
-                    {
-                        connection.notify_value(
-                            "workspace/didChangeWatchedFiles",
-                            json!({"changes":changes}),
-                        );
-                    }
-                }
-                "$/newport/watchError" => {
-                    self.language_message(
-                        params["error"]
-                            .as_str()
-                            .unwrap_or("File watching failed. Restart the language server."),
-                        cx,
+            Event::Configuration(config) => {
+                self.configure_language_server(server.clone(), Some(config), cx)
+            }
+            Event::FilesChanged(files) => {
+                let changes = server.protocol.borrow().watched_changes(&files, &self.root);
+                if !changes.is_empty()
+                    && let Some(connection) = server.connection()
+                {
+                    connection.notify::<lsp_types::notification::DidChangeWatchedFiles>(
+                        lsp_types::DidChangeWatchedFilesParams { changes },
                     );
                 }
+            }
+            Event::WatchError(failure) => self.language_message(failure.error, cx),
+            Event::Notification { method, params } => match method.as_str() {
                 "textDocument/publishDiagnostics" => {
                     let Ok(params) =
                         serde_json::from_value::<lsp_types::PublishDiagnosticsParams>(params)
@@ -1432,21 +1428,24 @@ impl CodeWorkspace {
                     self.apply_diagnostics(&path, cx);
                 }
                 "$/progress" => server.update_progress(&params),
-                method if method.starts_with("$/newport/") => {
-                    if method == "$/newport/server"
-                        && params["state"] == "started"
-                        && !server.protocol.borrow().initializing
-                    {
-                        self.configure_language_server(server.clone(), json!({}), cx);
-                    }
-                    let next = Status::from_worker(method, &params, &server.status.borrow());
-                    if let Some(next) = next {
-                        *server.status.borrow_mut() = next;
-                        server.settle();
-                    }
-                }
                 _ => return,
             },
+            Event::Environment(state) => {
+                *server.status.borrow_mut() = Status::from_environment(&state);
+                server.settle();
+            }
+            Event::Server(state) => {
+                if matches!(state, worker::Server::Started { .. })
+                    && !server.protocol.borrow().initializing
+                {
+                    self.configure_language_server(server.clone(), None, cx);
+                }
+                let next = Status::from_server(&state, &server.status.borrow());
+                if let Some(next) = next {
+                    *server.status.borrow_mut() = next;
+                    server.settle();
+                }
+            }
             Event::Closed { error } => {
                 server.ready.set(false);
                 server.connection.borrow_mut().take();
@@ -1749,6 +1748,7 @@ mod tests {
     use super::{
         Encoding, NoticeAction, Rope, Server, Status, completion_edit, content_change, file_uri,
         from_server, initialize_params, notice, server_for, snippet_text, to_server, uri_path,
+        worker,
     };
     use serde_json::{Value, json};
 
@@ -1923,56 +1923,87 @@ mod tests {
     }
 
     #[test]
-    fn worker_notifications_set_the_status() {
+    fn worker_states_set_the_status() {
+        use worker::Environment as E;
+        let path = || "/w/.envrc".to_owned();
+        for (state, status) in [
+            (E::NoEnvrc, Status::Starting),
+            (E::Skipped { path: path() }, Status::Starting),
+            (E::Loaded { path: path() }, Status::Starting),
+            (E::Loading { path: path() }, Status::LoadingEnvironment),
+            (
+                E::Blocked { path: path() },
+                Status::EnvrcBlocked {
+                    path: path(),
+                    denied: false,
+                },
+            ),
+            (
+                E::Denied { path: path() },
+                Status::EnvrcBlocked {
+                    path: path(),
+                    denied: true,
+                },
+            ),
+            (
+                E::Unavailable { path: path() },
+                Status::DirenvMissing { path: path() },
+            ),
+            (
+                E::Failed {
+                    path: path(),
+                    message: Some("direnv: bad".into()),
+                },
+                Status::EnvironmentFailed("direnv: bad".into()),
+            ),
+            (
+                E::Failed {
+                    path: path(),
+                    message: None,
+                },
+                Status::EnvironmentFailed("direnv couldn't load the .envrc.".into()),
+            ),
+            (E::Changed, Status::EnvironmentChanged),
+        ] {
+            assert_eq!(Status::from_environment(&state), status, "{state:?}");
+        }
         let starting = Status::Starting;
-        let state = |method: &str, params: Value| Status::from_worker(method, &params, &starting);
+        let server = |state: worker::Server| Status::from_server(&state, &starting);
+        let exited = |stderr: Option<&str>, error: Option<&str>| worker::Server::Exited {
+            server: "rust-analyzer".into(),
+            status: Some(1),
+            signal: None,
+            stderr: stderr.map(str::to_owned),
+            error: error.map(str::to_owned),
+        };
         assert_eq!(
-            state("$/newport/environment", json!({"state": "loading"})),
-            Some(Status::LoadingEnvironment)
-        );
-        assert_eq!(
-            state(
-                "$/newport/environment",
-                json!({"state": "blocked", "path": "/w/.envrc"})
-            ),
-            Some(Status::EnvrcBlocked {
-                path: "/w/.envrc".into(),
-                denied: false
-            })
-        );
-        assert_eq!(
-            state(
-                "$/newport/environment",
-                json!({"state": "unavailable", "path": "/w/.envrc"})
-            ),
-            Some(Status::DirenvMissing {
-                path: "/w/.envrc".into()
-            })
-        );
-        assert_eq!(
-            state("$/newport/environment", json!({"state": "changed"})),
-            Some(Status::EnvironmentChanged)
-        );
-        assert_eq!(
-            state("$/newport/server", json!({"state": "missing"})),
+            server(worker::Server::Missing {
+                server: "rust-analyzer".into()
+            }),
             Some(Status::NotInstalled)
         );
         assert_eq!(
-            state(
-                "$/newport/server",
-                json!({"state": "exited", "stderr": "warn\nerror: no toolchain\n"})
-            ),
-            Some(Status::Stopped(Some("error: no toolchain".into())))
-        );
-        // A reason the server didn't start outlives its exit.
-        let blocked = Status::EnvrcBlocked {
-            path: "/w/.envrc".into(),
-            denied: false,
-        };
-        assert_eq!(
-            Status::from_worker("$/newport/server", &json!({"state": "exited"}), &blocked),
+            server(worker::Server::Started {
+                server: "rust-analyzer".into(),
+                command: "/bin/rust-analyzer".into()
+            }),
             None
         );
+        assert_eq!(
+            server(exited(Some("warn\nerror: no toolchain\n"), None)),
+            Some(Status::Stopped(Some("error: no toolchain".into())))
+        );
+        assert_eq!(
+            server(exited(Some("warn\n"), Some("couldn't start"))),
+            Some(Status::Stopped(Some("couldn't start".into())))
+        );
+        assert_eq!(server(exited(None, None)), Some(Status::Stopped(None)));
+        // A reason the server didn't start outlives its exit.
+        let blocked = Status::EnvrcBlocked {
+            path: path(),
+            denied: false,
+        };
+        assert_eq!(Status::from_server(&exited(None, None), &blocked), None);
     }
 
     #[test]

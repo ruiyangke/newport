@@ -43,5 +43,8 @@ message ServerFrame {
     Active active = 7;
     newport.wire.Error error = 8;
     Renamed renamed = 9;
+    // The shell's size, before the screen at attach and whenever it
+    // changes: every attached tab draws the shell at this size.
+    Size size = 10;
   }
 }

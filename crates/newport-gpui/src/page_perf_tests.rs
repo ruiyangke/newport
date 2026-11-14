@@ -4,11 +4,13 @@ use super::{
     theme, ui_state, window_state, workspace_state,
 };
 use crate::connections::fixtures::{self as discovery_fixture, Listener};
+use crate::snapshot_fixture as fixture;
 use gpui_kit::{
     self as gpui, AppContext, Context, Entity, IntoElement, Render, TestAppContext,
     VisualTestContext, Window, div, prelude::*, px, size,
 };
 use newport_client::{backend, resources::Resources};
+use newport_protocol::desktop::configuration;
 use serde_json::{Value, json};
 use std::time::Instant;
 
@@ -73,7 +75,8 @@ pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
         content_width: 854.,
         server: restored.server,
         saved_server_selection: None,
-        snapshot: Value::Null,
+        snapshot: None,
+        snapshot_updated_at: None,
         resources: Resources::default(),
         work: work.into(),
         replies,
@@ -89,20 +92,20 @@ pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
         file_browsers: Default::default(),
         files_refresh_requested: true,
         file_preview_path: None,
-        file_preview_image: None,
+        file_preview: None,
+        file_places: None,
         remote_apps: None,
         remote_apps_visit: 0,
         remote_apps_away: false,
         remote_apps_returned: false,
         remote_apps_transport: None,
         remote_apps_mutations: Default::default(),
+        remote_apps_readings: Default::default(),
         remote_apps_mutating: Default::default(),
         remote_apps_recheck: None,
         remote_apps_record_tried: None,
         remote_apps_refresh: false,
         file_preview_viewport: file_preview::Viewport::default(),
-        file_preview_pdf: None,
-        file_preview_pdf_text: None,
         file_transfer: None,
         file_chooser: None,
         file_project_connection: None,
@@ -112,6 +115,8 @@ pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
         project_create: None,
         project_creation_save_owner: None,
         project_folder: None,
+        project_folder_listing: None,
+        connection_replies: Default::default(),
         project_dialog_open: false,
         project_dialog_feedback: Default::default(),
         project_dialog_rendering: false,
@@ -129,27 +134,51 @@ pub(super) fn owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
         notification: None,
     };
 
-    this.server = "fixture".into();
-    this.snapshot = json!({"config":{"servers":[{"id":"fixture","name":"Fixture","setupComplete":true,"agentInstallApproved":true,"sshHost":"localhost","sshUser":"fixture","clipboardEnabled":true,"browserEnabled":true}],"tunnels":[]},"runtime":{"clipboard":{"fixture":{"status":"connected"}}}});
+    this.server = fixture::SERVER.to_string();
+    this.snapshot = Some(owner_snapshot());
     this.sync_project_library(window, cx);
     this
 }
-// The public owner remains an intentionally offline rendering fixture. These
-// callback tests require actual transport identities before enqueueing operations.
+/// The owner's snapshot: one set-up server with both integrations on and a
+/// connected clipboard.
+pub(super) fn owner_snapshot() -> configuration::Snapshot {
+    let mut server = fixture::server(fixture::SERVER, "Fixture");
+    server.clipboard_enabled = true;
+    server.browser_enabled = true;
+    let mut snapshot = fixture::snapshot(vec![server]);
+    fixture::set(
+        &mut snapshot.runtime.clipboard,
+        fixture::SERVER,
+        fixture::connection(configuration::ConnectionStatus::Connected),
+    );
+    snapshot
+}
 fn typed_owner(window: &mut Window, cx: &mut Context<Newport>) -> Newport {
+    owner(window, cx)
+}
+/// The owner with its server saved as `server`, from backend `instance`.
+pub(super) fn owner_at(
+    window: &mut Window,
+    cx: &mut Context<Newport>,
+    server: uuid::Uuid,
+    instance: uuid::Uuid,
+) -> Newport {
     let mut view = owner(window, cx);
-    let server = "00000000-0000-4000-8000-000000000001";
-    view.server = server.into();
-    let profile = &mut view.snapshot["config"]["servers"][0];
-    profile["id"] = json!(server);
-    profile["sshPort"] = json!(22);
-    profile["authMethod"] = json!("publicKey");
-    view.snapshot["instanceId"] = json!("00000000-0000-4000-8000-000000000003");
-    view.snapshot["runtime"]["connectionRevisions"] = json!({(server):1});
-    let clipboard = view.snapshot["runtime"]["clipboard"]["fixture"].take();
-    view.snapshot["runtime"]["clipboard"] = json!({(server):clipboard});
-    view.sync_project_library(window, cx);
+    view.server = server.to_string();
+    let snapshot = view.snapshot_mut();
+    snapshot.instance_id = instance;
+    snapshot.config.servers[0].id = server;
+    for row in &mut snapshot.runtime.clipboard {
+        row.id = server;
+    }
+    for row in &mut snapshot.runtime.connection_revisions {
+        row.id = server;
+    }
     view
+}
+/// The owner's snapshot, as the view holds it.
+fn snapshot_of(view: &Newport) -> configuration::Snapshot {
+    view.snapshot.clone().expect("the owner has a snapshot")
 }
 // One-way observations keep UI assertions readable; these maps are never sent.
 fn observed(work: &super::Work) -> (&'static str, Value) {
@@ -160,10 +189,16 @@ fn observed(work: &super::Work) -> (&'static str, Value) {
     {
         return ("connections_query", json!({"id":server,"refresh":refresh}));
     }
-    let super::request_dispatch::Request::Desktop(operation) = &work.request else {
+    if let super::request_dispatch::Request::Git(args) = &work.request {
+        return (
+            "git_request",
+            json!({"serverId":args.server,"request":args.request}),
+        );
+    }
+    let Some(operation) = work.request.operation() else {
         return ("local", Value::Null);
     };
-    match operation.as_ref() {
+    match operation {
         desktop::Operation::Configuration(value) => match value.as_ref() {
             config::Operation::Snapshot(_) => ("snapshot", json!({})),
             config::Operation::SetIntegrationEnabled(v) => (
@@ -242,9 +277,69 @@ impl Render for PageHost {
             .child(content)
     }
 }
-fn put(view: &mut Newport, key: &str, value: Value) {
+/// A reading of `cores` cores with `processes` processes, for Overview layouts.
+fn overview_sample(
+    cores: u32,
+    processes: u32,
+    cpus: &[newport_protocol::monitor::metrics::Core],
+) -> newport_protocol::monitor::metrics::Snapshot {
+    newport_protocol::monitor::metrics::Snapshot {
+        cpu: 20.,
+        cores,
+        memory_used: 2048,
+        memory_total: 8192,
+        load: [1., 0., 0.],
+        cpus: cpus.to_vec(),
+        processes: (0..processes)
+            .map(|pid| newport_protocol::monitor::metrics::Process {
+                pid,
+                name: format!("worker-{pid}"),
+                cpu: f64::from(pid % 100),
+                user: "00000000-0000-4000-8000-000000000001".into(),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+/// The reply to a repository refresh of `repo`.
+fn refreshed(
+    repo: &str,
+) -> Result<newport_protocol::desktop::Reply, newport_client::request_error::RequestError> {
+    use newport_protocol::desktop::{self, git};
+    Ok(desktop::Reply::Git(Box::new(
+        git::Reply::RefreshRepository(Box::new(git::Refreshed {
+            repo_id: repo.into(),
+        })),
+    )))
+}
+/// A status read's HEAD on the branch `name`.
+fn typed_branch_head(name: &str) -> newport_protocol::git::Head {
+    newport_protocol::git::Head {
+        oid: None,
+        name: Some(newport_protocol::git::Path::new(name.as_bytes())),
+        detached: false,
+        unborn: false,
+    }
+}
+/// Settles `key` as a read whose data its owner keeps.
+fn put(view: &mut Newport, key: &str) {
     let generation = view.resources.begin_refresh(key, false).unwrap();
-    view.resources.complete(key, generation, Ok(value));
+    view.resources.complete_owned(key, generation, Ok(true));
+}
+/// Settles a read of the saved projects that name the ports' projects.
+fn put_bookmarks(
+    view: &mut Newport,
+    projects: Vec<newport_protocol::desktop::preferences::Project>,
+) {
+    view.resources.invalidate("connection-projects");
+    let generation = view.resources.begin("connection-projects").unwrap();
+    assert!(view.complete_connection_projects(
+        generation,
+        Ok(crate::project_library_state::typed_fixture::projects_reply(
+            projects
+        ))
+    ));
 }
 pub(super) fn frame(cx: &mut VisualTestContext) {
     cx.run_until_parked();
@@ -277,8 +372,8 @@ fn refreshing_an_accepted_snapshot_never_blanks_the_page(cx: &mut TestAppContext
     };
     view.update(visual, |v, _| {
         v.page = Page::Integration;
-        let snapshot = v.snapshot.clone();
-        put(v, "snapshot", snapshot);
+        let snapshot = snapshot_of(v);
+        fixture::accept(v, snapshot);
     });
     assert!(!skeleton(visual));
     // The refresh after a forward toggle or integration change.
@@ -294,8 +389,30 @@ fn refreshing_an_accepted_snapshot_never_blanks_the_page(cx: &mut TestAppContext
     });
     assert!(!skeleton(visual));
     // Only a first read with nothing to show uses the skeleton.
-    view.update(visual, |v, _| v.snapshot = Value::Null);
+    view.update(visual, |v, _| v.snapshot = None);
     assert!(skeleton(visual));
+}
+
+#[gpui::test]
+fn a_configuration_error_stays_shown_while_the_next_read_is_pending(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui::component::init(cx);
+        theme::install(false, cx);
+    });
+    let (view, visual) = cx.add_window_view(typed_owner);
+    view.update(visual, |view, _| {
+        fixture::accept(view, snapshot_of(view));
+        let generation = view.resources.begin_refresh("snapshot", false).unwrap();
+        let (accepted, received) =
+            view.complete_snapshot(generation, Err("Backend unavailable".into()));
+        assert!(accepted && received.is_none());
+        view.resources.begin_refresh("snapshot", false).unwrap();
+        assert!(!view.initial_loading("snapshot"));
+        let resource = view.resources.get("snapshot").unwrap();
+        assert_eq!(resource.error.as_deref(), Some("Backend unavailable"));
+        assert!(!resource.display_pending());
+        assert!(view.snapshot.is_some(), "the last snapshot stays shown");
+    });
 }
 
 #[gpui::test]
@@ -314,11 +431,23 @@ fn header_and_sharing_follow_global_failure_even_with_a_stale_connected_page_sna
             let mut view = typed_owner(window, cx);
             view.page = Page::Integration;
             view.server = id.to_string();
-            view.snapshot["instanceId"] = json!(instance);
-            view.snapshot["config"]["servers"][0]["id"] = json!(id);
-            view.snapshot["runtime"]["agentTransport"][id.to_string()] =
-                json!({"status": "connected", "generation": 1});
-            view.snapshot["runtime"]["clipboard"][id.to_string()] = json!({"status":"connected"});
+            let mut server = fixture::server(id, "Fixture");
+            server.clipboard_enabled = true;
+            server.browser_enabled = true;
+            let mut snapshot = fixture::snapshot(vec![server]);
+            snapshot.instance_id = instance;
+            fixture::clear(&mut snapshot.runtime.connection_revisions, id);
+            fixture::set(
+                &mut snapshot.runtime.agent_transport,
+                id,
+                fixture::transport(configuration::TransportStatus::Connected),
+            );
+            fixture::set(
+                &mut snapshot.runtime.clipboard,
+                id,
+                fixture::connection(configuration::ConnectionStatus::Connected),
+            );
+            view.snapshot = Some(snapshot);
             view
         });
         gpui::base::Root::new(view, window, cx)
@@ -775,8 +904,11 @@ fn integration_exposes_connection_states_and_locks_controls_during_updates(
         let entity = cx.new(|cx| {
             let mut view = typed_owner(window, cx);
             view.page = Page::Integration;
-            view.snapshot["runtime"]["agentStatus"]["00000000-0000-4000-8000-000000000001"] =
-                json!({"installed":true});
+            fixture::set(
+                &mut view.snapshot_mut().runtime.agent_status,
+                fixture::SERVER,
+                fixture::installed(true),
+            );
             view
         });
         view = Some(entity.clone());
@@ -838,8 +970,14 @@ fn integration_exposes_connection_states_and_locks_controls_during_updates(
         px(16.)
     );
     view.update(visual, |view, cx| {
-        view.snapshot["runtime"]["clipboard"]["00000000-0000-4000-8000-000000000001"] =
-            json!({"status":"error","errorMessage":"Fixture connection failed"});
+        fixture::set(
+            &mut view.snapshot_mut().runtime.clipboard,
+            fixture::SERVER,
+            configuration::ConnectionState {
+                error_message: Some("Fixture connection failed".into()),
+                ..fixture::connection(configuration::ConnectionStatus::Error)
+            },
+        );
         cx.notify();
     });
     frame(visual);
@@ -878,7 +1016,7 @@ fn integration_exposes_connection_states_and_locks_controls_during_updates(
             );
         }
         view.update(visual, |view, cx| {
-            view.resources.complete(key, generation, Ok(Value::Null));
+            view.resources.complete(key, generation, Ok(()));
             cx.notify();
         });
         frame(visual);
@@ -900,11 +1038,11 @@ fn integration_exposes_connection_states_and_locks_controls_during_updates(
         assert_eq!(
             observed(&request).1,
             json!({"id":"00000000-0000-4000-8000-000000000001", "feature":feature, "enabled":false,
-                "expectedConnection":view.read_with(visual, |v, _| crate::terminal_scope::connection(v.selected_server().unwrap(), &v.snapshot))})
+                "expectedConnection":view.read_with(visual, |v, _| scope_projection(&v.selected_connection().unwrap()))})
         );
         view.update(visual, |view, cx| {
             view.resources
-                .complete(&request.key, request.generation, Ok(Value::Null));
+                .complete(&request.key, request.generation, Ok(()));
             cx.notify();
         });
         frame(visual);
@@ -940,15 +1078,15 @@ fn integration_exposes_connection_states_and_locks_controls_during_updates(
             "00000000-0000-4000-8000-000000000001"
         );
         view.update(visual, |view, cx| {
-            view.resources
-                .complete(key, request.generation, Ok(Value::Null));
+            view.resources.complete(key, request.generation, Ok(()));
             cx.notify();
         });
         frame(visual);
     }
     view.update(visual, |view, cx| {
-        view.snapshot["config"]["servers"][0]["clipboardEnabled"] = json!(false);
-        view.snapshot["config"]["servers"][0]["browserEnabled"] = json!(false);
+        let server = &mut view.snapshot_mut().config.servers[0];
+        server.clipboard_enabled = false;
+        server.browser_enabled = false;
         cx.notify();
     });
     visual.simulate_resize(size(px(550.), px(600.)));
@@ -1023,17 +1161,14 @@ fn hidden_settings_reads_do_not_redraw_other_pages_but_global_effects_still_appl
             ..Default::default()
         }));
         assert!(view.notification.is_some());
-        put(view, "history", json!([1, 2, 3]));
-        put(view, "page", json!({"unrelated":true}));
+        put(view, "history");
+        put(view, "ports");
         assert!(view.apply_settings_effects(Effects {
             metrics_cleared: true,
             ..Default::default()
         }));
         assert!(view.resources.get("history").is_none());
-        assert_eq!(
-            view.resources.get("page").unwrap().value,
-            json!({"unrelated":true})
-        );
+        assert!(view.resources.get("ports").unwrap().has_value());
     });
 }
 
@@ -1056,7 +1191,7 @@ fn background_agent_activity_only_invalidates_its_visible_feature(cx: &mut TestA
     view.update(visual, |view, cx| {
         view.work = work.into();
         view.replies = inbox;
-        put(view, "snapshot", view.snapshot.clone());
+        fixture::accept(view, snapshot_of(view));
         view.tick(cx);
     });
     frame(visual);
@@ -1081,25 +1216,24 @@ fn background_agent_activity_only_invalidates_its_visible_feature(cx: &mut TestA
             let (generation, mut snapshot) = view.update(visual, |view, _| {
                 (
                     view.resources.begin_refresh("snapshot", false).unwrap(),
-                    view.snapshot.clone(),
+                    snapshot_of(view),
                 )
             });
-            snapshot["revision"] = json!(snapshot["revision"].as_u64().unwrap_or(0) + 1);
-            snapshot["runtime"]["agentInstallation"]["00000000-0000-4000-8000-000000000001"] =
-                json!({"stage":"uploading", "sent":reading*100, "total":1000});
-            snapshot["runtime"]["agentPermissions"]["00000000-0000-4000-8000-000000000001"] =
-                json!({"revision":reading});
+            snapshot.revision += 1;
+            fixture::set(
+                &mut snapshot.runtime.agent_installation,
+                fixture::SERVER,
+                fixture::install(configuration::InstallStage::Uploading, reading * 100, 1000),
+            );
+            let mut permissions = fixture::permissions(false, false);
+            permissions.desired.revision = reading;
+            fixture::set(
+                &mut snapshot.runtime.agent_permissions,
+                fixture::SERVER,
+                permissions,
+            );
             replies
-                .send(super::Completion {
-                    discovery: None,
-                    pdf: None,
-                    pdf_text: None,
-                    image: None,
-                    server: "00000000-0000-4000-8000-000000000001".into(),
-                    key: "snapshot".into(),
-                    generation,
-                    result: Ok(snapshot),
-                })
+                .send(fixture::completion(generation, snapshot))
                 .unwrap();
             view.update(visual, |view, cx| view.tick(cx));
             frame(visual);
@@ -1112,9 +1246,11 @@ fn background_agent_activity_only_invalidates_its_visible_feature(cx: &mut TestA
         );
         assert_eq!(
             view.read_with(visual, |view, _| {
-                view.snapshot["runtime"]["agentInstallation"]["00000000-0000-4000-8000-000000000001"]["sent"].clone()
+                view.runtime()
+                    .and_then(|runtime| runtime.agent_installation(fixture::SERVER))
+                    .map(|progress| progress.sent)
             }),
-            json!(300)
+            Some(300)
         );
     }
 }
@@ -1142,14 +1278,11 @@ fn other_server_runtime_changes_are_retained_without_window_notifications(cx: &m
     let mut data = view.update(visual, |view, cx| {
         view.work = work.into();
         view.replies = inbox;
-        let mut second = view.snapshot["config"]["servers"][0].clone();
-        second["id"] = json!("00000000-0000-4000-8000-000000000002");
-        view.snapshot["config"]["servers"]
-            .as_array_mut()
-            .unwrap()
-            .push(second);
-        let snapshot = view.snapshot.clone();
-        put(view, "snapshot", snapshot.clone());
+        let mut snapshot = snapshot_of(view);
+        let mut second = snapshot.config.servers[0].clone();
+        second.id = fixture::SECOND;
+        snapshot.config.servers.push(second);
+        fixture::accept(view, snapshot.clone());
         view.tick(cx);
         snapshot
     });
@@ -1159,32 +1292,35 @@ fn other_server_runtime_changes_are_retained_without_window_notifications(cx: &m
         cx.observe(&view, |count, _, _| *count += 1).detach();
         0
     });
-    let deliver = |result, visual: &mut VisualTestContext| {
+    let deliver = |result: Result<configuration::Snapshot, &str>,
+                   visual: &mut VisualTestContext| {
         let generation = view.update(visual, |view, _| {
             view.resources.begin_refresh("snapshot", false).unwrap()
         });
         replies
-            .send(super::Completion {
-                discovery: None,
-                pdf: None,
-                pdf_text: None,
-                image: None,
-                server: "00000000-0000-4000-8000-000000000001".into(),
-                key: "snapshot".into(),
-                generation,
-                result,
+            .send(match result {
+                Ok(snapshot) => fixture::completion(generation, snapshot),
+                Err(error) => fixture::failure(generation, error),
             })
             .unwrap();
         view.update(visual, |view, cx| view.tick(cx));
         frame(visual);
     };
     for revision in 1..=3 {
-        data["revision"] = json!(revision);
-        data["runtime"]["agentInstallation"]["00000000-0000-4000-8000-000000000002"] =
-            json!({"stage":"uploading", "sentBytes":revision*100});
-        data["runtime"]["agentPermissions"]["00000000-0000-4000-8000-000000000002"] =
-            json!({"revision":revision});
-        data["runtime"]["awaitingAgent"] = json!(["00000000-0000-4000-8000-000000000002"]);
+        data.revision = revision;
+        fixture::set(
+            &mut data.runtime.agent_installation,
+            fixture::SECOND,
+            fixture::install(configuration::InstallStage::Uploading, revision * 100, 1000),
+        );
+        let mut permissions = fixture::permissions(false, false);
+        permissions.desired.revision = revision;
+        fixture::set(
+            &mut data.runtime.agent_permissions,
+            fixture::SECOND,
+            permissions,
+        );
+        data.runtime.awaiting_agent = vec![fixture::SECOND];
         deliver(Ok(data.clone()), visual);
     }
     assert_eq!(
@@ -1194,22 +1330,28 @@ fn other_server_runtime_changes_are_retained_without_window_notifications(cx: &m
     );
     assert_eq!(
         view.read_with(visual, |view, _| view.snapshot.clone()),
-        data,
+        Some(data.clone()),
         "quiet snapshots still retain all server state"
     );
-    data["runtime"]["agentPermissions"]["00000000-0000-4000-8000-000000000001"] =
-        json!({"effective":{"browser":false}});
+    fixture::set(
+        &mut data.runtime.agent_permissions,
+        fixture::SERVER,
+        fixture::permissions(false, false),
+    );
     deliver(Ok(data.clone()), visual);
     assert_eq!(
         notices.read_with(visual, |count, _| *count),
         1,
         "selected-server permission changes must remain immediate"
     );
-    data["runtime"]["agentTransport"]["00000000-0000-4000-8000-000000000001"] =
-        json!({"status": "recovering"});
+    fixture::set(
+        &mut data.runtime.agent_transport,
+        fixture::SERVER,
+        fixture::transport(configuration::TransportStatus::Recovering),
+    );
     deliver(Ok(data.clone()), visual);
     assert_eq!(notices.read_with(visual, |count, _| *count), 2);
-    deliver(Err("Snapshot transport failed".into()), visual);
+    deliver(Err("Snapshot transport failed"), visual);
     assert_eq!(notices.read_with(visual, |count, _| *count), 3);
     assert!(!view.read_with(visual, |view, _| view.configuration_available()));
     deliver(Ok(data), visual);
@@ -1244,8 +1386,8 @@ fn identical_background_snapshots_do_not_notify_the_window(cx: &mut TestAppConte
     let original = view.update(visual, |view, cx| {
         view.work = work.into();
         view.replies = inbox;
-        let snapshot = view.snapshot.clone();
-        put(view, "snapshot", snapshot.clone());
+        let snapshot = snapshot_of(view);
+        fixture::accept(view, snapshot.clone());
         view.tick(cx);
         snapshot
     });
@@ -1255,20 +1397,9 @@ fn identical_background_snapshots_do_not_notify_the_window(cx: &mut TestAppConte
         cx.observe(&view, |count, _, _| *count += 1).detach();
         0
     });
-    let deliver = |data: Value, visual: &mut VisualTestContext| {
+    let deliver = |data: configuration::Snapshot, visual: &mut VisualTestContext| {
         let generation = view.update(visual, |view, _| view.resources.begin("snapshot").unwrap());
-        replies
-            .send(super::Completion {
-                discovery: None,
-                pdf: None,
-                pdf_text: None,
-                image: None,
-                server: "00000000-0000-4000-8000-000000000001".into(),
-                key: "snapshot".into(),
-                generation,
-                result: Ok(data),
-            })
-            .unwrap();
+        replies.send(fixture::completion(generation, data)).unwrap();
         view.update(visual, |view, cx| view.tick(cx));
         frame(visual);
     };
@@ -1282,13 +1413,11 @@ fn identical_background_snapshots_do_not_notify_the_window(cx: &mut TestAppConte
         "identical shell readings must not invalidate the entire window"
     );
     let mut changed = original;
-    changed["config"]["servers"][0]["name"] = json!("Renamed fixture");
+    changed.config.servers[0].name = "Renamed fixture".into();
     deliver(changed, visual);
     assert_eq!(notices.read_with(visual, |count, _| *count), 1);
     assert_eq!(
-        view.read_with(visual, |view, _| {
-            view.snapshot["config"]["servers"][0]["name"].clone()
-        }),
+        view.read_with(visual, |view, _| view.servers()[0].name.clone()),
         "Renamed fixture"
     );
 }
@@ -1316,20 +1445,16 @@ fn integration_waits_for_fresh_configuration_after_failed_refresh(cx: &mut TestA
     let original = view.update(visual, |view, _| {
         view.work = work.into();
         view.replies = inbox;
-        view.snapshot.clone()
+        snapshot_of(view)
     });
     let deliver =
-        |key: &str, generation, result: Result<Value, String>, visual: &mut VisualTestContext| {
+        |key: &str, generation, result: super::Outcome, visual: &mut VisualTestContext| {
             replies
                 .send(super::Completion {
-                    discovery: None,
-                    pdf: None,
-                    pdf_text: None,
-                    image: None,
                     server: "00000000-0000-4000-8000-000000000001".into(),
                     key: key.into(),
                     generation,
-                    result: result.map_err(Into::into),
+                    result,
                 })
                 .unwrap();
             view.update(visual, |view, cx| view.tick(cx));
@@ -1347,13 +1472,24 @@ fn integration_waits_for_fresh_configuration_after_failed_refresh(cx: &mut TestA
     deliver(
         "integration:feature:00000000-0000-4000-8000-000000000001",
         mutation,
-        Ok(Value::Null),
+        super::Outcome::Typed(Ok(newport_protocol::desktop::Reply::Configuration(
+            Box::new(
+                newport_protocol::desktop::configuration::Reply::SetIntegrationEnabled(Box::new(
+                    newport_protocol::common::Present {},
+                )),
+            ),
+        ))),
         visual,
     );
     let refreshed = requests.try_recv().expect("fresh configuration requested");
     assert_eq!(refreshed.key, "snapshot");
     assert_ne!(refreshed.generation, old_snapshot);
-    deliver("snapshot", old_snapshot, Ok(original.clone()), visual);
+    deliver(
+        "snapshot",
+        old_snapshot,
+        fixture::outcome(Ok(original.clone())),
+        visual,
+    );
     assert!(view.read_with(visual, |view, _| {
         view.integration_refresh_pending
             .contains("00000000-0000-4000-8000-000000000001")
@@ -1361,7 +1497,7 @@ fn integration_waits_for_fresh_configuration_after_failed_refresh(cx: &mut TestA
     deliver(
         "snapshot",
         refreshed.generation,
-        Err("Connection interrupted".into()),
+        fixture::outcome(Err("Connection interrupted")),
         visual,
     );
     assert!(view.read_with(visual, |view, _| {
@@ -1394,7 +1530,7 @@ fn integration_waits_for_fresh_configuration_after_failed_refresh(cx: &mut TestA
     assert_eq!(observed(&revoke).1["enabled"], false);
     view.update(visual, |view, cx| {
         view.resources
-            .complete(&revoke.key, revoke.generation, Ok(Value::Null));
+            .complete(&revoke.key, revoke.generation, Ok(()));
         view.integration_command(
             "00000000-0000-4000-8000-000000000001",
             Some(("browser", true)),
@@ -1406,14 +1542,19 @@ fn integration_waits_for_fresh_configuration_after_failed_refresh(cx: &mut TestA
         "stale preferences must not enable access"
     );
     let mut unavailable = original.clone();
-    unavailable["loadError"] = json!("Vault unavailable");
-    deliver("snapshot", retry, Ok(unavailable), visual);
+    unavailable.load_error = Some("Vault unavailable".into());
+    deliver("snapshot", retry, fixture::outcome(Ok(unavailable)), visual);
     assert!(view.read_with(visual, |view, _| {
         view.integration_refresh_pending
             .contains("00000000-0000-4000-8000-000000000001")
     }));
     let recovered = view.update(visual, |view, _| view.resources.begin("snapshot").unwrap());
-    deliver("snapshot", recovered, Ok(original), visual);
+    deliver(
+        "snapshot",
+        recovered,
+        fixture::outcome(Ok(original)),
+        visual,
+    );
     assert!(view.read_with(visual, |view, _| {
         view.integration_refresh_pending.is_empty()
     }));
@@ -1425,12 +1566,10 @@ fn integration_waits_for_fresh_configuration_after_failed_refresh(cx: &mut TestA
     assert_eq!(observed(&mutation).0, "set_integration_enabled");
     // A late operation belongs to its original server, even after navigation.
     view.update(visual, |view, cx| {
-        let mut other = view.snapshot["config"]["servers"][0].clone();
-        other["id"] = json!("00000000-0000-4000-8000-000000000002");
-        view.snapshot["config"]["servers"]
-            .as_array_mut()
-            .unwrap()
-            .push(other);
+        let servers = &mut view.snapshot_mut().config.servers;
+        let mut other = servers[0].clone();
+        other.id = fixture::SECOND;
+        servers.push(other);
         view.server = "00000000-0000-4000-8000-000000000002".into();
         view.resources.clear();
         view.notification = None;
@@ -1439,7 +1578,7 @@ fn integration_waits_for_fresh_configuration_after_failed_refresh(cx: &mut TestA
     deliver(
         &mutation.key,
         mutation.generation,
-        Err("First server failed".into()),
+        super::Outcome::Typed(Err("First server failed".into())),
         visual,
     );
     assert!(view.read_with(visual, |view, _| {
@@ -1487,12 +1626,12 @@ fn benchmark_server_lookup_and_idle_panel_ownership(cx: &mut TestAppContext) {
             let mut servers: Vec<_> = (1..count)
                 .map(|index| {
                     let mut other = server.clone();
-                    other["id"] = json!(format!("other-{index}"));
+                    other.id = uuid::Uuid::from_u128(0xf000 + index as u128);
                     other
                 })
                 .collect();
             servers.push(server);
-            view.snapshot["config"]["servers"] = json!(servers);
+            view.snapshot_mut().config.servers = servers;
             let start = Instant::now();
             for _ in 0..200 {
                 std::hint::black_box(view.selected_server());
@@ -1540,30 +1679,51 @@ fn benchmark_whole_pages(cx: &mut TestAppContext) {
         (Page::Ports, 500, "single"),
         (Page::Ports, 500, "table"),
     ] {
-        visual.update(|window, cx| view.update(cx, |view, cx| {
-            view.page = page;
-            match page {
-                Page::Overview => {
-                    put(view,"page",json!({"cpu":20,"cores":8,"memoryUsed":2048,"memoryTotal":8192,"load":[1.0],"network":[],"disks":[],"cpus":[],"processes":(0..count).map(|i|json!({"pid":i,"name":format!("worker-{i}"),"cpu":i%100,"user":"00000000-0000-4000-8000-000000000001"})).collect::<Vec<_>>()}));
-                    put(view,"history",json!([]));
-                    view.sync_overview_processes(window,cx);
+        visual.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.page = page;
+                match page {
+                    Page::Overview => {
+                        view.put_reading(overview_sample(8, count as u32, &[]));
+                        view.put_history(Vec::new());
+                        view.sync_overview_processes(window, cx);
+                    }
+                    Page::Ports => {
+                        discovery_fixture::put(
+                            view,
+                            discovery_fixture::observation((0..count).map(|i| {
+                                let group = if mode == "single" { 0 } else { i / 10 };
+                                Listener::new(8000 + u16::try_from(i).unwrap())
+                                    .pid(u32::try_from(group + 1).unwrap())
+                                    .process("node", "node", &[], None)
+                                    .project(&format!("/srv/project-{group}"))
+                            })),
+                        );
+                        put_bookmarks(view, Vec::new());
+                        view.sync_connections(window, cx);
+                        view.connections_state
+                            .get_mut("00000000-0000-4000-8000-000000000001")
+                            .unwrap()
+                            .table = mode == "table";
+                    }
+                    Page::Projects => {
+                        use crate::project_library_state::typed_fixture::{bookmark, put_projects};
+                        let projects = (0..count)
+                            .map(|i| {
+                                bookmark(
+                                    i as u128,
+                                    "00000000-0000-4000-8000-000000000001",
+                                    &format!("Project {i}"),
+                                    &format!("/srv/project-{i}"),
+                                )
+                            })
+                            .collect();
+                        put_projects(view, projects);
+                    }
+                    _ => {}
                 }
-                Page::Ports => {
-                    discovery_fixture::put(view, discovery_fixture::observation((0..count).map(|i| {
-                        let group = if mode == "single" { 0 } else { i/10 };
-                        Listener::new(8000+u16::try_from(i).unwrap()).pid(u32::try_from(group+1).unwrap())
-                            .process("node", "node", &[], None).project(&format!("/srv/project-{group}"))
-                    })));
-                    put(view,"connection-projects",json!([]));
-                    view.sync_connections(window,cx);
-                    view.connections_state.get_mut("00000000-0000-4000-8000-000000000001").unwrap().table = mode == "table";
-                }
-                Page::Projects => {
-                    put(view,"page",Value::Array((0..count).map(|i|json!({"id":format!("project-{i}"),"serverId":"00000000-0000-4000-8000-000000000001","name":format!("Project {i}"),"path":{"display":format!("/srv/project-{i}")}})).collect()));
-                }
-                _ => {}
-            }
-        }));
+            })
+        });
         host.update(visual, |_, cx| cx.notify());
         frame(visual);
         let start = Instant::now();
@@ -1596,17 +1756,28 @@ fn benchmark_overview_core_history_frames(cx: &mut TestAppContext) {
     let view = view.unwrap();
     visual.simulate_resize(size(px(1100.), px(720.)));
     for cores in [32, 256] {
-        visual.update(|window, cx| view.update(cx, |view, cx| {
-            view.page = Page::Overview;
-            put(view, "page", json!({
-                "cpu":20,"cores":cores,"memoryUsed":2048,"memoryTotal":8192,"load":[1.0],
-                "network":[],"disks":[],"processCount":5000,
-                "cpus":(0..cores).map(|id|json!({"id":id,"usage":id%100,"history":(0..60).map(|i|(id+i)%100).collect::<Vec<_>>()})).collect::<Vec<_>>(),
-                "processes":(0..5000).map(|pid|json!({"pid":pid,"name":format!("worker-{pid}"),"cpu":pid%100,"user":"00000000-0000-4000-8000-000000000001"})).collect::<Vec<_>>()
-            }));
-            put(view, "history", json!((0..300).map(|i|json!({"at":i*3000,"data":{"cpu":i%100,"cores":cores,"load":[1.0],"memoryUsed":2048,"memoryTotal":8192}})).collect::<Vec<_>>()));
-            view.sync_overview_processes(window, cx);
-        }));
+        visual.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.page = Page::Overview;
+                let cpus: Vec<_> = (0..cores)
+                    .map(|id| newport_protocol::monitor::metrics::Core {
+                        id,
+                        usage: f64::from(id % 100),
+                        history: (0..60).map(|i| f64::from((id + i) % 100)).collect(),
+                    })
+                    .collect();
+                view.put_reading(newport_protocol::monitor::metrics::Snapshot {
+                    process_count: 5000,
+                    ..overview_sample(cores, 5000, &cpus)
+                });
+                view.put_history(
+                    (0..300)
+                        .map(|i| crate::overview::cpu_sample(i * 3000, (i % 100) as f64))
+                        .collect(),
+                );
+                view.sync_overview_processes(window, cx);
+            })
+        });
         host.update(visual, |_, cx| cx.notify());
         frame(visual);
         for (position, delta) in [("top", 100000.), ("bottom", -100000.)] {
@@ -1662,7 +1833,7 @@ pub(super) fn connections_fixture(
             // Settle the first project read; left pending, its placeholder
             // delay would redraw the page partway through a test.
             view.resources.invalidate("connection-projects");
-            put(&mut view, "connection-projects", json!([]));
+            put_bookmarks(&mut view, Vec::new());
             view.connections_state
                 .get_mut("00000000-0000-4000-8000-000000000001")
                 .unwrap()
@@ -1712,11 +1883,19 @@ fn connection_metadata_completion_repaints_only_changed_project_names(cx: &mut T
     let (view, visual) = connections_fixture(cx, false);
     let (work, requests) = std::sync::mpsc::sync_channel(32);
     let (replies, incoming) = std::sync::mpsc::channel();
-    let original = json!([{"serverId":"00000000-0000-4000-8000-000000000001", "name":"Original project", "path":"/srv/project-0"}]);
+    use crate::project_library_state::typed_fixture::{
+        TYPED_SERVER, bookmark, projects_completion,
+    };
+    let original = vec![bookmark(
+        1,
+        TYPED_SERVER,
+        "Original project",
+        "/srv/project-0",
+    )];
     view.update(visual, |view, cx| {
         view.work = work.into();
         view.replies = incoming;
-        put(view, "connection-projects", original.clone());
+        put_bookmarks(view, original.clone());
         cx.notify();
     });
     frame(visual);
@@ -1741,7 +1920,12 @@ fn connection_metadata_completion_repaints_only_changed_project_names(cx: &mut T
     for (data, expected_notices) in [
         (original.clone(), 0),
         (
-            json!([{"serverId":"00000000-0000-4000-8000-000000000001", "name":"Renamed project", "path":"/srv/project-0"}]),
+            vec![bookmark(
+                1,
+                TYPED_SERVER,
+                "Renamed project",
+                "/srv/project-0",
+            )],
             1,
         ),
     ] {
@@ -1756,16 +1940,7 @@ fn connection_metadata_completion_repaints_only_changed_project_names(cx: &mut T
                 .generation
         });
         replies
-            .send(super::Completion {
-                discovery: None,
-                pdf: None,
-                pdf_text: None,
-                image: None,
-                server: "00000000-0000-4000-8000-000000000001".into(),
-                key: "connection-projects".into(),
-                generation,
-                result: Ok(data),
-            })
+            .send(projects_completion("connection-projects", generation, data))
             .unwrap();
         view.update(visual, |view, cx| view.tick(cx));
         frame(visual);
@@ -1836,16 +2011,13 @@ fn cached_connection_observations_and_poll_admission_do_not_notify_the_window(
         view.work = work.into();
         view.replies = inbox;
         let observation = crate::connections::DiscoveryCompletion {
-            scope: crate::terminal_scope::connection(
-                view.selected_server().unwrap(),
-                &view.snapshot,
-            ),
+            scope: view.selected_connection().unwrap(),
             reading: view.connections_state[&view.server]
                 .reading
                 .clone()
                 .unwrap(),
         };
-        let generation = view.resources.begin_refresh("page", false).unwrap();
+        let generation = view.resources.begin_refresh("ports", false).unwrap();
         assert!(view.complete_connections_reading(
             &view.server.clone(),
             generation,
@@ -1878,14 +2050,10 @@ fn cached_connection_observations_and_poll_admission_do_not_notify_the_window(
         );
         replies
             .send(super::Completion {
-                discovery: Some(observation.clone()),
-                pdf: None,
-                pdf_text: None,
-                image: None,
                 server: "00000000-0000-4000-8000-000000000001".into(),
-                key: "page".into(),
+                key: "ports".into(),
                 generation,
-                result: Ok(Value::Null),
+                result: super::Outcome::Discovery(observation.clone()),
             })
             .unwrap();
         view.update(visual, |view, cx| view.tick(cx));
@@ -1987,8 +2155,8 @@ fn connections_toolbar_wraps_and_loading_replaces_the_list_in_place(cx: &mut Tes
     }
     let before = visual.debug_bounds("connections-toolbar").unwrap();
     view.update(visual, |view, cx| {
-        view.resources.invalidate("page");
-        view.resources.begin("page");
+        view.resources.invalidate("ports");
+        view.resources.begin("ports");
         cx.notify();
     });
     frame(visual);
@@ -2231,11 +2399,17 @@ fn finished_setup_does_not_reenter_agent_setup_when_metrics_fail(cx: &mut TestAp
         let view = cx.new(|cx| {
             let mut view = typed_owner(window, cx);
             view.page = Page::Overview;
-            view.snapshot["runtime"]["agentInstallation"] =
-                json!({"00000000-0000-4000-8000-000000000001":{"stage":"error","error":"Old installation failure"}});
-            let generation = view.resources.begin("page").unwrap();
+            fixture::set(
+                &mut view.snapshot_mut().runtime.agent_installation,
+                fixture::SERVER,
+                configuration::InstallProgress {
+                    error: Some("Old installation failure".into()),
+                    ..fixture::install(configuration::InstallStage::Error, 0, 0)
+                },
+            );
+            let generation = view.resources.begin("overview").unwrap();
             view.resources
-                .complete("page", generation, Err("SSH connection refused".into()));
+                .complete("overview", generation, Err("SSH connection refused".into()));
             view
         });
         PageHost(view)
@@ -2262,10 +2436,10 @@ fn connections_query_navigation_retains_cache_and_fences_connection_changes(
     let (late, observation) = view.update(visual, |v, _| {
         v.work = work.into();
         let observation = crate::connections::DiscoveryCompletion {
-            scope: crate::terminal_scope::connection(v.selected_server().unwrap(), &v.snapshot),
+            scope: v.selected_connection().unwrap(),
             reading: v.connections_state[&v.server].reading.clone().unwrap(),
         };
-        let late = v.resources.begin("page").unwrap();
+        let late = v.resources.begin("ports").unwrap();
         (late, observation)
     });
     // Render and inspect each destination separately; batching navigation in a
@@ -2303,7 +2477,7 @@ fn connections_query_navigation_retains_cache_and_fences_connection_changes(
     frame(visual);
     assert!(visual.debug_bounds(row_selector(0)).is_none());
     view.update(visual, |v, cx| {
-        v.snapshot["config"]["servers"][0]["sshHost"] = json!("two");
+        v.snapshot_mut().config.servers[0].ssh_host = "two".into();
         v.navigate(Page::Ports, cx);
         assert!(
             v.connections_state[&v.server].reading.is_none(),
@@ -2373,11 +2547,23 @@ fn git_status_observations_are_quiet_but_reconcile_changed_and_older_pages(
             let mut view = typed_owner(window, cx);
             view.page = Page::Projects;
             view.window_visible = true;
-            view.git.repo = json!({"repoId":"repo", "bare":false, "head":{"name":"main"}});
-            view.git.page = json!({"snapshot":"one", "entries":[], "nextCursor":null,
-                "metadata":{"head":{"name":"main"},"totalEntries":0}});
-            let status = view.git.page.clone();
-            put(&mut view, "git-sync-status", status);
+            let mut repo = crate::git_fixture::read_only_repository("repo");
+            repo.head = typed_branch_head("main");
+            view.git.repo = Some(repo);
+            let mut status = crate::git_fixture::status_page("one", vec![], None);
+            status.metadata.head = typed_branch_head("main");
+            view.git.page = Some(crate::git_listing::Listing::Status(Box::new(
+                status.clone(),
+            )));
+            let generation = view
+                .resources
+                .begin_refresh("git-sync-status", false)
+                .unwrap();
+            view.resources.complete_git(
+                "git-sync-status",
+                generation,
+                Ok(newport_protocol::git::Reply::Status(Box::new(status))),
+            );
             view
         });
         owner_view = Some(view.clone());
@@ -2395,7 +2581,7 @@ fn git_status_observations_are_quiet_but_reconcile_changed_and_older_pages(
         cx.observe(&view, |count, _, _| *count += 1).detach();
         0
     });
-    let observe = |data: Value, visual: &mut VisualTestContext| {
+    let observe = |data: crate::git_listing::StatusPage, visual: &mut VisualTestContext| {
         let generation = view.update(visual, |view, _| {
             view.last_refresh = Instant::now();
             let generation = view
@@ -2413,20 +2599,18 @@ fn git_status_observations_are_quiet_but_reconcile_changed_and_older_pages(
         });
         replies
             .send(super::Completion {
-                discovery: None,
-                pdf: None,
-                pdf_text: None,
-                image: None,
                 server: "00000000-0000-4000-8000-000000000001".into(),
                 key: "git-sync-status".into(),
                 generation,
-                result: Ok(data),
+                result: super::Outcome::Git(Ok(newport_protocol::git::Reply::Status(Box::new(
+                    data,
+                )))),
             })
             .unwrap();
         view.update(visual, |view, cx| view.tick(cx));
         frame(visual);
     };
-    let original = view.read_with(visual, |view, _| view.git.page.clone());
+    let original = view.read_with(visual, |view, _| view.git.status_page().unwrap().clone());
     for _ in 0..3 {
         observe(original.clone(), visual);
     }
@@ -2446,14 +2630,12 @@ fn git_status_observations_are_quiet_but_reconcile_changed_and_older_pages(
     assert_eq!(observed(&request).1["request"]["params"]["repoId"], "repo");
     replies
         .send(super::Completion {
-            discovery: None,
-            pdf: None,
-            pdf_text: None,
-            image: None,
             server: "00000000-0000-4000-8000-000000000001".into(),
             key: request.key,
             generation: request.generation,
-            result: Ok(original.clone()),
+            result: super::Outcome::Git(Ok(newport_protocol::git::Reply::Status(Box::new(
+                original.clone(),
+            )))),
         })
         .unwrap();
     view.update(visual, |view, cx| view.tick(cx));
@@ -2461,13 +2643,17 @@ fn git_status_observations_are_quiet_but_reconcile_changed_and_older_pages(
     assert_eq!(notices.read_with(visual, |count, _| *count), 0);
 
     let mut changed = original.clone();
-    changed["snapshot"] = json!("two");
-    changed["metadata"]["head"]["name"] = json!("other");
+    changed.snapshot = "two".into();
+    changed.metadata.head = typed_branch_head("other");
     observe(changed.clone(), visual);
     assert_eq!(notices.read_with(visual, |count, _| *count), 1);
     assert_eq!(
-        view.read_with(visual, |view, _| view.git.repo["head"]["name"].clone()),
-        "other"
+        view.read_with(visual, |view, _| view
+            .git
+            .repo
+            .as_ref()
+            .and_then(|repo| repo.head.name.clone())),
+        Some(newport_protocol::git::Path::new(b"other"))
     );
     assert_eq!(requests.try_recv().unwrap().key, "git-list");
     // Repeated observations must not abandon an already-running first-page read.
@@ -2484,7 +2670,9 @@ fn git_status_observations_are_quiet_but_reconcile_changed_and_older_pages(
     // Approval/reconnection may succeed without changing the repository.
     // A failed list must still recover from an identical successful poll.
     view.update(visual, |view, _| {
-        view.git.page = changed.clone();
+        view.git.page = Some(crate::git_listing::Listing::Status(Box::new(
+            changed.clone(),
+        )));
         view.resources.invalidate("git-list");
         let generation = view.resources.begin("git-list").unwrap();
         view.resources.complete(
@@ -2526,25 +2714,30 @@ fn successful_connection_test_refreshes_only_the_selected_servers_page(cx: &mut 
             view.work = work.into();
             view.replies = inbox;
             view.page = Page::Projects;
-            view.selection = Some(json!({"id":"project"}));
-            view.git.repo = json!({"repoId":"repo", "bare":false});
+            view.selection = Some(crate::project_library_state::typed_fixture::bookmark(
+                1,
+                "00000000-0000-4000-8000-000000000001",
+                "Project",
+                "/project",
+            ));
+            view.git.repo = Some(crate::git_fixture::read_only_repository("repo"));
             view.last_refresh = Instant::now();
             let key = format!("server-test:{server}");
             let generation = view.resources.begin(&key).unwrap();
             replies
                 .send(super::Completion {
-                    discovery: None,
-                    pdf: None,
-                    pdf_text: None,
-                    image: None,
                     server: server.into(),
                     key,
                     generation,
-                    result: if success {
-                        Ok(Value::Null)
+                    result: super::Outcome::Typed(if success {
+                        Ok(newport_protocol::desktop::Reply::Connection(Box::new(
+                            newport_protocol::desktop::connection::Reply::TestConnection(Box::new(
+                                newport_protocol::common::Present {},
+                            )),
+                        )))
                     } else {
                         Err("SSH agent unavailable".to_owned().into())
-                    },
+                    }),
                 })
                 .unwrap();
             view.tick(cx);
@@ -2583,9 +2776,21 @@ fn git_refresh_waits_for_cache_invalidation_and_cannot_reload_a_replacement_chec
     view.unwrap().update(visual, |v, _| {
         v.work = work.into();
         v.page = Page::Projects;
-        v.git.repo = json!({"repoId":"first","bare":false});
+        v.git.repo = Some(crate::git_fixture::read_only_repository("first"));
         v.git.tab = 0;
-        put(v, "git-list", json!({"entries":[{"path":"existing"}]}));
+        let existing = crate::git_fixture::status_page(
+            "existing",
+            vec![crate::git_fixture::status_entry("existing", "existing")],
+            None,
+        );
+        let generation = v.resources.begin_refresh("git-list", false).unwrap();
+        v.resources.complete_git(
+            "git-list",
+            generation,
+            Ok(newport_protocol::git::Reply::Status(Box::new(
+                existing.clone(),
+            ))),
+        );
         v.git_refresh();
         assert!(
             v.git_mutation_blocks_write(),
@@ -2595,12 +2800,12 @@ fn git_refresh_waits_for_cache_invalidation_and_cannot_reload_a_replacement_chec
         assert_eq!(observed(&barrier).0, "git_refresh_repository");
         assert_eq!(observed(&barrier).1["repoId"], "first");
         assert!(requests.try_recv().is_err(), "no read before invalidation");
-        assert_eq!(v.value("git-list")["entries"][0]["path"], "existing");
-        v.resources.complete(
+        assert_eq!(v.git_status("git-list"), Some(&existing));
+        assert!(v.complete_repository_refresh(
             &barrier.key,
             barrier.generation,
-            Ok(json!({"repoId":"first"})),
-        );
+            refreshed("first")
+        ));
         v.git_completed(&barrier.key);
         let reads: Vec<_> = requests.try_iter().collect();
         assert!(reads.iter().any(
@@ -2609,9 +2814,10 @@ fn git_refresh_waits_for_cache_invalidation_and_cannot_reload_a_replacement_chec
 
         v.git_refresh();
         let late = requests.try_recv().unwrap();
-        v.git.repo = json!({"repoId":"00000000-0000-4000-8000-000000000002","bare":false});
-        v.resources
-            .complete(&late.key, late.generation, Ok(json!({"repoId":"first"})));
+        v.git.repo = Some(crate::git_fixture::read_only_repository(
+            "00000000-0000-4000-8000-000000000002",
+        ));
+        assert!(v.complete_repository_refresh(&late.key, late.generation, refreshed("first")));
         v.git_completed(&late.key);
         assert!(
             requests.try_recv().is_err(),
@@ -2633,45 +2839,74 @@ fn git_index_refresh_keeps_the_view_and_only_reloads_current_status_and_diff(
     view.update(visual, |v, _| {
         v.work = work.into();
         v.page = Page::Projects;
-        v.git.repo = json!({"repoId":"repo","bare":false});
-        let entry = json!({"entryId":"old","path":{"bytesB64":"YQ=="},"unstaged":true});
-        let page = json!({"snapshot":"before","entries":[entry],"nextCursor":null,"metadata":{}});
-        let diff = json!({"snapshot":"old-diff"});
+        v.git.repo = Some(crate::git_fixture::read_only_repository("repo"));
+        let entry = crate::git_fixture::status_entry("old", "a");
+        let status = crate::git_fixture::status_page("before", vec![entry.clone()], None);
+        let page = Some(crate::git_listing::Listing::Status(Box::new(
+            status.clone(),
+        )));
+        let entry = Some(crate::git_listing::Entry::Change(entry));
+        let diff = Some(crate::git_fixture::diff_page(
+            "old-diff",
+            crate::git_fixture::working_metadata("before", "old"),
+            vec![],
+            None,
+        ));
         v.git.page = page.clone();
         v.git.selected = entry.clone();
         v.git.diff = diff.clone();
-        put(v, "git-list", page.clone());
-        put(v, "git-diff", diff.clone());
+        let generation = v.resources.begin_refresh("git-list", false).unwrap();
+        v.resources.complete_git(
+            "git-list",
+            generation,
+            Ok(newport_protocol::git::Reply::Status(Box::new(
+                status.clone(),
+            ))),
+        );
+        let generation = v.resources.begin_refresh("git-diff", false).unwrap();
+        v.resources.complete_git(
+            "git-diff",
+            generation,
+            Ok(newport_protocol::git::Reply::DiffPage(Box::new(
+                diff.clone().unwrap(),
+            ))),
+        );
         let old_read = v.resources.begin("git-list").unwrap();
         v.git_refresh_index();
         assert!(v.git_mutation_blocks_write());
         assert_eq!(v.git.page, page);
         assert_eq!(v.git.selected, entry);
         assert_eq!(v.git.diff, diff);
-        assert!(!v.resources.complete("git-list", old_read, Ok(page.clone())));
+        assert!(!v.resources.complete_git(
+            "git-list",
+            old_read,
+            Ok(newport_protocol::git::Reply::Status(Box::new(
+                status.clone()
+            )))
+        ));
         let barrier = requests.try_recv().unwrap();
         assert_eq!(observed(&barrier).0, "git_refresh_repository");
         assert!(requests.try_recv().is_err());
-        v.resources.complete(
-            &barrier.key,
-            barrier.generation,
-            Ok(json!({"repoId":"repo"})),
-        );
+        assert!(v.complete_repository_refresh(&barrier.key, barrier.generation, refreshed("repo")));
         v.git_completed(&barrier.key);
         let status = requests.try_recv().unwrap();
         assert_eq!(observed(&status).1["request"]["method"], "repo.status");
         assert!(requests.try_recv().is_err());
         assert_eq!(v.git.page, page);
         assert_eq!(v.git.diff, diff);
-        let staged = json!({"entryId":"staged","path":{"bytesB64":"YQ=="},"staged":true});
-        v.resources.complete(
+        let mut staged = crate::git_fixture::status_entry("staged", "a");
+        staged.staged = true;
+        staged.unstaged = false;
+        v.resources.complete_git(
             &status.key,
             status.generation,
-            Ok(json!({"snapshot":"after","entries":[staged],"nextCursor":null,"metadata":{}})),
+            Ok(newport_protocol::git::Reply::Status(Box::new(
+                crate::git_fixture::status_page("after", vec![staged.clone()], None),
+            ))),
         );
         v.git_completed(&status.key);
         assert!(!v.git_mutation_blocks_write());
-        assert_eq!(v.git.selected, staged);
+        assert_eq!(v.git.entry(), Some(&staged));
         assert!(v.git.diff_staged);
         let reads: Vec<_> = requests.try_iter().collect();
         assert_eq!(reads.len(), 1);
@@ -2715,28 +2950,38 @@ fn overview_navigation_retains_readings_and_rejects_detached_refresh(cx: &mut Te
     view.update(visual, |v, cx| {
         v.work = work.into();
         v.page = Page::Overview;
-        for (key, value) in [
-            ("page", json!({"cpu":42})),
-            ("history", json!([{"at":123}])),
-        ] {
-            v.resources.invalidate(key);
-            let generation = v.resources.begin(key).unwrap();
-            v.resources.complete(key, generation, Ok(value));
-        }
-        let stale = v.resources.begin("page").unwrap();
+        let cpu = |cpu| newport_protocol::monitor::metrics::Snapshot {
+            cpu,
+            ..Default::default()
+        };
+        let late = |cpu| {
+            Ok(newport_protocol::desktop::Reply::Metrics(Box::new(
+                newport_protocol::desktop::metrics::Reply::Collect(Box::new(
+                    crate::overview::reading(newport_protocol::monitor::metrics::Snapshot {
+                        cpu,
+                        ..Default::default()
+                    }),
+                )),
+            )))
+        };
+        v.resources.invalidate("overview");
+        v.resources.invalidate("history");
+        v.put_reading(cpu(42.));
+        v.put_history(vec![crate::overview::cpu_sample(123, 1.)]);
+        let stale = v.resources.begin("overview").unwrap();
         v.navigate(Page::Integration, cx);
-        assert!(v.resources.get("page").is_none());
-        assert!(!v.resources.complete("page", stale, Ok(json!({"cpu":99}))));
+        assert!(v.resources.get("overview").is_none());
+        assert!(!v.complete_metrics("overview", stale, late(99.)));
         v.navigate(Page::Overview, cx);
-        assert_eq!(v.resources.get("page").unwrap().value["cpu"], 42);
-        assert_eq!(v.resources.get("history").unwrap().value[0]["at"], 123);
-        assert!(v.resources.get("page").unwrap().pending);
-        assert!(!v.resources.complete("page", stale, Ok(json!({"cpu":99}))));
+        assert_eq!(v.overview_reading().unwrap().sample.cpu, 42.);
+        assert_eq!(v.overview_history()[0].at, 123);
+        assert!(v.resources.get("overview").unwrap().pending);
+        assert!(!v.complete_metrics("overview", stale, late(99.)));
         v.navigate(Page::Integration, cx);
         v.reset(); // Connection changes must invalidate the retained data.
         assert!(v.overview_state.cached_reads.is_none());
         v.navigate(Page::Overview, cx);
-        assert!(v.resources.get("page").unwrap().value.is_null());
+        assert!(v.overview_reading().is_none());
     });
 }
 
@@ -2751,19 +2996,26 @@ fn overview_loading_retry_keeps_stale_warning_until_success(cx: &mut TestAppCont
     view.update(visual, |view, _| {
         view.work = work.into();
         view.page = Page::Overview;
-        for key in ["page", "history"] {
-            view.resources.invalidate(key);
-            put(view, key, json!({"cached":true}));
+        view.resources.invalidate("overview");
+        view.resources.invalidate("history");
+        view.put_reading(newport_protocol::monitor::metrics::Snapshot {
+            cpu: 7.,
+            ..Default::default()
+        });
+        view.put_history(vec![crate::overview::cpu_sample(1, 7.)]);
+        for key in ["overview", "history"] {
             let failed = view.resources.begin(key).unwrap();
             view.resources.complete(key, failed, Err("Offline".into()));
         }
         view.refresh();
-        for key in ["page", "history"] {
+        for key in ["overview", "history"] {
             let resource = view.resources.get(key).unwrap();
             assert!(resource.pending);
             assert_eq!(resource.error.as_deref(), Some("Offline"));
-            assert_eq!(resource.value["cached"], true);
+            assert!(resource.has_value());
         }
+        assert_eq!(view.overview_reading().unwrap().sample.cpu, 7.);
+        assert_eq!(view.overview_history().len(), 1);
     });
 }
 
@@ -2783,7 +3035,7 @@ fn projects_loading_routes_to_library_with_toolbar(cx: &mut TestAppContext) {
         Routed(cx.new(|cx| {
             let mut view = typed_owner(window, cx);
             view.page = Page::Projects;
-            view.resources.begin("page");
+            view.resources.begin("projects");
             view
         }))
     });
@@ -2803,7 +3055,7 @@ fn empty_project_library_offers_the_add_choices_in_place(cx: &mut TestAppContext
         let view = cx.new(|cx| {
             let mut view = typed_owner(window, cx);
             view.page = Page::Projects;
-            put(&mut view, "page", json!([]));
+            crate::project_library_state::typed_fixture::put_projects(&mut view, Vec::new());
             view
         });
         owner_view = Some(view.clone());

@@ -7,6 +7,7 @@ mod command_log;
 mod journal;
 mod metrics;
 use newport_protocol::git as protocol;
+use newport_protocol::git::code;
 mod remotes;
 mod tokens;
 use backend::Output;
@@ -135,7 +136,7 @@ fn run(
                     service.request(*call.request)
                 } else {
                     Err(Error::new(
-                        "UNSUPPORTED_METHOD",
+                        code::UNSUPPORTED_METHOD,
                         "This Git method is not available.",
                     ))
                 };

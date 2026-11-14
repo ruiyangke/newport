@@ -66,7 +66,7 @@ fn request(service: &mut impl Adapter, method: &str, params: Value) -> Result<Va
             else {
                 panic!()
             };
-            let value = serde_json::to_value(value.projection(&request)).unwrap();
+            let value = serde_json::to_value(&value).unwrap();
             (value.clone(), value)
         }
         Output::Diff { snapshot, diff } => {

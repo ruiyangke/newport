@@ -35,6 +35,27 @@ pub(super) fn menu_for_tab(
             let _ = reset.update(cx, |workspace, cx| workspace.reset_name(id, cx));
         }));
     }
+    let (left, right) = entity.read(cx).tab_moves(id);
+    let move_left = view.clone();
+    let move_right = view.clone();
+    let menu = menu
+        .separator()
+        .item(
+            PopupMenuItem::new("Move left")
+                .disabled(!left)
+                .on_click(move |_, _, cx| {
+                    let _ = move_left
+                        .update(cx, |workspace, cx| workspace.move_tab_by_one(id, false, cx));
+                }),
+        )
+        .item(
+            PopupMenuItem::new("Move right")
+                .disabled(!right)
+                .on_click(move |_, _, cx| {
+                    let _ = move_right
+                        .update(cx, |workspace, cx| workspace.move_tab_by_one(id, true, cx));
+                }),
+        );
     let reconnect = view.clone();
     let disconnect = view.clone();
     menu.separator()

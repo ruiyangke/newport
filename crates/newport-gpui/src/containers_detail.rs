@@ -273,7 +273,7 @@ impl ContainersPanel {
     }
     fn container_facts(&self, c: &Container, cx: &mut Context<Self>) -> AnyElement {
         let history = self.client.stats_history(&c.id);
-        let running = c.state == domain::ContainerState::Running;
+        let running = c.state == ContainerState::Running;
         let ports = self.port_links(c, cx);
         if !running && c.restart_count == 0 && ports.is_none() {
             return div().children(self.port_errors(c, cx)).into_any_element();
@@ -312,10 +312,10 @@ impl ContainersPanel {
                                 format!(
                                     "{}{}",
                                     c.memory
-                                        .map(|memory| bytes(&json!(memory)))
+                                        .map(|memory| byte_size(memory as f64))
                                         .unwrap_or_else(|| "—".into()),
                                     c.memory_limit
-                                        .map(|limit| format!(" of {}", bytes(&json!(limit))))
+                                        .map(|limit| format!(" of {}", byte_size(limit as f64)))
                                         .unwrap_or_default()
                                 ),
                                 cx,
@@ -347,9 +347,7 @@ impl ContainersPanel {
             return quiet("That project is no longer on this server.", cx).into_any_element();
         };
         let state = domain::project_state(project);
-        let detail: Option<newport_domain::compose::ComposeProject> =
-            serde_json::from_value(self.compose_value()).ok();
-        let missing = compose_services::missing_count(project, detail.as_ref());
+        let missing = compose_services::missing_count(project, self.client.compose_project());
         let job = self.running_compose_job();
         let progress = self
             .client
@@ -473,9 +471,7 @@ impl ContainersPanel {
         else {
             return div().into_any_element();
         };
-        let detail: Option<newport_domain::compose::ComposeProject> =
-            serde_json::from_value(self.compose_value()).ok();
-        self.compose_services_table(group, detail.as_ref(), window, cx)
+        self.compose_services_table(group, self.client.compose_project(), window, cx)
     }
     /// Records the detail pane's width after layout, so content sized to it
     /// follows the resizable list rather than an assumed list width.

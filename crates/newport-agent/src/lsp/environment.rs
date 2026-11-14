@@ -3,7 +3,8 @@
 //! the worktree's direnv environment. direnv's allow list decides whether an
 //! `.envrc` runs; Newport never evaluates one itself.
 use super::process::{self, Collector};
-use serde_json::{Value, json};
+use newport_protocol::lsp::Environment;
+use serde_json::Value;
 use std::{
     collections::BTreeMap,
     io,
@@ -34,21 +35,21 @@ pub(super) fn load(
     root: &Path,
     mut vars: Vars,
     use_envrc: bool,
-    report: &mut dyn FnMut(Value) -> io::Result<()>,
+    report: &mut dyn FnMut(Environment) -> io::Result<()>,
 ) -> io::Result<Option<Loaded>> {
     vars.insert("PWD".into(), root.to_string_lossy().into_owned());
     let Some(direnv) = find_program("direnv", vars.get("PATH").map(String::as_str)) else {
         return Ok(match envrc_above(root) {
             Some(path) if use_envrc => {
-                report(state("unavailable", Some(&path), None))?;
+                report(Environment::Unavailable { path: shown(&path) })?;
                 None
             }
             Some(path) => {
-                report(state("skipped", Some(&path), None))?;
+                report(Environment::Skipped { path: shown(&path) })?;
                 Some(Loaded { vars, direnv: None })
             }
             None => {
-                report(state("none", None, None))?;
+                report(Environment::NoEnvrc)?;
                 Some(Loaded { vars, direnv: None })
             }
         });
@@ -61,11 +62,11 @@ pub(super) fn load(
         let failed = status.timed_out || !status.success;
         return Ok(match envrc_above(root).filter(|_| failed) {
             None => {
-                report(state("none", None, None))?;
+                report(Environment::NoEnvrc)?;
                 Some(Loaded { vars, direnv: None })
             }
             Some(path) if !use_envrc => {
-                report(state("skipped", Some(&path), None))?;
+                report(Environment::Skipped { path: shown(&path) })?;
                 Some(Loaded { vars, direnv: None })
             }
             Some(path) => {
@@ -78,27 +79,27 @@ pub(super) fn load(
                         message => message.to_owned(),
                     }
                 };
-                report(state("failed", Some(&path), Some(&message)))?;
+                report(load_failed(&path, &message))?;
                 None
             }
         });
     };
     if !use_envrc {
-        report(state("skipped", Some(&path), None))?;
+        report(Environment::Skipped { path: shown(&path) })?;
         return Ok(Some(Loaded { vars, direnv: None }));
     }
     match allowed {
         Allowed::Yes => {}
         Allowed::No => {
-            report(state("blocked", Some(&path), None))?;
+            report(Environment::Blocked { path: shown(&path) })?;
             return Ok(None);
         }
         Allowed::Denied => {
-            report(state("denied", Some(&path), None))?;
+            report(Environment::Denied { path: shown(&path) })?;
             return Ok(None);
         }
     }
-    report(state("loading", Some(&path), None))?;
+    report(Environment::Loading { path: shown(&path) })?;
     let export = run(&direnv, &["export", "json"], &vars, root, LOAD_TIMEOUT)?;
     let failure = if export.timed_out {
         Some(format!(
@@ -111,10 +112,10 @@ pub(super) fn load(
         apply(&mut vars, &export.stdout).err()
     };
     if let Some(message) = failure {
-        report(state("failed", Some(&path), Some(message.trim())))?;
+        report(load_failed(&path, message.trim()))?;
         return Ok(None);
     }
-    report(state("loaded", Some(&path), None))?;
+    report(Environment::Loaded { path: shown(&path) })?;
     Ok(Some(Loaded {
         vars,
         direnv: Some(direnv),
@@ -130,15 +131,15 @@ pub(super) fn changed(direnv: &Path, vars: &Vars, root: &Path) -> bool {
     })
 }
 
-fn state(kind: &str, path: Option<&Path>, message: Option<&str>) -> Value {
-    let mut state = json!({ "state": kind });
-    if let Some(path) = path {
-        state["path"] = json!(path.to_string_lossy());
+fn shown(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn load_failed(path: &Path, message: &str) -> Environment {
+    Environment::Failed {
+        path: shown(path),
+        message: Some(message.to_owned()).filter(|m| !m.is_empty()),
     }
-    if let Some(message) = message.filter(|m| !m.is_empty()) {
-        state["message"] = json!(message);
-    }
-    state
 }
 
 /// Apply `direnv export json`: each variable is set, or removed when null.
@@ -462,6 +463,7 @@ mod tests {
     fn load_states(root: &Path, vars: Vars, use_envrc: bool) -> (Vec<String>, Option<Loaded>) {
         let mut states = Vec::new();
         let loaded = load(root, vars, use_envrc, &mut |state| {
+            let state = serde_json::to_value(state).unwrap();
             let mut line = state["state"].as_str().unwrap().to_owned();
             if let Some(message) = state["message"].as_str() {
                 line = format!("{line}: {message}");

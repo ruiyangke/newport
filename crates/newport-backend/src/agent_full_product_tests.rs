@@ -41,9 +41,9 @@ touch "$legacy/.validated-v1"
     .await
     .unwrap();
     let before = crate::remote_apps::status(&owner).await.unwrap();
-    assert!(before["agent"].is_null());
-    assert!(before["legacyAgent"].is_string());
-    assert_eq!(before["bundledVariant"], "full");
+    assert!(before.agent.is_none());
+    assert!(before.legacy_agent.is_some());
+    assert_eq!(before.bundled_variant, Variant::Full);
     // Remote Apps invokes the same consent/install flow as Needle. Installing
     // the full product must not enable clipboard/browser sharing or finish setup.
     crate::server_setup::install(&state, server.clone())
@@ -55,20 +55,18 @@ touch "$legacy/.validated-v1"
     assert!(!owner.permissions.browser_enabled());
     assert!(!owner.permissions.clipboard_enabled());
     let gui_status = crate::remote_apps::status(&owner).await.unwrap();
-    assert_eq!(gui_status["agent"], "newport-agent");
-    assert_eq!(gui_status["installedVariant"], "full");
-    assert_eq!(gui_status["selectedRuntime"]["product"], "full");
+    assert_eq!(gui_status.agent.as_deref(), Some("newport-agent"));
+    assert_eq!(gui_status.installed_variant, Some(Variant::Full));
+    let selected = gui_status.selected_runtime.as_ref().unwrap();
+    assert_eq!(selected.product, Variant::Full);
     assert_eq!(
-        gui_status["selectedRuntime"]["buildSha256"],
-        gui_status["bundledRevision"]
+        Some(&selected.build_sha256),
+        gui_status.bundled_revision.as_ref()
     );
-    assert!(gui_status["agentError"].is_null());
-    assert_eq!(
-        gui_status["expectedConnection"]["id"],
-        server.id.to_string()
-    );
-    assert!(gui_status["legacyAgent"].is_string());
-    assert!(crate::remote_apps::catalogue(&owner).await.unwrap()["apps"].is_array());
+    assert!(gui_status.agent_error.is_none());
+    assert_eq!(gui_status.expected_server.id, server.id);
+    assert!(gui_status.legacy_agent.is_some());
+    crate::remote_apps::catalogue(&owner).await.unwrap();
     let status = owner.check_installation().await.unwrap();
     assert_eq!(status.installed_variant, Some(Variant::Full));
     assert_eq!(status.build_relation, BuildRelation::Bundled);

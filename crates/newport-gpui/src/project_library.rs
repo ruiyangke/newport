@@ -1,26 +1,27 @@
 //! Local project bookmarks; these controls never mutate a remote repository.
 use super::*;
+use desktop::preferences::Project;
 use newport_client::project_bookmark::files_path;
 
 pub(super) struct Edit {
-    project: Value,
+    project: Project,
     remove: bool,
     name: Entity<InputState>,
     _subscription: Subscription,
 }
-fn rename(project: &Value, server: &str, name: &str) -> Option<Value> {
+fn rename(project: &Project, server: &str, name: &str) -> Option<Project> {
     let name = name.trim();
-    if project["serverId"].as_str() != Some(server)
-        || !project["id"].is_string()
+    if project.server.to_string() != server
         || name.is_empty()
         || name.len() > 256
         || name.chars().any(char::is_control)
     {
         return None;
     }
-    let mut saved = project.clone();
-    saved["name"] = json!(name);
-    Some(saved)
+    Some(Project {
+        name: name.into(),
+        ..project.clone()
+    })
 }
 pub(super) use newport_client::project_checks::status_key;
 
@@ -44,7 +45,7 @@ fn library_notice<'a>(
     let Some(resource) = resource else {
         return Some(LibraryNotice::Loading);
     };
-    let cached = resource.value.is_array();
+    let cached = resource.has_value();
     if let Some(detail) = resource.error.as_deref() {
         return Some(LibraryNotice::Error { detail, cached });
     }
@@ -112,14 +113,26 @@ fn library_error(detail: &str, cached: bool, cx: &App) -> AnyElement {
 impl Newport {
     pub(super) fn project_open_files(
         &mut self,
-        project: &Value,
+        project: &Project,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.server_form.is_some() || project["serverId"].as_str() != Some(&self.server) {
+        if project.server.to_string() != self.server {
             return;
         }
-        let Some(path) = files_path(project, &self.server) else {
+        self.open_checkout_files(Some(&project.path), window, cx);
+    }
+    /// Shows a checkout's folder in Files; `None` is a path Files cannot read.
+    pub(super) fn open_checkout_files(
+        &mut self,
+        path: Option<&newport_protocol::git::Path>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.server_form.is_some() {
+            return;
+        }
+        let Some(path) = path.and_then(files_path) else {
             self.notice = Some("This repository’s path cannot be opened in Files. Files requires an absolute UTF-8 path.".into());
             cx.notify();
             return;
@@ -142,7 +155,7 @@ impl Newport {
     }
     pub(super) fn edit_project(
         &mut self,
-        project: Value,
+        project: Project,
         remove: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -151,11 +164,11 @@ impl Newport {
             || self.project_add_pending()
             || self.project_create.is_some()
             || self.project_edit_busy()
-            || project["serverId"].as_str() != Some(&self.server)
+            || project.server.to_string() != self.server
         {
             return;
         }
-        let name = cx.new(|cx| InputState::new(window, cx).default_value(text(&project, "name")));
+        let name = cx.new(|cx| InputState::new(window, cx).default_value(project.name.clone()));
         if !remove {
             crate::controls::focus_editor(&name, window, cx);
         }
@@ -188,49 +201,31 @@ impl Newport {
         ) else {
             return;
         };
-        let operation = (|| {
-            let server = desktop_server(&self.server)?;
-            let id = desktop_server(project["id"].as_str().ok_or("Missing project identity.")?)?;
-            if edit.remove {
-                Ok(desktop::Operation::Preferences(Box::new(
-                    desktop::preferences::Operation::ProjectsRemove(Box::new(
-                        desktop::preferences::ProjectsRemoveArgs {
-                            server,
-                            project: id,
-                        },
-                    )),
-                )))
-            } else {
-                let path = newport_protocol::git::Path {
-                    bytes_b64: project["path"]["bytesB64"]
-                        .as_str()
-                        .ok_or("Missing project path.")?
-                        .into(),
-                    display: project["path"]["display"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .into(),
-                };
-                path.decode().map_err(|error| {
+        let operation = if edit.remove {
+            Ok(desktop::Operation::Preferences(Box::new(
+                desktop::preferences::Operation::ProjectsRemove(Box::new(
+                    desktop::preferences::ProjectsRemoveArgs {
+                        server: project.server,
+                        project: project.id,
+                    },
+                )),
+            )))
+        } else {
+            project
+                .path
+                .decode()
+                .map_err(|error| {
                     newport_client::request_error::RequestError::from(error.to_string())
-                })?;
-                let project = desktop::preferences::Project {
-                    id,
-                    server,
-                    name: project["name"]
-                        .as_str()
-                        .ok_or("Missing project name.")?
-                        .into(),
-                    path,
-                };
-                Ok(desktop::Operation::Preferences(Box::new(
-                    desktop::preferences::Operation::ProjectsSave(Box::new(
-                        desktop::preferences::ProjectsSaveArgs { project },
-                    )),
-                )))
-            }
-        })();
-        self.request_result("project-edit", operation);
+                })
+                .map(|_| {
+                    desktop::Operation::Preferences(Box::new(
+                        desktop::preferences::Operation::ProjectsSave(Box::new(
+                            desktop::preferences::ProjectsSaveArgs { project },
+                        )),
+                    ))
+                })
+        };
+        self.request_typed("project-edit", operation);
         cx.notify();
     }
     pub(super) fn project_edit_completed(&mut self) {
@@ -340,8 +335,8 @@ impl Newport {
             .get(&self.server)
             .cloned()
             .unwrap_or_default();
-        let projects = library.list.prepare(
-            self.resources.get("page"),
+        let projects = library.prepare_list(
+            self.resources.get("projects"),
             &preferences,
             &query,
             self.content_width,
@@ -352,38 +347,30 @@ impl Newport {
             self.content_width.min(1240.) - crate::controls::PAGE_PADDING * 2.,
         );
         let notice = library_notice(
-            self.resources.get("page"),
+            self.resources.get("projects"),
             count,
             &query,
             preferences.favorites_only,
         );
         let loading = notice == Some(LibraryNotice::Loading);
         // No bookmarks at all, rather than none matching a search or Favorites.
-        let empty_library = self.resources.get("page").is_some_and(|page| {
+        let empty_library = self.resources.get("projects").is_some_and(|page| {
             page.error.is_none()
                 && !page.display_pending()
-                && page.value.as_array().is_some_and(Vec::is_empty)
+                && self.library_projects().is_some_and(<[_]>::is_empty)
         });
         let form_open = self.project_add.is_some()
             || self.project_create.is_some()
             || self.project_edit.is_some();
-        let (total, favorites) = self
-            .resources
-            .get("page")
-            .and_then(|page| page.value.as_array())
-            .map_or((0, 0), |projects| {
-                (
-                    projects.len(),
-                    projects
-                        .iter()
-                        .filter(|p| {
-                            p["id"]
-                                .as_str()
-                                .is_some_and(|id| preferences.favorites.contains(id))
-                        })
-                        .count(),
-                )
-            });
+        let (total, favorites) = self.library_projects().map_or((0, 0), |projects| {
+            (
+                projects.len(),
+                projects
+                    .iter()
+                    .filter(|p| preferences.favorites.contains(&p.id.to_string()))
+                    .count(),
+            )
+        });
         let show_owner = cx.weak_entity();
         let toolbar = crate::controls::page_toolbar(cx)
             .id("projects-toolbar")
@@ -422,7 +409,7 @@ impl Newport {
                     .icon(IconName::RefreshCw)
                     .tooltip("Refresh")
                     .accessibility_label("Refresh projects")
-                    .loading(self.resources.get("page").is_some_and(|r| r.pending))
+                    .loading(self.resources.get("projects").is_some_and(|r| r.pending))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.refresh();
                         cx.notify();
@@ -492,10 +479,7 @@ impl Newport {
             }
             text
         };
-        let has_reading = self
-            .resources
-            .get("page")
-            .is_some_and(|page| page.value.is_array());
+        let has_reading = self.library_projects().is_some();
         // The toolbar spans the page like the other list pages; the library
         // below keeps its padding for notices and empty states.
         div().id("projects-page").flex_1().min_h_0().flex().flex_col()
@@ -531,7 +515,7 @@ impl Newport {
 }
 
 /// The dialog's own title names the operation; the body names the project.
-fn edit_description(project: &Value, remove: bool) -> Div {
+fn edit_description(project: &Project, remove: bool) -> Div {
     div()
         .min_w_0()
         .flex()
@@ -540,12 +524,12 @@ fn edit_description(project: &Value, remove: bool) -> Div {
         .when(remove, |view| {
             view.child(project_dialog::description(
                 "project-edit-name",
-                text(project, "name"),
+                project.name.clone(),
             ))
         })
         .child(project_dialog::description(
             "project-edit-path",
-            text(&project["path"], "display"),
+            project.path.display.clone(),
         ))
         .when(remove, |view| {
             view.child(project_dialog::description(
@@ -575,8 +559,7 @@ impl Newport {
     fn empty_library(&self, disabled: bool, cx: &mut Context<Self>) -> AnyElement {
         let server = self
             .selected_server()
-            .and_then(|server| server["name"].as_str())
-            .unwrap_or("this server")
+            .map_or("this server", |server| server.name.as_str())
             .to_owned();
         let narrow = self.content_width < 640.;
         let card =
@@ -684,8 +667,8 @@ impl Newport {
 #[cfg(test)]
 mod tests {
     use super::{LibraryNotice, library_notice, rename};
+    use crate::project_library_state::typed_fixture::{TYPED_SECOND, TYPED_SERVER, bookmark};
     use newport_client::resources::Resources;
-    use serde_json::json;
 
     #[gpui_kit::test]
     fn input_presentation_does_not_reset_project_scroll_or_invalidate_other_pages(
@@ -719,10 +702,12 @@ mod tests {
             visual.update(|_, cx| cx.observe(&view, move |_, _| observed.set(observed.get() + 1)));
         let projects: Vec<_> = (0..100)
             .map(|i| {
-                json!({
-                    "id":format!("p{i}"),"serverId":"fixture","name":format!("Project {i}"),
-                    "path":{"display":format!("/work/{i}"),"bytesB64":i.to_string()}
-                })
+                bookmark(
+                    i,
+                    TYPED_SERVER,
+                    &format!("Project {i}"),
+                    &format!("/work/{i}"),
+                )
             })
             .collect();
         for page in [crate::Page::Projects, crate::Page::Overview] {
@@ -805,7 +790,12 @@ mod tests {
                 _: &mut gpui::Context<Self>,
             ) -> impl IntoElement {
                 super::edit_description(
-                    &json!({"name":"日本語 project", "path":{"display":"/home/fixture/日本語 project"}}),
+                    &bookmark(
+                        1,
+                        TYPED_SERVER,
+                        "日本語 project",
+                        "/home/fixture/日本語 project",
+                    ),
                     self.0,
                 )
             }
@@ -857,102 +847,114 @@ mod tests {
     }
     #[test]
     fn status_cache_is_scoped_to_server_bookmark_and_exact_path() {
-        let project = json!({"id":"p","serverId":"a","path":{"bytesB64":"same"}});
+        let project = bookmark(1, TYPED_SERVER, "Project", "/same");
         let key = super::status_key(&project);
-        for field in ["id", "serverId"] {
-            let mut other = project.clone();
-            other[field] = json!("other");
-            assert_ne!(key, super::status_key(&other));
-        }
+        let mut other = project.clone();
+        other.id = uuid::Uuid::from_u128(2);
+        assert_ne!(key, super::status_key(&other));
+        let mut other = project.clone();
+        other.server = uuid::Uuid::parse_str(TYPED_SECOND).unwrap();
+        assert_ne!(key, super::status_key(&other));
+        let mut other = project.clone();
+        other.name = "Renamed".into();
+        assert_eq!(key, super::status_key(&other), "a rename keeps its status");
         let mut other = project;
-        other["path"]["bytesB64"] = json!("another");
+        other.path.bytes_b64 = "another".into();
         assert_ne!(key, super::status_key(&other));
     }
     #[test]
     fn library_empty_states_require_a_successful_list_read() {
         let mut resources = Resources::default();
         assert_eq!(
-            library_notice(resources.get("page"), 0, "", false),
+            library_notice(resources.get("projects"), 0, "", false),
             Some(LibraryNotice::Loading)
         );
-        let read = resources.begin("page").unwrap();
+        let read = resources.begin("projects").unwrap();
         assert_eq!(
-            library_notice(resources.get("page"), 0, "missing", true),
+            library_notice(resources.get("projects"), 0, "missing", true),
             Some(LibraryNotice::Loading)
         );
-        resources.complete("page", read, Err("Connection closed".into()));
+        resources.complete("projects", read, Err("Connection closed".into()));
         assert_eq!(
-            library_notice(resources.get("page"), 0, "", false),
+            library_notice(resources.get("projects"), 0, "", false),
             Some(LibraryNotice::Error {
                 detail: "Connection closed",
                 cached: false,
             })
         );
-        let retry = resources.begin("page").unwrap();
+        let retry = resources.begin("projects").unwrap();
         assert_eq!(
-            library_notice(resources.get("page"), 0, "", false),
+            library_notice(resources.get("projects"), 0, "", false),
             Some(LibraryNotice::Loading)
         );
-        resources.complete("page", retry, Ok(json!([])));
+        assert!(resources.complete_owned("projects", retry, Ok(true)));
         assert!(matches!(
-            library_notice(resources.get("page"), 0, "  ", false),
+            library_notice(resources.get("projects"), 0, "  ", false),
             Some(LibraryNotice::Empty(message)) if message.starts_with("No saved projects.")
         ));
         assert!(matches!(
-            library_notice(resources.get("page"), 0, "", true),
+            library_notice(resources.get("projects"), 0, "", true),
             Some(LibraryNotice::Empty(message)) if message.starts_with("No favorite projects.")
         ));
         assert_eq!(
-            library_notice(resources.get("page"), 0, "missing", true),
+            library_notice(resources.get("projects"), 0, "missing", true),
             Some(LibraryNotice::Empty("No projects match your search."))
         );
     }
     #[test]
     fn library_refresh_keeps_bookmarks_and_never_misreports_a_failed_search_as_empty() {
         let mut resources = Resources::default();
-        let bookmarks =
-            json!([{"id":"one","name":"日本語 project","path":{"display":"/projects/日本語"}}]);
-        let read = resources.begin("page").unwrap();
-        resources.complete("page", read, Ok(bookmarks.clone()));
-        assert_eq!(library_notice(resources.get("page"), 1, "", false), None);
-
-        let background = resources.begin_refresh("page", false).unwrap();
-        assert_eq!(library_notice(resources.get("page"), 1, "", false), None);
-        resources.complete("page", background, Ok(bookmarks.clone()));
-        let refresh = resources.begin_manual("page").unwrap();
-        assert_eq!(resources.get("page").unwrap().value, bookmarks);
+        let read = resources.begin("projects").unwrap();
+        resources.complete_owned("projects", read, Ok(true));
         assert_eq!(
-            library_notice(resources.get("page"), 0, "no match", false),
+            library_notice(resources.get("projects"), 1, "", false),
+            None
+        );
+
+        let background = resources.begin_refresh("projects", false).unwrap();
+        assert_eq!(
+            library_notice(resources.get("projects"), 1, "", false),
+            None
+        );
+        resources.complete_owned("projects", background, Ok(false));
+        let refresh = resources.begin_manual("projects").unwrap();
+        assert!(resources.get("projects").unwrap().has_value());
+        assert_eq!(
+            library_notice(resources.get("projects"), 0, "no match", false),
             Some(LibraryNotice::Refreshing)
         );
-        resources.complete("page", refresh, Err("Server unavailable".into()));
-        assert_eq!(resources.get("page").unwrap().value, bookmarks);
+        resources.complete_owned("projects", refresh, Err("Server unavailable".into()));
+        assert!(resources.get("projects").unwrap().has_value());
         assert_eq!(
-            library_notice(resources.get("page"), 0, "no match", false),
+            library_notice(resources.get("projects"), 0, "no match", false),
             Some(LibraryNotice::Error {
                 detail: "Server unavailable",
                 cached: true,
             })
         );
-        let retry = resources.begin("page").unwrap();
-        assert_eq!(resources.get("page").unwrap().value, bookmarks);
-        resources.complete("page", retry, Ok(bookmarks));
+        let retry = resources.begin("projects").unwrap();
+        assert!(resources.get("projects").unwrap().has_value());
+        resources.complete_owned("projects", retry, Ok(false));
         assert_eq!(
-            library_notice(resources.get("page"), 0, "no match", false),
+            library_notice(resources.get("projects"), 0, "no match", false),
             Some(LibraryNotice::Empty("No projects match your search."))
         );
     }
     #[test]
     fn rename_preserves_identity_and_byte_path_and_rejects_invalid_names() {
-        let p = json!({"id":"project","serverId":"server","name":"Old","path":{"display":"/repo�","bytesB64":"L3JlcG//"}});
-        let renamed = rename(&p, "server", " New ").unwrap();
-        assert_eq!(renamed["name"], "New");
-        assert_eq!(renamed["path"], p["path"]);
-        assert_eq!(renamed["id"], p["id"]);
-        assert!(rename(&p, "other", "Name").is_none());
+        let mut p = bookmark(1, TYPED_SERVER, "Old", "/repo");
+        p.path = newport_protocol::git::Path {
+            bytes_b64: "L3JlcG//".into(),
+            display: "/repo�".into(),
+        };
+        let renamed = rename(&p, TYPED_SERVER, " New ").unwrap();
+        assert_eq!(renamed.name, "New");
+        assert_eq!(renamed.path, p.path);
+        assert_eq!(renamed.id, p.id);
+        assert!(rename(&p, TYPED_SECOND, "Name").is_none());
         for name in ["", "  ", "bad\nname", &"é".repeat(129)] {
-            assert!(rename(&p, "server", name).is_none());
+            assert!(rename(&p, TYPED_SERVER, name).is_none());
         }
-        assert!(rename(&p, "server", &"é".repeat(128)).is_some());
+        assert!(rename(&p, TYPED_SERVER, &"é".repeat(128)).is_some());
     }
 }

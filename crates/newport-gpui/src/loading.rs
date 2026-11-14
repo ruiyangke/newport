@@ -101,7 +101,7 @@ impl Newport {
     pub(super) fn initial_loading(&self, key: &str) -> bool {
         self.resources
             .get(key)
-            .is_some_and(|r| r.pending && r.value.is_null())
+            .is_some_and(|r| r.pending && !r.has_value())
     }
     /// Whether `key`'s read has been pending long enough to draw a placeholder.
     pub(super) fn placeholder_due(&self, key: &str) -> bool {

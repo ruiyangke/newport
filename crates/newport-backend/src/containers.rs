@@ -1,4 +1,4 @@
-//! Docker operations through the monitor service, projected into UI replies.
+//! Docker operations through the monitor service.
 use crate::{monitor, server_session::ServerSession};
 use newport_protocol::monitor::containers::*;
 use serde_json::Value;

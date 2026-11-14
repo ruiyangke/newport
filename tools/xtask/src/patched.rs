@@ -1,11 +1,14 @@
-//! Dependencies Newport patches. The repository keeps only each crate's
-//! patch and the crates.io release it applies to; the patched source is
-//! generated, never committed.
+//! Dependencies Newport patches. The repository keeps only the crates.io
+//! release each crate comes from and the patches that change it; the patched
+//! source is generated, never committed.
 //!
-//! `patches/patched.toml` pins each release by version and SHA-256, the patch
-//! is `patches/<name>.patch`, and the source is generated into
-//! `patches/<name>/`, which Git ignores. Newport's root has a set, and so does
-//! `remote/` when it is checked out.
+//! `patches/patched.toml` pins each release by version and SHA-256. A crate's
+//! patches are `patches/<crate>/NNN-<subject>.patch`, numbered 001 to 999 and
+//! applied in that order, each with paths in the crate (`a/src/lib.rs`) and
+//! opening with what it changes, why, and when it can be removed.
+//! `patches/<crate>/NOTICE` states the changes for the third-party notices.
+//! The crate is generated into `vendor/<crate>/`, which Git ignores.
+//! Newport's root has a set, and so does `remote/` when it is checked out.
 use crate::util;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
@@ -17,10 +20,12 @@ use std::{
     time::Duration,
 };
 
-/// Holds the pins, the patches and the generated crates.
+/// Holds the pins and a folder of patches for each crate.
 const DIRECTORY: &str = "patches";
 const MANIFEST: &str = "patches/patched.toml";
-/// Written last into a generated crate: its release, checksum and patch.
+/// Holds the generated crates, one folder each.
+const GENERATED: &str = "vendor";
+/// Written last into a generated crate: its release, checksum and patches.
 const STAMP: &str = ".newport-patched";
 const DOWNLOAD_LIMIT: u64 = 64 * 1024 * 1024;
 
@@ -31,14 +36,57 @@ struct Pin {
     sha256: String,
 }
 
-fn manifest(root: &Path) -> Result<BTreeMap<String, Pin>> {
+/// One of a crate's patches: its number, file name and text.
+#[derive(Debug)]
+struct Patch {
+    number: u16,
+    name: String,
+    text: String,
+}
+
+/// The number a patch's file name starts with: `NNN-<subject>.patch`, 001 to 999.
+fn number(name: &str) -> Option<u16> {
+    let (digits, subject) = name.strip_suffix(".patch")?.split_at_checked(3)?;
+    let subject = subject.strip_prefix('-')?;
+    if subject.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok().filter(|&number| number != 0)
+}
+
+/// `krate`'s patches in `folder`, in order.
+fn patches(folder: &Path, krate: &str) -> Result<Vec<Patch>> {
+    let entries = match fs::read_dir(folder) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut patches = Vec::new();
+    for entry in entries {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if !name.ends_with(".patch") {
+            continue;
+        }
+        let Some(number) = number(&name) else {
+            bail!("{krate}/{name}: a patch is named NNN-<subject>.patch, numbered 001 to 999");
+        };
+        if let Some(other) = patches.iter().find(|patch: &&Patch| patch.number == number) {
+            bail!(
+                "{krate}/{name} and {krate}/{} share number {number:03}",
+                other.name
+            );
+        }
+        let text = fs::read_to_string(folder.join(&name))?;
+        patches.push(Patch { number, name, text });
+    }
+    patches.sort_by_key(|patch| patch.number);
+    Ok(patches)
+}
+
+fn pins(root: &Path) -> Result<BTreeMap<String, Pin>> {
     let path = root.join(MANIFEST);
     toml::from_str(&fs::read_to_string(&path)?)
         .with_context(|| format!("Invalid {}", path.display()))
-}
-
-fn patch_path(root: &Path, name: &str) -> PathBuf {
-    root.join(DIRECTORY).join(format!("{name}.patch"))
 }
 
 /// The roots with patched crates: Newport's, and `remote/` when present.
@@ -65,51 +113,94 @@ pub fn ensure_in(root: &Path) -> Result<()> {
     if !root.join(MANIFEST).is_file() {
         return Ok(());
     }
-    for (name, pin) in manifest(root)? {
-        let patch = fs::read(patch_path(root, &name))?;
-        let directory = root.join(DIRECTORY).join(&name);
-        let stamp = stamp(&name, &pin, &patch);
+    for (name, pin) in &pins(root)? {
+        let folder = root.join(DIRECTORY).join(name);
+        let patches = patches(&folder, name)?;
+        let directory = root.join(GENERATED).join(name);
+        let stamp = stamp(name, pin, &patches);
         if fs::read_to_string(directory.join(STAMP)).is_ok_and(|current| current == stamp) {
             continue;
         }
-        let source = release(&name, &pin)?;
-        generate(
-            &directory,
-            &name,
-            &pin,
-            &source,
-            &patch_path(root, &name),
-            &stamp,
-        )?;
+        let source = release(name, pin)?;
+        generate(&directory, name, pin, &source, &patches, &stamp)?;
         println!(
-            "Generated patches/{name}: {name} {} with its patch",
-            pin.version
+            "Generated vendor/{name}: {name} {} with {} patch{}",
+            pin.version,
+            patches.len(),
+            if patches.len() == 1 { "" } else { "es" }
         );
     }
     Ok(())
 }
 
-/// Writes `name`'s patch from the changes made to its generated source.
-pub fn save(name: &str) -> Result<()> {
-    let Some(root) = roots()
-        .into_iter()
-        .find(|root| manifest(root).is_ok_and(|pins| pins.contains_key(name)))
-    else {
-        bail!("No patched crate named {name}");
-    };
-    let pins = manifest(&root)?;
-    let pin = &pins[name];
-    let directory = root.join(DIRECTORY).join(name);
+/// Writes `path`, a crate's patch, from the edits made to the generated
+/// crate: its difference from the release with the patches numbered below
+/// it applied. The patch is the crate's last, a new one or the last one
+/// again, whose description is kept.
+pub fn save(path: &str) -> Result<()> {
+    let path = util::root().join(path);
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let folder = path.parent().context("Name a patch file")?;
+    let krate = folder
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let root = folder
+        .parent()
+        .filter(|parent| parent.ends_with(DIRECTORY))
+        .and_then(Path::parent)
+        .context("Name a patch as patches/<crate>/NNN-<subject>.patch")?;
+    let number = number(&name).with_context(|| {
+        format!("{name}: a patch is named NNN-<subject>.patch, numbered 001 to 999")
+    })?;
+    let pins = pins(root)?;
+    let pin = pins
+        .get(&krate)
+        .with_context(|| format!("{MANIFEST} doesn't pin {krate}"))?;
+    let directory = root.join(GENERATED).join(&krate);
     ensure!(
         directory.join(STAMP).is_file(),
-        "patches/{name} isn't generated; run `cargo xtask patched` first"
+        "Generate {krate} with `cargo xtask patched` and edit it first"
     );
-    let current = fs::read_to_string(patch_path(&root, name)).unwrap_or_default();
-    let mut patch = description(&current).as_bytes().to_vec();
-    patch.extend(diff(&release(name, pin)?, name, pin, &directory)?);
-    fs::write(patch_path(&root, name), &patch)?;
-    fs::write(directory.join(STAMP), stamp(name, pin, &patch))?;
-    println!("Saved patches/{name}.patch");
+    let mut patches = patches(folder, &krate)?;
+    if let Some(later) = patches
+        .iter()
+        .find(|patch| patch.number > number || (patch.number == number && patch.name != name))
+    {
+        bail!(
+            "{krate}/{} comes after or shares {name}'s number; save the edits as the crate's last patch",
+            later.name
+        );
+    }
+    let description = match patches.last() {
+        Some(last) if last.name == name => description(&patches.pop().unwrap().text).to_owned(),
+        _ => String::new(),
+    };
+    let base = tempfile::tempdir()?;
+    let base_crate = base.path().join(&krate);
+    generate(
+        &base_crate,
+        &krate,
+        pin,
+        &release(&krate, pin)?,
+        &patches,
+        "",
+    )?;
+    let change = String::from_utf8(diff(&base_crate, &directory)?).context("Patches are text")?;
+    ensure!(!change.is_empty(), "{krate} has no edits to save");
+    let text = description + &change;
+    fs::write(&path, &text)?;
+    patches.push(Patch {
+        number,
+        name: name.clone(),
+        text,
+    });
+    // The generated crate is what its patches now make.
+    fs::write(directory.join(STAMP), stamp(&krate, pin, &patches))?;
+    println!("Saved {krate}/{name}");
     Ok(())
 }
 
@@ -126,12 +217,19 @@ fn description(patch: &str) -> &str {
     &patch[..offset]
 }
 
-fn stamp(name: &str, pin: &Pin, patch: &[u8]) -> String {
+fn stamp(name: &str, pin: &Pin, patches: &[Patch]) -> String {
+    let mut hashed = Vec::new();
+    for patch in patches {
+        hashed.extend_from_slice(patch.name.as_bytes());
+        hashed.push(0);
+        hashed.extend_from_slice(patch.text.as_bytes());
+        hashed.push(0);
+    }
     format!(
         "{name} {} {} {}\n",
         pin.version,
         pin.sha256,
-        util::sha256_hex(patch)
+        util::sha256_hex(&hashed)
     )
 }
 
@@ -197,59 +295,66 @@ fn unpack(source: &[u8], name: &str, pin: &Pin, parent: &Path) -> Result<PathBuf
     Ok(directory)
 }
 
+/// Generates `directory` from the release and `patches`.
 fn generate(
     directory: &Path,
-    name: &str,
+    krate: &str,
     pin: &Pin,
     source: &[u8],
-    patch: &Path,
+    patches: &[Patch],
     stamp: &str,
 ) -> Result<()> {
     let work = tempfile::tempdir()?;
-    let patched = unpack(source, name, pin, work.path())?;
-    // `git apply` refuses an empty patch, which `--save` writes once every
-    // edit is undone.
-    let empty = fs::read(patch)?.iter().all(u8::is_ascii_whitespace);
-    if !empty {
-        apply(name, pin, patch, &patched)?;
+    let patched = unpack(source, krate, pin, work.path())?;
+    for patch in patches {
+        let file = work.path().join(&patch.name);
+        fs::write(&file, &patch.text)?;
+        apply(krate, pin, &patch.name, &file, &patched)?;
     }
     if directory.exists() {
         fs::remove_dir_all(directory)?;
     }
     copy_tree(&patched, directory)?;
     // Last, so that an interrupted copy is generated again.
-    fs::write(directory.join(STAMP), stamp)?;
+    if !stamp.is_empty() {
+        fs::write(directory.join(STAMP), stamp)?;
+    }
     Ok(())
 }
 
-fn apply(name: &str, pin: &Pin, patch: &Path, patched: &Path) -> Result<()> {
+fn apply(krate: &str, pin: &Pin, name: &str, file: &Path, patched: &Path) -> Result<()> {
     util::run(
         util::command("git")
             .current_dir(patched)
             .args(["apply", "--whitespace=nowarn"])
             // Not `canonicalize`: on Windows it returns a `\\?\` path, which Git can't open.
-            .arg(std::path::absolute(patch)?),
+            .arg(std::path::absolute(file)?),
     )
-    .with_context(|| {
-        format!(
-            "patches/{name}.patch doesn't apply to {name} {}",
-            pin.version
-        )
-    })
+    .with_context(|| format!("{krate}/{name} doesn't apply to {krate} {}", pin.version))
 }
 
-/// The patch that turns the release into `directory`.
-fn diff(source: &[u8], name: &str, pin: &Pin, directory: &Path) -> Result<Vec<u8>> {
+/// The patch that turns `base` into `directory`, with paths in the crate.
+fn diff(base: &Path, directory: &Path) -> Result<Vec<u8>> {
     let work = tempfile::tempdir()?;
-    fs::rename(
-        unpack(source, name, pin, work.path())?,
-        work.path().join("a"),
-    )?;
+    copy_tree(base, &work.path().join("a"))?;
     copy_tree(directory, &work.path().join("b"))?;
-    fs::remove_file(work.path().join("b").join(STAMP))?;
+    for side in ["a", "b"] {
+        let stamp = work.path().join(side).join(STAMP);
+        if stamp.exists() {
+            fs::remove_file(stamp)?;
+        }
+    }
     let output = util::command("git")
         .current_dir(work.path())
-        .args(["diff", "--no-index", "--no-prefix", "--", "a", "b"])
+        .args([
+            "diff",
+            "--no-index",
+            "--binary",
+            "--no-prefix",
+            "--",
+            "a",
+            "b",
+        ])
         .stdin(Stdio::null())
         .output()
         .context("Cannot start git")?;
@@ -284,7 +389,6 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     fn archive(files: &[(&str, &str)]) -> Vec<u8> {
         let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
@@ -310,46 +414,130 @@ mod tests {
         }
     }
 
+    fn patch(name: &str, text: &str) -> Patch {
+        Patch {
+            number: number(name).unwrap(),
+            name: name.into(),
+            text: text.into(),
+        }
+    }
+
+    fn rename(from: &str, to: &str) -> String {
+        format!(
+            "# Renames {from} to {to}.\n\n\
+             diff --git a/src/lib.rs b/src/lib.rs\n\
+             --- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-pub fn {from}() {{}}\n+pub fn {to}() {{}}\n"
+        )
+    }
+
     #[test]
-    fn a_saved_patch_regenerates_the_edited_crate() {
+    fn patches_apply_in_their_numbers_order() {
+        let source = archive(&[("src/lib.rs", "pub fn one() {}\n")]);
+        let folder = tempfile::tempdir().unwrap();
+        // Written out of order; 010 sorts after 002 by number.
+        fs::write(
+            folder.path().join("010-three.patch"),
+            rename("two", "three"),
+        )
+        .unwrap();
+        fs::write(folder.path().join("002-two.patch"), rename("one", "two")).unwrap();
+        fs::write(folder.path().join("NOTICE"), "notice\n").unwrap();
+        let patches = patches(folder.path(), "demo").unwrap();
+        assert_eq!(
+            patches.iter().map(|patch| patch.number).collect::<Vec<_>>(),
+            [2, 10]
+        );
+        let directory = folder.path().join(GENERATED).join("demo");
+        generate(
+            &directory,
+            "demo",
+            &pin(&source),
+            &source,
+            &patches,
+            "stamp\n",
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(directory.join("src/lib.rs")).unwrap(),
+            "pub fn three() {}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.join(STAMP)).unwrap(),
+            "stamp\n"
+        );
+    }
+
+    #[test]
+    fn patch_names_are_numbered_from_001_to_999() {
+        assert_eq!(number("001-first.patch"), Some(1));
+        assert_eq!(number("999-last.patch"), Some(999));
+        for name in [
+            "000-zero.patch",
+            "1-short.patch",
+            "0001-long.patch",
+            "001.patch",
+            "001-.patch",
+            "abc-x.patch",
+        ] {
+            assert_eq!(number(name), None, "{name}");
+        }
+        let folder = tempfile::tempdir().unwrap();
+        fs::write(folder.path().join("fix.patch"), "").unwrap();
+        let error = patches(folder.path(), "demo").unwrap_err().to_string();
+        assert!(error.contains("NNN-<subject>.patch"), "{error}");
+    }
+
+    #[test]
+    fn two_patches_may_not_share_a_number() {
+        let folder = tempfile::tempdir().unwrap();
+        fs::write(folder.path().join("001-one.patch"), "").unwrap();
+        fs::write(folder.path().join("001-other.patch"), "").unwrap();
+        let error = patches(folder.path(), "demo").unwrap_err().to_string();
+        assert!(error.contains("share number 001"), "{error}");
+    }
+
+    #[test]
+    fn edits_diff_against_the_earlier_patches() {
         let source = archive(&[("src/lib.rs", "pub fn one() {}\n"), ("README.md", "demo\n")]);
         let pin = pin(&source);
         let root = tempfile::tempdir().unwrap();
-        let directory = root.path().join("demo");
-        let patch = root.path().join("demo.patch");
-        fs::write(&patch, "").unwrap();
-        // An empty patch generates the release as it is.
-        generate(&directory, "demo", &pin, &source, &patch, "first\n").unwrap();
-        assert_eq!(
-            fs::read_to_string(directory.join("src/lib.rs")).unwrap(),
-            "pub fn one() {}\n"
-        );
-        assert_eq!(
-            fs::read_to_string(directory.join(STAMP)).unwrap(),
-            "first\n"
-        );
-
-        fs::write(directory.join("src/lib.rs"), "pub fn two() {}\n").unwrap();
+        let first = vec![patch("001-two.patch", &rename("one", "two"))];
+        let directory = root.path().join("edited");
+        generate(&directory, "demo", &pin, &source, &first, "stamp\n").unwrap();
+        fs::write(directory.join("src/lib.rs"), "pub fn four() {}\n").unwrap();
         fs::write(directory.join("src/new.rs"), "// added\n").unwrap();
         fs::remove_file(directory.join("README.md")).unwrap();
-        let saved = diff(&source, "demo", &pin, &directory).unwrap();
-        fs::File::create(&patch).unwrap().write_all(&saved).unwrap();
 
-        fs::remove_dir_all(&directory).unwrap();
-        generate(&directory, "demo", &pin, &source, &patch, "second\n").unwrap();
+        let base = root.path().join("base");
+        generate(&base, "demo", &pin, &source, &first, "").unwrap();
+        let saved = String::from_utf8(diff(&base, &directory).unwrap()).unwrap();
+        assert!(saved.starts_with("diff --git a/"), "{saved}");
+        assert!(saved.contains("-pub fn two() {}"), "{saved}");
+
+        let both = vec![
+            first.into_iter().next().unwrap(),
+            patch("002-four.patch", &saved),
+        ];
+        let regenerated = root.path().join("regenerated");
+        generate(&regenerated, "demo", &pin, &source, &both, "stamp\n").unwrap();
         assert_eq!(
-            fs::read_to_string(directory.join("src/lib.rs")).unwrap(),
-            "pub fn two() {}\n"
+            fs::read_to_string(regenerated.join("src/lib.rs")).unwrap(),
+            "pub fn four() {}\n"
         );
         assert_eq!(
-            fs::read_to_string(directory.join("src/new.rs")).unwrap(),
+            fs::read_to_string(regenerated.join("src/new.rs")).unwrap(),
             "// added\n"
         );
-        assert!(!directory.join("README.md").exists());
+        assert!(!regenerated.join("README.md").exists());
+    }
+
+    #[test]
+    fn a_description_ends_at_the_first_file() {
         assert_eq!(
-            fs::read_to_string(directory.join(STAMP)).unwrap(),
-            "second\n"
+            description(&rename("one", "two")),
+            "# Renames one to two.\n\n"
         );
+        assert_eq!(description("--- a/x\n"), "");
     }
 
     #[test]
@@ -366,49 +554,41 @@ mod tests {
     #[test]
     fn a_patch_that_does_not_apply_leaves_no_generated_crate() {
         let source = archive(&[("src/lib.rs", "pub fn one() {}\n")]);
-        let pin = pin(&source);
         let root = tempfile::tempdir().unwrap();
-        let patch = root.path().join("demo.patch");
-        fs::write(
-            &patch,
-            "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-pub fn missing() {}\n+pub fn two() {}\n",
+        let directory = root.path().join(GENERATED).join("demo");
+        let patches = vec![patch("001-missing.patch", &rename("missing", "two"))];
+        let error = generate(
+            &directory,
+            "demo",
+            &pin(&source),
+            &source,
+            &patches,
+            "stamp\n",
         )
-        .unwrap();
-        let directory = root.path().join("demo");
-        assert!(generate(&directory, "demo", &pin, &source, &patch, "stamp\n").is_err());
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("demo/001-missing.patch doesn't apply to demo 1.0.0"),
+            "{error}"
+        );
         assert!(!directory.exists());
     }
 
     #[test]
-    fn a_patch_keeps_its_description_and_git_ignores_it() {
-        let patch = "# Why\n\nIt retries.\n\n--- a/src/lib.rs\n+++ b/src/lib.rs\n";
-        assert_eq!(description(patch), "# Why\n\nIt retries.\n\n");
-        assert_eq!(description("diff --git a/x b/x\n"), "");
-
-        let source = archive(&[("src/lib.rs", "pub fn one() {}\n")]);
-        let pin = pin(&source);
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("demo.patch");
-        fs::write(
-            &path,
-            "# Renames one to two.\n\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-pub fn one() {}\n+pub fn two() {}\n",
-        )
-        .unwrap();
-        let directory = root.path().join("demo");
-        generate(&directory, "demo", &pin, &source, &path, "stamp\n").unwrap();
-        assert_eq!(
-            fs::read_to_string(directory.join("src/lib.rs")).unwrap(),
-            "pub fn two() {}\n"
-        );
-    }
-
-    #[test]
-    fn the_stamp_follows_the_patch() {
+    fn the_stamp_follows_the_crate_s_patches() {
         let pin = Pin {
             version: "1.0.0".into(),
             sha256: "a".repeat(64),
         };
-        assert_ne!(stamp("demo", &pin, b"one"), stamp("demo", &pin, b"two"));
-        assert!(stamp("demo", &pin, b"one").starts_with("demo 1.0.0 "));
+        let one = [patch("001-a.patch", "one")];
+        assert_ne!(
+            stamp("demo", &pin, &one),
+            stamp("demo", &pin, &[patch("001-a.patch", "two")])
+        );
+        assert_ne!(
+            stamp("demo", &pin, &one),
+            stamp("demo", &pin, &[patch("002-a.patch", "one")])
+        );
+        assert!(stamp("demo", &pin, &[]).starts_with("demo 1.0.0 "));
     }
 }

@@ -15,20 +15,32 @@ const BACKUPS: &str = "upgrade-backups";
 const KEEP: usize = 2;
 /// Left out of snapshots: the backups themselves, the live socket and lock,
 /// and the account sign-in, so a device credential never outlives signing out
-/// in an old snapshot. Restoring one means signing in again.
-const NOT_SNAPSHOTTED: [&str; 6] = [
+/// in an old snapshot. Restoring one means signing in again. Also what Newport
+/// can do without or writes again, since every snapshot is a full copy: metric
+/// history, the launchers, and Finder's folder settings.
+const NOT_SNAPSHOTTED: [&str; 9] = [
     BACKUPS,
     "native-client",
     super::instance::LOCK_FILES[0],
     super::instance::LOCK_FILES[1],
     super::store::ACCOUNT_FILE,
     super::import::ACCOUNT,
+    crate::metrics_db::FILE,
+    super::LAUNCHERS,
+    ".DS_Store",
 ];
 
-/// Temporary files and folders an interrupted write left behind.
-fn leftover(name: &std::ffi::OsStr) -> bool {
-    name.to_str()
-        .is_some_and(|name| name.starts_with(".tmp") || name.starts_with(".pending-"))
+/// Whether a top-level profile entry stays out of snapshots.
+fn not_snapshotted(name: &std::ffi::OsStr) -> bool {
+    NOT_SNAPSHOTTED.iter().any(|skipped| name == *skipped)
+        || name.to_str().is_some_and(|name| {
+            // Interrupted writes, and the metric history's SQLite journals.
+            name.starts_with(".tmp")
+                || name.starts_with(".pending-")
+                || name
+                    .strip_prefix(crate::metrics_db::FILE)
+                    .is_some_and(|suffix| suffix.starts_with('-'))
+        })
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -212,10 +224,7 @@ fn inventory(
     for entry in fs::read_dir(source.join(relative)).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let name = entry.file_name();
-        if profile
-            && relative.as_os_str().is_empty()
-            && (NOT_SNAPSHOTTED.iter().any(|s| name == *s) || leftover(&name))
-        {
+        if profile && relative.as_os_str().is_empty() && not_snapshotted(&name) {
             continue;
         }
         let path = relative.join(name);
@@ -256,64 +265,40 @@ fn inventory(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[tokio::test]
-    async fn restored_snapshot_includes_committed_rows_still_in_sqlite_wal() {
-        use sqlx::{
-            Connection,
-            sqlite::{SqliteConnectOptions, SqliteJournalMode},
-        };
+    #[test]
+    fn snapshots_leave_out_metric_history_and_launchers() {
         let profile = tempfile::tempdir().unwrap();
-        let options = SqliteConnectOptions::new()
-            .filename(profile.path().join("metrics.sqlite3"))
-            .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal)
-            .pragma("wal_autocheckpoint", "0");
-        let mut db = sqlx::SqliteConnection::connect_with(&options)
-            .await
-            .unwrap();
-        sqlx::query("CREATE TABLE sentinel(value TEXT)")
-            .execute(&mut db)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO sentinel VALUES ('retained history')")
-            .execute(&mut db)
-            .await
-            .unwrap();
-        assert!(
-            fs::metadata(profile.path().join("metrics.sqlite3-wal"))
-                .unwrap()
-                .len()
-                > 0
-        );
-        preserve(profile.path(), "0.3.1").unwrap();
-        // Restore a copy, never open the immutable recovery snapshot in SQLite.
-        let restored = tempfile::tempdir().unwrap();
-        let saved = profile.path().join("upgrade-backups/native-0.3.1/data");
-        inventory(
-            &saved,
-            Path::new(""),
-            Some(restored.path()),
-            false,
-            &mut BTreeMap::new(),
-        )
-        .unwrap();
-        db.close().await.unwrap();
-        let mut recovered = sqlx::SqliteConnection::connect_with(
-            &SqliteConnectOptions::new().filename(restored.path().join("metrics.sqlite3")),
-        )
-        .await
-        .unwrap();
-        let value: String = sqlx::query_scalar("SELECT value FROM sentinel")
-            .fetch_one(&mut recovered)
-            .await
-            .unwrap();
-        assert_eq!(value, "retained history");
-        recovered.close().await.unwrap();
-        preserve(profile.path(), "0.3.1").unwrap();
+        let root = profile.path();
+        let skipped = [
+            crate::metrics_db::FILE.to_owned(),
+            format!("{}-wal", crate::metrics_db::FILE),
+            format!("{}-shm", crate::metrics_db::FILE),
+            format!("{}-journal", crate::metrics_db::FILE),
+            ".DS_Store".to_owned(),
+        ];
+        for name in &skipped {
+            fs::write(root.join(name), "regenerated").unwrap();
+        }
+        let launcher = root.join(super::super::LAUNCHERS).join("server/App.app");
+        fs::create_dir_all(&launcher).unwrap();
+        fs::write(launcher.join("stub"), "launcher").unwrap();
+        let lookalike = format!("{}.notes", crate::metrics_db::FILE);
+        fs::write(root.join(&lookalike), "kept").unwrap();
+        fs::write(root.join("preferences.json"), "{}").unwrap();
+        preserve(root, "0.3.1").unwrap();
+        let saved = root.join("upgrade-backups/native-0.3.1/data");
+        for name in &skipped {
+            assert!(!saved.join(name).exists(), "{name} was snapshotted");
+        }
+        assert!(!saved.join(super::super::LAUNCHERS).exists());
+        assert!(saved.join(lookalike).exists());
+        assert!(saved.join("preferences.json").exists());
+        // The manifest matches the smaller copy, so the next start verifies it.
+        preserve(root, "0.3.1").unwrap();
     }
 
     #[test]
-    fn preserves_profiles_wal_preferences_and_unknown_data_without_overwriting() {
+    fn preserves_profiles_preferences_and_unknown_data_without_overwriting() {
         let profile = tempfile::tempdir().unwrap();
         let root = profile.path();
         let config: newport_domain::model::Config = serde_json::from_value(serde_json::json!({
@@ -325,12 +310,7 @@ mod tests {
         super::super::Store::for_test(root.into())
             .save(&config)
             .unwrap();
-        for name in [
-            "metrics.sqlite3",
-            "metrics.sqlite3-wal",
-            "preferences.json",
-            "future-state.json",
-        ] {
+        for name in ["preferences.json", "future-state.json"] {
             fs::write(root.join(name), name).unwrap();
         }
         fs::create_dir(root.join("upload-recovery.json.servers")).unwrap();
@@ -351,8 +331,8 @@ mod tests {
             fs::read(root.join("profiles.json")).unwrap()
         );
         assert_eq!(
-            fs::read(saved.join("metrics.sqlite3-wal")).unwrap(),
-            b"metrics.sqlite3-wal"
+            fs::read(saved.join("future-state.json")).unwrap(),
+            b"future-state.json"
         );
         assert_eq!(
             fs::read(saved.join("upload-recovery.json.servers/one.json")).unwrap(),

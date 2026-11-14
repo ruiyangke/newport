@@ -5,6 +5,39 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub(crate) fn enum_maps() -> Vec<crate::desktop::wire::wire_tables::EnumMap> {
+    use crate::desktop::wire::wire_tables::enum_map;
+    vec![
+        enum_map("newport.git.Side", |v| side_from_wire(v).ok(), side_to_wire),
+        enum_map(
+            "newport.git.ResetMode",
+            |v| reset_mode_from_wire(v).ok(),
+            reset_mode_to_wire,
+        ),
+        enum_map(
+            "newport.git.DiscardSource",
+            |v| discard_source_from_wire(v).ok(),
+            discard_source_to_wire,
+        ),
+        enum_map(
+            "newport.git.ConflictSide",
+            |v| conflict_side_from_wire(v).ok(),
+            conflict_side_to_wire,
+        ),
+        enum_map(
+            "newport.git.DiffLineEncoding",
+            |v| diff_line_encoding_from_wire(v).ok(),
+            diff_line_encoding_to_wire,
+        ),
+        enum_map(
+            "newport.git.OperationState",
+            |v| operation_state_from_wire(v).ok(),
+            operation_state_to_wire,
+        ),
+    ]
+}
+
 fn required<T>(value: Option<T>) -> Result<T, Error> {
     value.ok_or_else(|| Invalid("missing field").into())
 }

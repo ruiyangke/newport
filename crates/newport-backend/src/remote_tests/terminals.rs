@@ -44,13 +44,15 @@ async fn next(io: &mut Io) -> Event {
         .expect("the terminal's events continue")
 }
 
-/// Waits through the attach: persistent, the screen, ready. Returns what the
+/// Waits through the attach: persistent, the size, the screen, ready. Returns what the
 /// restored screen showed.
 async fn attached(io: &mut Io) -> String {
     assert!(matches!(next(io).await, Event::Persistent), "a held shell");
     let mut screen = String::new();
     loop {
         match next(io).await {
+            // The shell's size comes first: the screen is drawn at it.
+            Event::Size { .. } if screen.is_empty() => {}
             Event::Restore { state, .. } => screen.push_str(&String::from_utf8_lossy(&state)),
             Event::Ready => return screen,
             event => panic!("Unexpected {event:?} before ready"),

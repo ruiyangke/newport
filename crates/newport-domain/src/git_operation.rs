@@ -1,61 +1,5 @@
 //! Validated operation outcomes shared by native Git controls and recovery.
-use serde::Deserialize;
-use serde_json::Value;
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Receipt {
-    pub operation_id: uuid::Uuid,
-    pub server_id: uuid::Uuid,
-    pub action: String,
-    pub state: ReceiptState,
-}
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ReceiptState {
-    Pending,
-    Succeeded,
-    Failed,
-    Rejected,
-    NeedsResolution,
-    OutcomeUnknown,
-    ReviewedUnknown,
-}
-impl ReceiptState {
-    pub fn dismissible(self) -> bool {
-        matches!(
-            self,
-            Self::Succeeded | Self::Failed | Self::Rejected | Self::ReviewedUnknown
-        )
-    }
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Pending => "Outcome not confirmed",
-            Self::Succeeded => "Completed",
-            Self::Failed => "Failed",
-            Self::Rejected => "Not started",
-            Self::NeedsResolution => "Needs resolution",
-            Self::OutcomeUnknown => "Outcome unknown",
-            Self::ReviewedUnknown => "Reviewed; outcome unknown",
-        }
-    }
-}
-pub fn receipts(value: Value, server: &str) -> Result<Vec<Receipt>, String> {
-    let rows: Vec<Receipt> =
-        serde_json::from_value(value).map_err(|_| "Invalid saved Git outcomes")?;
-    let mut ids = std::collections::HashSet::new();
-    if rows.len() > 1000
-        || rows.iter().any(|row| {
-            row.server_id.to_string() != server
-                || !ids.insert(row.operation_id)
-                || row.action.is_empty()
-                || row.action.len() > 80
-        })
-    {
-        return Err("Saved Git outcomes contain invalid identities".into());
-    }
-    Ok(rows)
-}
+use newport_protocol::git::{Operation, OperationState, Reply};
 
 /// Only errors before operation.start are safe to dismiss without recovery.
 #[derive(Debug)]
@@ -77,125 +21,99 @@ impl From<&str> for WriteError {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum State {
-    Running,
-    Succeeded,
-    Failed,
-    NeedsResolution,
-    OutcomeUnknown,
-    ReviewedUnknown,
-}
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Operation {
-    pub operation_id: String,
-    pub repository: String,
-    pub payload_hash: String,
-    pub state: State,
-    pub seq: u64,
-    pub result: Option<serde_json::Map<String, Value>>,
-    pub error: Option<OperationError>,
-}
-#[derive(Debug, Deserialize)]
-pub struct OperationError {
-    pub code: String,
-    pub message: String,
-    pub retry: String,
-}
-impl Operation {
-    pub fn decode(value: Value, expected_id: &str) -> Result<Self, String> {
-        let operation: Self = serde_json::from_value(value)
-            .map_err(|_| "Invalid Git operation response; check its saved outcome")?;
-        if operation.operation_id != expected_id
-            || operation.repository.is_empty()
-            || operation.payload_hash.is_empty()
-            || (matches!(operation.state, State::Succeeded | State::NeedsResolution)
-                && operation.result.is_none())
-            || (operation.state == State::Failed && operation.error.is_none())
-        {
-            return Err("Git operation response did not confirm the requested outcome".into());
-        }
-        Ok(operation)
+/// The operation a write or lookup reported, once it names `expected_id` and
+/// carries the result or error its state promises.
+pub fn confirmed(reply: Reply, expected_id: &str) -> Result<Operation, String> {
+    let Reply::Operation(operation) = reply else {
+        return Err("Invalid Git operation response; check its saved outcome".into());
+    };
+    let operation = *operation;
+    if operation.operation_id != expected_id
+        || operation.repository.is_empty()
+        || operation.payload_hash.is_empty()
+        || (matches!(
+            operation.state,
+            OperationState::Succeeded | OperationState::NeedsResolution
+        ) && operation.result.is_none())
+        || (operation.state == OperationState::Failed && operation.error.is_none())
+    {
+        return Err("Git operation response did not confirm the requested outcome".into());
     }
+    Ok(operation)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Operation, State};
-    use serde_json::json;
-    fn outcome() -> serde_json::Value {
-        json!({"operationId":"op","repository":"repo","payloadHash":"hash","seq":1,"state":"succeeded","result":{},"error":null})
+    use super::confirmed;
+    use newport_protocol::git::{
+        Error, Operation, OperationResult, OperationState, Refresh, Reply,
+    };
+    fn outcome() -> Operation {
+        Operation {
+            operation_id: "op".into(),
+            repository: "repo".into(),
+            payload_hash: "hash".into(),
+            state: OperationState::Succeeded,
+            seq: 1,
+            result: Some(OperationResult::Refresh(Refresh {
+                refresh_required: true,
+            })),
+            error: None,
+        }
+    }
+    fn reply(operation: Operation) -> Reply {
+        Reply::Operation(Box::new(operation))
     }
     #[test]
     fn outcome_requires_matching_identity_and_complete_result() {
         assert_eq!(
-            Operation::decode(outcome(), "op").unwrap().state,
-            State::Succeeded
+            confirmed(reply(outcome()), "op").unwrap().state,
+            OperationState::Succeeded
         );
-        assert!(Operation::decode(outcome(), "other").is_err());
+        assert!(confirmed(reply(outcome()), "other").is_err());
+        for invalid in [
+            Operation {
+                repository: String::new(),
+                ..outcome()
+            },
+            Operation {
+                payload_hash: String::new(),
+                ..outcome()
+            },
+        ] {
+            assert!(confirmed(reply(invalid), "op").is_err());
+        }
         let mut value = outcome();
-        value["result"] = serde_json::Value::Null;
-        assert!(Operation::decode(value.clone(), "op").is_err());
-        value["state"] = json!("failed");
-        assert!(Operation::decode(value.clone(), "op").is_err());
-        value["error"] =
-            json!({"code":"AUTH_FAILED","message":"Authentication failed","retry":"never"});
-        assert_eq!(Operation::decode(value, "op").unwrap().state, State::Failed);
+        value.result = None;
+        assert!(confirmed(reply(value.clone()), "op").is_err());
+        value.state = OperationState::NeedsResolution;
+        assert!(confirmed(reply(value.clone()), "op").is_err());
+        value.state = OperationState::Failed;
+        assert!(confirmed(reply(value.clone()), "op").is_err());
+        value.error = Some(Error::new("AUTH_FAILED", "Authentication failed"));
+        assert_eq!(
+            confirmed(reply(value), "op").unwrap().state,
+            OperationState::Failed
+        );
     }
     #[test]
     fn uncertainty_and_running_are_not_success() {
-        for (name, state) in [
-            ("running", State::Running),
-            ("outcome_unknown", State::OutcomeUnknown),
-            ("reviewed_unknown", State::ReviewedUnknown),
+        for state in [
+            OperationState::Running,
+            OperationState::OutcomeUnknown,
+            OperationState::ReviewedUnknown,
         ] {
-            let mut value = outcome();
-            value["state"] = json!(name);
-            value["result"] = serde_json::Value::Null;
-            assert_eq!(Operation::decode(value, "op").unwrap().state, state);
+            let value = Operation {
+                state,
+                result: None,
+                ..outcome()
+            };
+            assert_eq!(confirmed(reply(value), "op").unwrap().state, state);
         }
-        let mut value = outcome();
-        value["state"] = json!("completed");
-        assert!(Operation::decode(value, "op").is_err());
-    }
-}
-
-#[cfg(test)]
-mod receipt_tests {
-    use super::*;
-    use serde_json::json;
-    const SERVER: &str = "810833d4-5258-45fa-ae8d-eea15ffa6df8";
-    fn receipt() -> Value {
-        json!({"operationId":"15b4856d-a324-479c-a462-83a4bf52c9d1","serverId":SERVER,"action":"fetch","state":"pending"})
     }
     #[test]
-    fn recovery_rejects_wrong_server_duplicate_ids_and_unknown_states() {
-        assert_eq!(receipts(json!([receipt()]), SERVER).unwrap().len(), 1);
-        assert!(receipts(json!([receipt()]), "wrong-server").is_err());
-        assert!(receipts(json!([receipt(), receipt()]), SERVER).is_err());
-        let mut value = receipt();
-        value["state"] = json!("done");
-        assert!(receipts(json!([value]), SERVER).is_err());
-        assert!(receipts(json!({}), SERVER).is_err());
-    }
-    #[test]
-    fn uncertain_or_unresolved_receipts_cannot_be_dismissed() {
-        for state in [
-            ReceiptState::Pending,
-            ReceiptState::OutcomeUnknown,
-            ReceiptState::NeedsResolution,
-        ] {
-            assert!(!state.dismissible());
-        }
-        for state in [
-            ReceiptState::Succeeded,
-            ReceiptState::Failed,
-            ReceiptState::Rejected,
-            ReceiptState::ReviewedUnknown,
-        ] {
-            assert!(state.dismissible());
-        }
+    fn other_replies_are_not_outcomes() {
+        let other = Reply::Close(Box::new(newport_protocol::git::Closed { closed: true }));
+        assert!(confirmed(other, "op").is_err());
     }
 }

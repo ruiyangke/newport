@@ -72,6 +72,19 @@ pub enum ContainerState {
     Exited,
     Dead,
 }
+impl ContainerState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::Restarting => "restarting",
+            Self::Removing => "removing",
+            Self::Exited => "exited",
+            Self::Dead => "dead",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -80,6 +93,15 @@ pub enum ContainerHealth {
     Healthy,
     Unhealthy,
     Starting,
+}
+impl ContainerHealth {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Unhealthy => "unhealthy",
+            Self::Starting => "starting",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -90,6 +112,15 @@ pub enum PortProtocol {
     Udp,
     Sctp,
 }
+impl PortProtocol {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+            Self::Sctp => "sctp",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -97,6 +128,14 @@ pub enum LogStream {
     #[default]
     Stdout,
     Stderr,
+}
+impl LogStream {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -278,8 +317,24 @@ pub struct DockerTotals {
     pub volumes: DiskTotals,
     pub build_cache: DiskTotals,
 }
+impl DockerTotals {
+    /// Every category's size, saturating rather than wrapping.
+    pub fn size(&self) -> u64 {
+        [self.images, self.containers, self.volumes, self.build_cache]
+            .iter()
+            .fold(0_u64, |total, category| total.saturating_add(category.size))
+    }
+    /// Every category's reclaimable size, saturating rather than wrapping.
+    pub fn reclaimable(&self) -> u64 {
+        [self.images, self.containers, self.volumes, self.build_cache]
+            .iter()
+            .fold(0_u64, |total, category| {
+                total.saturating_add(category.reclaimable)
+            })
+    }
+}
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DockerDisk {
     pub images: Vec<DockerImage>,
@@ -289,7 +344,7 @@ pub struct DockerDisk {
     pub volumes_measured: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pruned {
     pub removed: u64,
     pub reclaimed: u64,

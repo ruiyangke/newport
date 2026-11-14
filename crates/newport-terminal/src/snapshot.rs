@@ -27,6 +27,12 @@ pub(crate) struct WrittenRow {
     pub text: String,
     pub wraps: bool,
 }
+impl WrittenRow {
+    /// The bytes it takes in a snapshot, with its line break.
+    pub fn written_len(&self) -> usize {
+        self.text.len() + if self.wraps { 0 } else { 2 }
+    }
+}
 
 /// What the current cell attributes are while writing, to emit only changes.
 #[derive(PartialEq)]
@@ -105,17 +111,11 @@ pub(crate) fn write_row(grid: &Grid<Cell>, line: Line) -> WrittenRow {
     WrittenRow { text, wraps }
 }
 
-/// Writes rows as one stream from a blank screen: history rows (when asked)
-/// then the screen's, so the screen rows land in place and the rest scroll
-/// into history.
-pub(crate) fn write_grid(out: &mut String, grid: &Grid<Cell>, history: bool) {
-    let top = if history {
-        -(grid.history_size() as i32)
-    } else {
-        0
-    };
+/// Writes the screen's rows as one stream from a blank screen, so each lands
+/// in place.
+pub(crate) fn write_grid(out: &mut String, grid: &Grid<Cell>) {
     let bottom = grid.screen_lines() as i32;
-    for y in top..bottom {
+    for y in 0..bottom {
         let row = write_row(grid, Line(y));
         out.push_str(&row.text);
         if y + 1 < bottom && !row.wraps {
@@ -358,6 +358,7 @@ pub(crate) fn write_state(
     ext: &Extensions,
     alternate: Option<&str>,
     title: Option<&str>,
+    programs: &crate::ProgramStatuses,
 ) {
     out.push_str("\x1b[m");
     let primary = term.grid();
@@ -404,6 +405,7 @@ pub(crate) fn write_state(
     if let Some(title) = title {
         let _ = write!(out, "\x1b]2;{title}\x07");
     }
+    programs.write(out);
 }
 
 /// The active screen's charsets and cursor, last: everything before may move

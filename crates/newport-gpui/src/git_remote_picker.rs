@@ -6,6 +6,7 @@ use gpui_kit::component::{
     popover::Popover,
 };
 use newport_client::git_remotes::Names;
+use newport_protocol::git::Remote;
 
 struct Delegate {
     owner: WeakEntity<RemotePicker>,
@@ -123,7 +124,7 @@ pub(super) struct RemotePicker {
     names_task: Option<Task<()>>,
     name: String,
     initial_default: bool,
-    detail: Value,
+    detail: Option<Remote>,
     detail_pending: bool,
     detail_error: Option<String>,
     detail_generation: u64,
@@ -167,7 +168,7 @@ impl RemotePicker {
             names_task: None,
             name: "origin".into(),
             initial_default: true,
-            detail: Value::Null,
+            detail: None,
             detail_pending: false,
             detail_error: None,
             detail_generation: 0,
@@ -177,12 +178,10 @@ impl RemotePicker {
         picker.read_detail(cx);
         picker
     }
-    pub(super) fn remote(&self) -> Option<&Value> {
-        (!self.detail_pending
-            && self.detail_error.is_none()
-            && self.detail["name"] == self.name
-            && self.detail["token"].is_string())
-        .then_some(&self.detail)
+    pub(super) fn remote(&self) -> Option<&Remote> {
+        self.detail.as_ref().filter(|remote| {
+            !self.detail_pending && self.detail_error.is_none() && remote.name == self.name
+        })
     }
     pub(super) fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.enabled == enabled {
@@ -308,7 +307,7 @@ impl RemotePicker {
         self.read_detail(cx);
     }
     fn read_detail(&mut self, cx: &mut Context<Self>) {
-        self.detail = Value::Null;
+        self.detail = None;
         self.detail_error = None;
         self.detail_pending = true;
         self.detail_generation += 1;
@@ -328,7 +327,7 @@ impl RemotePicker {
                 }
                 picker.detail_pending = false;
                 match result {
-                    Ok(remote) => picker.detail = remote,
+                    Ok(remote) => picker.detail = Some(remote),
                     Err(error) => picker.detail_error = Some(error),
                 }
                 picker.fallback_default(cx);
@@ -458,9 +457,10 @@ impl Render for RemotePicker {
             .child(project_loading::picker_detail(
                 "remote-configuration",
                 remote.map(|remote| {
-                    remote["pushUrl"]
-                        .as_str()
-                        .or_else(|| remote["url"].as_str())
+                    remote
+                        .push_url
+                        .as_deref()
+                        .or(remote.url.as_deref())
                         .unwrap_or("Remote URL unavailable")
                         .to_owned()
                 }),

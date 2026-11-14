@@ -55,12 +55,12 @@ impl State {
             .copied()
     }
 }
-fn decorations(page: &Value) -> BTreeMap<String, Status> {
+fn decorations(page: &git_listing::StatusPage) -> BTreeMap<String, Status> {
     let mut result = BTreeMap::new();
-    for entry in rows(&page["entries"]) {
+    for entry in &page.entries {
         // Use lossless UTF-8 paths, not escaped display labels. Unsupported
         // byte paths are not editable in this Explorer either.
-        let Some(path) = root_path(&entry["path"]) else {
+        let Some(path) = path_text(&entry.path.bytes_b64) else {
             continue;
         };
         let path = path.trim_end_matches('/');
@@ -70,14 +70,13 @@ fn decorations(page: &Value) -> BTreeMap<String, Status> {
         {
             continue;
         }
-        let flags = entry["flags"].as_u64().unwrap_or(0);
-        let status = if entry["conflicted"] == true {
+        let status = if entry.conflicted {
             Status::Conflict
-        } else if entry["untracked"] == true {
+        } else if entry.untracked {
             Status::Untracked
-        } else if flags & 1 != 0 {
+        } else if entry.flags & 1 != 0 {
             Status::Added
-        } else if entry["staged"] == true || entry["unstaged"] == true {
+        } else if entry.staged || entry.unstaged {
             Status::Modified
         } else {
             continue;
@@ -124,14 +123,19 @@ impl CodeWorkspace {
         self.tree_status.loading = true;
         self.tree_status.read_at = Some(Instant::now());
         self.tree_status.generation += 1;
-        self.read_tree_status(Value::Null, window, cx);
+        self.read_tree_status(None, window, cx);
     }
-    fn read_tree_status(&mut self, previous: Value, window: &mut Window, cx: &mut Context<Self>) {
+    fn read_tree_status(
+        &mut self,
+        previous: Option<git_listing::StatusPage>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let repo = self.tree_status.repo.clone();
         let connection = self.connection.clone();
         let generation = self.tree_status.generation;
-        let cursor = previous["nextCursor"].as_str().map(str::to_owned);
-        let operation = self.git_request(newport_protocol::git::Request::Status {
+        let cursor = previous.as_ref().and_then(|page| page.next_cursor.clone());
+        let request = newport_protocol::git::Request::Status {
             repo_id: repo.clone(),
             page_size: 200,
             filter: Some(newport_protocol::git::StatusFilter {
@@ -139,8 +143,8 @@ impl CodeWorkspace {
                 group: Some("all".into()),
             }),
             cursor: cursor.clone(),
-        });
-        self.rpc(operation, window, cx, move |this, result, window, cx| {
+        };
+        self.git_rpc(request, window, cx, move |this, result, window, cx| {
             if this.tree_status.repo != repo
                 || this.navigator.repo != repo
                 || this.tree_status.generation != generation
@@ -148,20 +152,23 @@ impl CodeWorkspace {
             {
                 return;
             }
-            let result = result.and_then(|page| {
-                if let Some(cursor) = cursor {
-                    newport_client::git_page::merge(&previous, page, &cursor)
-                } else {
-                    newport_client::git_page::validate(&page).map(|_| page)
+            let result = result.and_then(|reply| {
+                let newport_protocol::git::Reply::Status(page) = reply else {
+                    return Err("Invalid repository page. Refresh to retry.".to_owned());
+                };
+                match (cursor, previous) {
+                    (Some(cursor), Some(previous)) => {
+                        newport_client::git_page::merge_pages(&previous, *page, &cursor)
+                    }
+                    (Some(_), None) => Err("Invalid repository page. Refresh to retry.".into()),
+                    (None, _) => Ok(*page),
                 }
             });
             match result {
-                Ok(page)
-                    if page["nextCursor"].is_string() && rows(&page["entries"]).len() < 20_000 =>
-                {
-                    this.read_tree_status(page, window, cx)
+                Ok(page) if page.next_cursor.is_some() && page.entries.len() < 20_000 => {
+                    this.read_tree_status(Some(page), window, cx)
                 }
-                Ok(page) if page["nextCursor"].is_null() => {
+                Ok(page) if page.next_cursor.is_none() => {
                     this.tree_status.entries = decorations(&page);
                     this.tree_status.loading = false;
                 }
@@ -178,18 +185,35 @@ impl CodeWorkspace {
 #[cfg(test)]
 mod tests {
     use super::{State, Status, decorations};
-    use serde_json::{Value, json};
-    fn entry(path: &str, status: &str) -> Value {
+    use newport_protocol::git::{Path, StatusEntry};
+    fn entry(path: &str, status: &str) -> StatusEntry {
         use base64::Engine;
-        let mut e = json!({"path":{"bytesB64":base64::engine::general_purpose::STANDARD.encode(path), "display":"not the actual path"}});
-        e[status] = json!(true);
-        e
+        let mut entry = crate::git_fixture::status_entry("entry", path);
+        entry.path = Path {
+            bytes_b64: base64::engine::general_purpose::STANDARD.encode(path),
+            display: "not the actual path".into(),
+        };
+        entry.unstaged = false;
+        match status {
+            "untracked" => entry.untracked = true,
+            "unstaged" => entry.unstaged = true,
+            "conflicted" => entry.conflicted = true,
+            "staged" => entry.staged = true,
+            _ => {}
+        }
+        entry
+    }
+    fn page(entries: Vec<StatusEntry>) -> crate::git_listing::StatusPage {
+        crate::git_fixture::status_page("s", entries, None)
     }
     #[test]
     fn status_propagates_to_ancestors_without_prefix_collisions() {
-        let entries = decorations(
-            &json!({"entries":[entry("src/new.rs","untracked"),entry("src/nested/mod.rs","unstaged"),entry("src/nested/conflict.rs","conflicted"),entry("src-other/clean.rs","unused")]}),
-        );
+        let entries = decorations(&page(vec![
+            entry("src/new.rs", "untracked"),
+            entry("src/nested/mod.rs", "unstaged"),
+            entry("src/nested/conflict.rs", "conflicted"),
+            entry("src-other/clean.rs", "unused"),
+        ]));
         assert_eq!(entries["src"], Status::Conflict);
         assert_eq!(entries["src/nested"], Status::Conflict);
         assert_eq!(entries["src/new.rs"], Status::Untracked);
@@ -206,10 +230,13 @@ mod tests {
     #[test]
     fn staged_additions_and_directory_entries_preserve_meaning() {
         let mut added = entry("Cargo.toml", "staged");
-        added["flags"] = json!(1);
-        let entries = decorations(
-            &json!({"entries":[added, entry("new-dir/","untracked"), entry("../escape","unstaged"),entry("/absolute","unstaged")]}),
-        );
+        added.flags = 1;
+        let entries = decorations(&page(vec![
+            added,
+            entry("new-dir/", "untracked"),
+            entry("../escape", "unstaged"),
+            entry("/absolute", "unstaged"),
+        ]));
         assert_eq!(entries["Cargo.toml"], Status::Added);
         assert_eq!(entries["new-dir"], Status::Untracked);
         assert_eq!(entries.len(), 2);

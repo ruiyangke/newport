@@ -1,17 +1,16 @@
 //! Typed application intent and receipts, through the backend-owned display.
-use super::{
-    configuration,
-    failure::{self, invalid_result, operation},
-    projection as p,
+use super::failure::{self, invalid_result, operation};
+use crate::{
+    manager,
+    server_queries::{Cached, Read},
+    server_session::ServerSession,
 };
-use crate::{manager, server_session::ServerSession};
 use newport_protocol::{
     common::{Present, Retry},
     desktop::{Failure, applications as dto},
 };
 use std::sync::Arc;
 use uuid::Uuid;
-mod projection;
 
 pub struct Services<'a> {
     pub manager: &'a manager::Shared,
@@ -22,7 +21,7 @@ pub struct Services<'a> {
 fn not_submitted(error: Failure) -> Failure {
     Failure {
         error: newport_protocol::common::Error {
-            code: "APPLICATION_NOT_SUBMITTED".into(),
+            code: dto::APPLICATION_NOT_SUBMITTED.into(),
             message: error.error.message,
             retry: Retry::No,
         },
@@ -37,9 +36,10 @@ fn owner(
     if !manager.configuration_available() {
         return Err(operation("Server configuration is unavailable."));
     }
-    let changed = |message| failure::failure("APPLICATION_CONNECTION_CHANGED", message, Retry::No);
+    let changed =
+        |message| failure::failure(dto::APPLICATION_CONNECTION_CHANGED, message, Retry::No);
     let (profile, owner) = manager.current(id).map_err(changed)?;
-    if !configuration::matches_scope(&profile, expected, owner.revision(), manager.instance_id) {
+    if profile.connection_scope(owner.revision(), manager.instance_id) != *expected {
         return Err(changed(
             "The server connection changed. Reopen Remote Apps.".into(),
         ));
@@ -74,27 +74,25 @@ pub async fn dispatch(
             let owner = crate::server_session::resolve(services.manager, args.server)
                 .await
                 .map_err(operation)?;
-            let value = crate::server_queries::read(
-                &owner,
-                crate::server_queries::Read::RemoteAppsStatus,
-                args.refresh,
-            )
-            .await
-            .map_err(operation)?;
-            R::Status(Box::new(projection::availability(&value)?))
+            match crate::server_queries::read(&owner, Read::RemoteAppsStatus, args.refresh)
+                .await
+                .map_err(operation)?
+            {
+                Cached::RemoteAppsStatus(status) => R::Status(status),
+                _ => return Err(invalid_result("Remote Apps status cache kind")),
+            }
         }
         O::Catalogue(args) => {
             let owner = crate::server_session::resolve(services.manager, args.server)
                 .await
                 .map_err(operation)?;
-            let value = crate::server_queries::read(
-                &owner,
-                crate::server_queries::Read::RemoteAppsCatalogue,
-                args.refresh,
-            )
-            .await
-            .map_err(operation)?;
-            R::Catalogue(Box::new(projection::catalogue(&value)?))
+            match crate::server_queries::read(&owner, Read::RemoteAppsCatalogue, args.refresh)
+                .await
+                .map_err(operation)?
+            {
+                Cached::Catalogue(catalogue) => R::Catalogue(Box::new(catalogue)),
+                _ => return Err(invalid_result("Remote Apps catalogue cache kind")),
+            }
         }
         O::Display(args) => {
             let owner = crate::server_session::resolve(services.manager, args.server)

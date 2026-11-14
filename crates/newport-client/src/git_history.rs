@@ -1,25 +1,24 @@
 //! Immutable commit actions.
 use base64::Engine as _;
-use newport_protocol::git::{Action, CheckoutTarget, ResetMode};
-use serde_json::Value;
+use newport_protocol::git::{Action, CheckoutTarget, Commit, ResetMode};
 
 /// Return an amend prefill only when the complete protocol bytes are lossless UTF-8.
-pub fn complete_commit_message(detail: &Value) -> Option<String> {
-    if detail["messageTruncated"] != false {
+pub fn complete_commit_message(detail: &Commit) -> Option<String> {
+    if detail.message_truncated {
         return None;
     }
-    let message = detail["message"]["display"].as_str()?;
+    let message = &detail.message.display;
     let bytes = base64::engine::general_purpose::STANDARD
-        .decode(detail["message"]["bytesB64"].as_str()?)
+        .decode(&detail.message.bytes_b64)
         .ok()?;
     (std::str::from_utf8(&bytes).ok()? == message).then(|| message.to_owned())
 }
 /// Build an action for the exact inspected commit. The UI comparison parent is
 /// zero-based; Git replay mainline parents are one-based. Reset/amend callers
 /// add the reviewed HEAD/message before dispatch through the guarded backend.
-pub fn commit_action(kind: &str, detail: &Value, selected: &str, parent: usize) -> Option<Action> {
-    let oid = detail["oid"]["hex"].as_str()?;
-    let parents = detail["parents"].as_array()?;
+pub fn commit_action(kind: &str, detail: &Commit, selected: &str, parent: usize) -> Option<Action> {
+    let oid = detail.oid.hex.as_str();
+    let parents = &detail.parents;
     if !matches!(
         kind,
         "cherry_pick"
@@ -88,16 +87,16 @@ pub struct MainlineReview {
     parents: Vec<String>,
 }
 impl MainlineReview {
-    pub fn from_commit(detail: &Value, selected: &str) -> Option<Self> {
+    pub fn from_commit(detail: &Commit, selected: &str) -> Option<Self> {
         commit_action("cherry_pick", detail, selected, 0)?;
-        let parents = detail["parents"].as_array()?;
+        let parents = &detail.parents;
         if parents.len() < 2 {
             return None;
         }
         let parents = parents
             .iter()
             .map(|parent| {
-                let oid = parent["hex"].as_str()?;
+                let oid = parent.hex.as_str();
                 (oid.len() == selected.len()
                     && oid.bytes().all(|c| c.is_ascii_hexdigit())
                     && !oid.bytes().all(|c| c == b'0'))
@@ -153,16 +152,37 @@ impl MainlineReview {
 }
 #[cfg(test)]
 mod tests {
-    use super::{Action, CheckoutTarget};
+    use super::{Action, CheckoutTarget, Commit};
+    use newport_protocol::git::{Author, ObjectId, Path};
     fn view(action: &Action) -> serde_json::Value {
         serde_json::to_value(action).unwrap()
+    }
+    fn object(hex: &str) -> ObjectId {
+        ObjectId {
+            algorithm: "sha1".into(),
+            hex: hex.into(),
+        }
+    }
+    fn commit(oid: &str, parents: &[String]) -> Commit {
+        Commit {
+            oid: object(oid),
+            parents: parents.iter().map(|parent| object(parent)).collect(),
+            message: Path::new(b"hello"),
+            message_truncated: false,
+            author: Author {
+                name: "Author".into(),
+                email: "author@example.test".into(),
+            },
+            time: 1,
+            offset_minutes: 0,
+        }
     }
 
     #[test]
     fn merge_replay_can_choose_each_captured_parent_without_changing_target() {
         let oid = "a".repeat(40);
-        let parents = ['b', 'c', 'd'].map(|c| serde_json::json!({"hex":c.to_string().repeat(40)}));
-        let detail = serde_json::json!({"oid":{"hex":oid},"parents":parents});
+        let parents = ['b', 'c', 'd'].map(|c| c.to_string().repeat(40));
+        let detail = commit(&oid, &parents);
         let review = super::MainlineReview::from_commit(&detail, &oid).unwrap();
         for kind in ["cherry_pick", "revert"] {
             let mut action = super::commit_action(kind, &detail, &oid, 0).unwrap();
@@ -187,7 +207,7 @@ mod tests {
     #[test]
     fn parent_choices_require_valid_merge_identity_and_replay_action() {
         let oid = "a".repeat(64);
-        let mut detail = serde_json::json!({"oid":{"hex":oid},"parents":[{"hex":"b".repeat(64)},{"hex":"c".repeat(64)}]});
+        let mut detail = commit(&oid, &["b".repeat(64), "c".repeat(64)]);
         let review = super::MainlineReview::from_commit(&detail, &oid).unwrap();
         for kind in ["merge", "rebase", "reset", "checkout", "commit.amend"] {
             let mut action = super::commit_action(kind, &detail, &oid, 0).unwrap();
@@ -207,20 +227,20 @@ mod tests {
             "b".repeat(40),
             "z".repeat(64),
         ] {
-            detail["parents"][0]["hex"] = serde_json::json!(invalid);
+            detail.parents[0] = object(&invalid);
             assert!(super::MainlineReview::from_commit(&detail, &oid).is_none());
         }
-        detail["parents"] = serde_json::json!([]);
+        detail.parents.clear();
         assert!(super::MainlineReview::from_commit(&detail, &oid).is_none());
         assert!(super::commit_action("revert", &detail, &oid, 1).is_none());
-        detail["parents"] = serde_json::json!([{"hex":"b".repeat(64)}]);
+        detail.parents = vec![object(&"b".repeat(64))];
         assert!(super::MainlineReview::from_commit(&detail, &oid).is_none());
         assert!(super::commit_action("revert", &detail, &oid, 1).is_none());
     }
     #[test]
     fn history_integration_uses_captured_commit_without_replay_mainline() {
         let oid = "a".repeat(40);
-        let detail = serde_json::json!({"oid":{"hex":oid},"parents":[{},{}]});
+        let detail = commit(&oid, &[String::new(), String::new()]);
         for kind in ["merge", "merge.fast_forward"] {
             let action = super::commit_action(kind, &detail, &oid, 1).unwrap();
             assert_eq!(
@@ -240,29 +260,29 @@ mod tests {
     }
     #[test]
     fn amend_prefill_requires_complete_lossless_message() {
-        let mut detail = serde_json::json!({"message":{"display":"hello","bytesB64":"aGVsbG8="},"messageTruncated":false});
+        let mut detail = commit(&"a".repeat(40), &[]);
         assert_eq!(
             super::complete_commit_message(&detail).as_deref(),
             Some("hello")
         );
-        detail["messageTruncated"] = serde_json::json!(true);
+        detail.message_truncated = true;
         assert!(super::complete_commit_message(&detail).is_none());
-        detail["messageTruncated"] = serde_json::json!(false);
-        detail["message"]["bytesB64"] = serde_json::json!("/w==");
+        detail.message_truncated = false;
+        detail.message.bytes_b64 = "/w==".into();
         assert!(super::complete_commit_message(&detail).is_none());
-        detail["message"]["bytesB64"] = serde_json::json!("d29ybGQ=");
+        detail.message.bytes_b64 = "d29ybGQ=".into();
         assert!(super::complete_commit_message(&detail).is_none());
     }
     #[test]
     fn replay_captures_commit_and_one_based_mainline() {
         let oid = "a".repeat(40);
-        let mut detail = serde_json::json!({"oid":{"hex":oid},"parents":[{},{}]});
+        let mut detail = commit(&oid, &[String::new(), String::new()]);
         let action = super::commit_action("revert", &detail, &oid, 1).unwrap();
         assert_eq!(view(&action)["mainline"], 2);
         assert_eq!(view(&action)["targetOid"], oid);
         assert!(super::commit_action("revert", &detail, &oid, 2).is_none());
         assert!(super::commit_action("revert", &detail, &"b".repeat(40), 0).is_none());
-        detail["parents"] = serde_json::json!([]);
+        detail.parents.clear();
         assert!(matches!(
             super::commit_action("cherry_pick", &detail, &oid, 0).unwrap(),
             Action::CherryPick { mainline: 0, .. }

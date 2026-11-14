@@ -1,9 +1,10 @@
 //! Worktree identity, review guards and mutation inputs.
+use crate::git_branch::BranchPage;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use newport_protocol::git::{Action, Path, Request};
-use serde_json::Value;
-#[cfg(test)]
-use serde_json::json;
+use newport_protocol::git::{Action, Page, Path, Reply, Request, Worktree, WorktreeMetadata};
+
+/// One page of a worktree listing.
+pub type WorktreePage = Page<Worktree, WorktreeMetadata>;
 
 /// Match the desktop form's branch-derived directory name and sibling layout.
 pub fn suggested_name(branch: &str) -> String {
@@ -135,8 +136,8 @@ impl crate::backend::Backend {
             return Err("Enter a worktree name without slashes or control characters.".into());
         }
         let server = uuid::Uuid::parse_str(server).map_err(|error| error.to_string())?;
-        let page = self
-            .request_git(
+        let reply = self
+            .git(
                 server,
                 Request::Worktrees {
                     repo_id: repo.into(),
@@ -150,13 +151,16 @@ impl crate::backend::Backend {
                 false,
             )
             .map_err(|error| error.message)?;
+        let Reply::Worktrees(page) = reply else {
+            return Err("Invalid worktree name response.".into());
+        };
         check_name_response(name, &page)
     }
 }
 
 fn check_branch_pages(
     branch: &str,
-    mut load: impl FnMut(Option<&str>) -> Result<Value, String>,
+    mut load: impl FnMut(Option<&str>) -> Result<BranchPage, String>,
 ) -> Result<(), String> {
     let expected = STANDARD.encode(format!("refs/heads/{branch}"));
     let mut cursor: Option<String> = None;
@@ -165,7 +169,7 @@ fn check_branch_pages(
     loop {
         let page = load(cursor.as_deref())?;
         crate::git_branch::BranchChoices::from_page(&page)?;
-        let current = (page["snapshot"].clone(), page["metadata"].clone());
+        let current = (page.snapshot.clone(), page.metadata.clone());
         if identity
             .as_ref()
             .is_some_and(|previous| *previous != current)
@@ -173,21 +177,19 @@ fn check_branch_pages(
             return Err("Branches changed while checking this name. Check again.".into());
         }
         identity = Some(current);
-        let rows = page["entries"]
-            .as_array()
-            .ok_or("Invalid branch name response.")?;
-        if rows.len() > 20 || rows.iter().any(|entry| entry["remote"] != false) {
+        let rows = &page.entries;
+        if rows.len() > 20 || rows.iter().any(|entry| entry.remote) {
             return Err("Invalid local branch name response.".into());
         }
         if rows
             .iter()
-            .any(|entry| entry["reference"]["bytesB64"] == expected)
+            .any(|entry| entry.reference.bytes_b64 == expected)
         {
             return Err(
                 "That branch already exists. Choose another name or use Existing branch.".into(),
             );
         }
-        match page["nextCursor"].as_str() {
+        match page.next_cursor.as_deref() {
             None => return Ok(()),
             Some(next) if !rows.is_empty() && visited.insert(next.to_owned()) => {
                 cursor = Some(next.to_owned())
@@ -197,15 +199,15 @@ fn check_branch_pages(
     }
 }
 
-fn check_name_response(name: &str, page: &Value) -> Result<(), String> {
-    let rows = page["entries"]
-        .as_array()
-        .ok_or("Invalid worktree name response.")?;
-    if rows.len() > 1 || page.get("nextCursor") != Some(&Value::Null) {
+fn check_name_response(name: &str, page: &WorktreePage) -> Result<(), String> {
+    let rows = &page.entries;
+    if rows.len() > 1 || page.next_cursor.is_some() {
         return Err("Invalid worktree name response.".into());
     }
     if let Some(row) = rows.first() {
-        if row["name"]["bytesB64"] != STANDARD.encode(name) {
+        if row.name.as_ref().map(|name| name.bytes_b64.as_str())
+            != Some(STANDARD.encode(name).as_str())
+        {
             return Err("Worktree name check returned a different name. Check again.".into());
         }
         return Err("That worktree name already exists. Choose another name.".into());
@@ -247,29 +249,34 @@ impl CreateTarget<'_> {
 }
 /// Only known, byte-exact linked worktrees can be managed. Main/bare checkouts
 /// and incomplete rows remain inspectable but never become mutation targets.
-pub fn lock_target(entry: &Value) -> Option<(String, bool)> {
-    let name = entry["name"]["display"].as_str()?;
-    let locked = entry["locked"].as_bool()?;
-    (entry["kind"] == "linked"
-        && matches!(entry["state"].as_str(), Some("available" | "missing"))
-        && valid_name(name)
-        && entry["name"]["bytesB64"] == STANDARD.encode(name))
-    .then(|| (name.to_owned(), locked))
+pub fn lock_target(entry: &Worktree) -> Option<(String, bool)> {
+    let name = entry.name.as_ref()?;
+    (entry.kind == "linked"
+        && matches!(entry.state.as_str(), "available" | "missing")
+        && valid_name(&name.display)
+        && name.bytes_b64 == STANDARD.encode(&name.display))
+    .then(|| (name.display.clone(), entry.locked))
 }
-pub fn removal_target(entry: &Value) -> Option<(String, bool)> {
+pub fn removal_target(entry: &Worktree) -> Option<(String, bool)> {
     let (name, locked) = lock_target(entry)?;
-    if locked || entry["current"] != false {
+    if locked || entry.current {
         return None;
     }
-    Some((name, entry["state"] == "missing"))
+    Some((name, entry.state == "missing"))
 }
-pub fn review_matches(name: &str, snapshot: &str, selected: &Value, page: &Value) -> bool {
+pub fn review_matches(
+    name: &str,
+    snapshot: &str,
+    selected: Option<&Worktree>,
+    page: Option<&WorktreePage>,
+) -> bool {
+    let (Some(selected), Some(page)) = (selected, page) else {
+        return false;
+    };
     !snapshot.is_empty()
-        && page["snapshot"].as_str() == Some(snapshot)
+        && page.snapshot == snapshot
         && lock_target(selected).is_some_and(|(current, _)| current == name)
-        && page["entries"]
-            .as_array()
-            .is_some_and(|rows| rows.contains(selected))
+        && page.entries.contains(selected)
 }
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
@@ -324,6 +331,25 @@ pub fn lock_action(name: &str, reason: &str, unlock: bool) -> Result<Action, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn worktree_row(path: &str) -> Worktree {
+        Worktree {
+            name: None,
+            kind: "linked".into(),
+            path: Path::new(path.as_bytes()),
+            git_dir: Path::new(format!("{path}/.git").as_bytes()),
+            current: false,
+            state: "available".into(),
+            head: newport_protocol::git::Head {
+                oid: None,
+                name: None,
+                detached: false,
+                unborn: false,
+            },
+            locked: false,
+            lock_reason: None,
+            prunable: false,
+        }
+    }
     #[test]
     fn name_reviews_reject_out_of_order_results_and_require_current_success() {
         let mut review = NameReview::default();
@@ -350,9 +376,28 @@ mod tests {
         assert!(!review.ready(""));
     }
 
-    fn branch_page(names: &[&str], cursor: Value) -> Value {
-        json!({"snapshot":"branches", "metadata":{}, "nextCursor":cursor,
-            "entries":names.iter().map(|name| json!({"remote":false,"reference":{"bytesB64":STANDARD.encode(format!("refs/heads/{name}"))}})).collect::<Vec<_>>()})
+    fn branch_page(names: &[&str], cursor: Option<&str>) -> BranchPage {
+        use newport_protocol::git::{Branch, ObjectId, Page, TotalEntries};
+        Page {
+            snapshot: "branches".into(),
+            entries: names
+                .iter()
+                .map(|name| Branch {
+                    name: Path::new(name.as_bytes()),
+                    reference: Path::new(format!("refs/heads/{name}").as_bytes()),
+                    oid: ObjectId {
+                        algorithm: "sha1".into(),
+                        hex: "a".repeat(40),
+                    },
+                    remote: false,
+                    current: false,
+                    upstream: None,
+                    tracking: None,
+                })
+                .collect(),
+            next_cursor: cursor.map(Into::into),
+            metadata: TotalEntries { total_entries: 3 },
+        }
     }
     #[test]
     fn branch_name_check_uses_exact_case_sensitive_identity_beyond_the_first_page() {
@@ -361,10 +406,10 @@ mod tests {
             calls += 1;
             Ok(if calls == 1 {
                 assert!(cursor.is_none());
-                branch_page(&["Topic", "topic-other"], json!("second"))
+                branch_page(&["Topic", "topic-other"], Some("second"))
             } else {
                 assert_eq!(cursor, Some("second"));
-                branch_page(&["topic"], Value::Null)
+                branch_page(&["topic"], None)
             })
         })
         .unwrap_err();
@@ -373,24 +418,26 @@ mod tests {
         assert!(
             check_branch_pages("topic", |_| Ok(branch_page(
                 &["Topic", "topic-other"],
-                Value::Null
+                None
             )))
             .is_ok()
         );
-        assert!(check_branch_pages("开发", |_| Ok(branch_page(&["开发"], Value::Null))).is_err());
+        assert!(check_branch_pages("开发", |_| Ok(branch_page(&["开发"], None))).is_err());
     }
     #[test]
     fn branch_name_check_rejects_incomplete_changing_and_looping_pages() {
-        for invalid in [json!({}), branch_page(&[], json!("more"))] {
+        let mut unnamed = branch_page(&["topic-other"], None);
+        unnamed.snapshot.clear();
+        for invalid in [unnamed, branch_page(&[], Some("more"))] {
             assert!(check_branch_pages("topic", |_| Ok(invalid.clone())).is_err());
         }
         let mut calls = 0;
         assert!(
             check_branch_pages("topic", |_| {
                 calls += 1;
-                let mut page = branch_page(&["topic-other"], json!("same"));
+                let mut page = branch_page(&["topic-other"], Some("same"));
                 if calls == 2 {
-                    page["snapshot"] = json!("changed");
+                    page.snapshot = "changed".into();
                 }
                 Ok(page)
             })
@@ -398,12 +445,9 @@ mod tests {
             .contains("changed")
         );
         assert!(
-            check_branch_pages("topic", |_| Ok(branch_page(
-                &["topic-other"],
-                json!("same")
-            )))
-            .unwrap_err()
-            .contains("advance")
+            check_branch_pages("topic", |_| Ok(branch_page(&["topic-other"], Some("same"))))
+                .unwrap_err()
+                .contains("advance")
         );
         assert!(
             check_branch_pages("topic", |_| Err("Connection lost".into()))
@@ -414,22 +458,36 @@ mod tests {
 
     #[test]
     fn name_check_requires_a_complete_exact_registration_result() {
-        let row = json!({"name":{"display":"topic","bytesB64":STANDARD.encode("topic")}});
-        assert!(check_name_response("topic", &json!({"entries":[],"nextCursor":null})).is_ok());
+        let mut row = worktree_row("/topic");
+        row.name = Some(Path::new(b"topic"));
+        let page = |rows: Vec<newport_protocol::git::Worktree>, next: Option<&str>| {
+            newport_protocol::git::Page {
+                snapshot: "s".into(),
+                entries: rows,
+                next_cursor: next.map(Into::into),
+                metadata: newport_protocol::git::WorktreeMetadata {
+                    list_token: "token".into(),
+                    total_entries: 1,
+                    matching_entries: 1,
+                    current: None,
+                    main: None,
+                },
+            }
+        };
+        assert!(check_name_response("topic", &page(vec![], None)).is_ok());
         assert!(
-            check_name_response("topic", &json!({"entries":[row],"nextCursor":null}))
+            check_name_response("topic", &page(vec![row.clone()], None))
                 .unwrap_err()
                 .contains("already exists")
         );
-        for page in [
-            json!({}),
-            json!({"entries":[],"nextCursor":"more"}),
-            json!({"entries":[row,row],"nextCursor":null}),
+        for invalid in [
+            page(vec![], Some("more")),
+            page(vec![row.clone(), row.clone()], None),
         ] {
-            assert!(check_name_response("topic", &page).is_err());
+            assert!(check_name_response("topic", &invalid).is_err());
         }
         assert!(
-            check_name_response("other", &json!({"entries":[row],"nextCursor":null}))
+            check_name_response("other", &page(vec![row], None))
                 .unwrap_err()
                 .contains("different name")
         );
@@ -567,20 +625,55 @@ mod tests {
 
 #[cfg(test)]
 mod review_tests {
-    use super::{lock_target, removal_target, repair_path_valid, review_matches};
+    use super::{WorktreePage, lock_target, removal_target, repair_path_valid, review_matches};
+    use newport_protocol::git::{Head, Page, Path, Worktree, WorktreeMetadata};
+
+    fn linked() -> Worktree {
+        Worktree {
+            name: Some(Path::new(b"linked")),
+            kind: "linked".into(),
+            path: Path::new(b"/srv/linked"),
+            git_dir: Path::new(b"/srv/repo/.git/worktrees/linked"),
+            current: false,
+            state: "available".into(),
+            head: Head {
+                oid: None,
+                name: None,
+                detached: false,
+                unborn: false,
+            },
+            locked: false,
+            lock_reason: None,
+            prunable: false,
+        }
+    }
+    fn listing(snapshot: &str, entries: Vec<Worktree>) -> WorktreePage {
+        Page {
+            snapshot: snapshot.into(),
+            entries,
+            next_cursor: None,
+            metadata: WorktreeMetadata {
+                list_token: "token".into(),
+                total_entries: 1,
+                matching_entries: 1,
+                current: None,
+                main: None,
+            },
+        }
+    }
     #[test]
     fn removal_excludes_locked_current_and_unknown_worktrees() {
-        let mut entry = serde_json::json!({"kind":"linked","name":{"display":"linked","bytesB64":"bGlua2Vk"},"locked":false,"current":false,"state":"available"});
+        let mut entry = linked();
         assert_eq!(removal_target(&entry), Some(("linked".into(), false)));
-        entry["state"] = serde_json::json!("missing");
+        entry.state = "missing".into();
         assert_eq!(removal_target(&entry), Some(("linked".into(), true)));
-        entry["locked"] = serde_json::json!(true);
+        entry.locked = true;
         assert!(removal_target(&entry).is_none());
-        entry["locked"] = serde_json::json!(false);
-        entry["current"] = serde_json::json!(true);
+        entry.locked = false;
+        entry.current = true;
         assert!(removal_target(&entry).is_none());
-        entry["current"] = serde_json::json!(false);
-        entry["state"] = serde_json::json!("unknown");
+        entry.current = false;
+        entry.state = "unknown".into();
         assert!(removal_target(&entry).is_none());
     }
     #[test]
@@ -596,44 +689,60 @@ mod review_tests {
             assert!(!repair_path_valid(path));
         }
     }
-    use serde_json::json;
-
     #[test]
     fn lock_target_requires_exact_linked_worktree_identity() {
-        let mut entry = json!({"kind":"linked","name":{"display":"linked","bytesB64":"bGlua2Vk"},"locked":false,"state":"available"});
+        let mut entry = linked();
         assert_eq!(lock_target(&entry), Some(("linked".into(), false)));
-        entry["locked"] = json!(true);
+        entry.locked = true;
         assert_eq!(lock_target(&entry), Some(("linked".into(), true)));
-        entry["name"]["bytesB64"] = json!("b3RoZXI=");
+        // A name whose bytes are not its display text cannot be named exactly.
+        entry.name = Some(Path {
+            bytes_b64: "b3RoZXI=".into(),
+            display: "linked".into(),
+        });
         assert_eq!(lock_target(&entry), None);
-        entry["name"]["bytesB64"] = json!("bGlua2Vk");
-        entry["kind"] = json!("main");
+        entry.name = Some(Path::new(b"bad\xffname"));
         assert_eq!(lock_target(&entry), None);
-        entry["kind"] = json!("linked");
-        entry["locked"] = serde_json::Value::Null;
+        entry.name = Some(Path::new(b"linked"));
+        entry.kind = "main".into();
+        assert_eq!(lock_target(&entry), None);
+        entry.kind = "linked".into();
+        entry.name = None;
         assert_eq!(lock_target(&entry), None);
     }
     #[test]
     fn reviews_reject_changed_snapshot_target_and_removed_rows() {
-        let entry = json!({"kind":"linked","name":{"display":"linked","bytesB64":"bGlua2Vk"},"locked":false,"state":"available"});
-        let page = json!({"snapshot":"reviewed","entries":[entry.clone()]});
-        assert!(review_matches("linked", "reviewed", &entry, &page));
-        assert!(!review_matches("other", "reviewed", &entry, &page));
-        assert!(!review_matches("linked", "old", &entry, &page));
+        let entry = linked();
+        let page = listing("reviewed", vec![entry.clone()]);
+        assert!(review_matches(
+            "linked",
+            "reviewed",
+            Some(&entry),
+            Some(&page)
+        ));
+        assert!(!review_matches(
+            "other",
+            "reviewed",
+            Some(&entry),
+            Some(&page)
+        ));
+        assert!(!review_matches("linked", "old", Some(&entry), Some(&page)));
         assert!(!review_matches(
             "linked",
             "reviewed",
-            &entry,
-            &json!({"snapshot":"reviewed","entries":[]})
+            Some(&entry),
+            Some(&listing("reviewed", vec![]))
         ));
+        assert!(!review_matches("linked", "reviewed", None, Some(&page)));
+        assert!(!review_matches("linked", "reviewed", Some(&entry), None));
         let mut unavailable = entry.clone();
-        unavailable["state"] = json!("unknown");
+        unavailable.state = "unknown".into();
         assert!(lock_target(&unavailable).is_none());
         assert!(!review_matches(
             "linked",
             "",
-            &entry,
-            &json!({"snapshot":"","entries":[entry]})
+            Some(&entry),
+            Some(&listing("", vec![entry.clone()]))
         ));
     }
 }

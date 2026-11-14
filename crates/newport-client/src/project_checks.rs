@@ -1,25 +1,24 @@
 //! Explicit, sequential status checks for a captured project-library scope.
 //! Dropping a batch stops scheduling; it never replays or cancels a shared read.
 use crate::{request_error::RequestError, resources::Resources};
-use newport_protocol::git::{Path, Request};
-use serde_json::{Value, json};
+use newport_protocol::{desktop::preferences::Project, git::Request};
 use std::collections::{HashSet, VecDeque};
 
-pub fn status_key(project: &Value) -> String {
+pub fn status_key(project: &Project) -> String {
     format!(
-        "project-status:{}",
-        json!([
-            project["serverId"],
-            project["id"],
-            project["path"]["bytesB64"]
-        ])
+        "project-status:{:?}",
+        (
+            project.server.to_string(),
+            &project.id,
+            &project.path.bytes_b64
+        )
     )
 }
 
 pub struct Batch {
     server: String,
     query: String,
-    queue: VecDeque<Value>,
+    queue: VecDeque<Project>,
     waiting: Option<String>,
     stopped: bool,
     pub completed: usize,
@@ -38,11 +37,11 @@ pub enum Advance {
 }
 
 impl Batch {
-    pub fn new(server: String, query: String, projects: Vec<Value>) -> Self {
+    pub fn new(server: String, query: String, projects: Vec<Project>) -> Self {
         let mut seen = HashSet::new();
         let queue: VecDeque<_> = projects
             .into_iter()
-            .filter(|p| p["serverId"].as_str() == Some(&server))
+            .filter(|p| p.server.to_string() == server)
             .filter(|p| seen.insert(status_key(p)))
             .collect();
         Self {
@@ -93,50 +92,45 @@ impl Batch {
     }
 }
 
-/// Decode only the stored path at the presentation edge; the queued operation is typed.
-pub fn status_request(project: &Value) -> Result<Request, RequestError> {
-    let value = &project["path"];
-    let bytes_b64 = value["bytesB64"]
-        .as_str()
-        .ok_or("Invalid project path encoding")?
-        .to_owned();
-    let display = if value["display"].is_null() {
-        String::new()
-    } else {
-        value["display"]
-            .as_str()
-            .ok_or("Invalid project path display")?
-            .to_owned()
-    };
-    let path = Path { bytes_b64, display };
-    path.decode()
+/// A stored path that does not decode fails here, before anything is sent.
+pub fn status_request(project: &Project) -> Result<Request, RequestError> {
+    project
+        .path
+        .decode()
         .map_err(|error| RequestError::from(error.to_string()))?;
     Ok(Request::StatusSummary {
         repo_id: None,
-        path: Some(path),
+        path: Some(project.path.clone()),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn project(id: &str) -> Value {
-        json!({"id":id,"serverId":"s","path":{"display":format!("/{id}"),"bytesB64":Path::new(format!("/{id}").as_bytes()).bytes_b64}})
+    use newport_protocol::git::Path;
+    const SERVER: uuid::Uuid = uuid::Uuid::from_u128(1);
+    const OTHER: uuid::Uuid = uuid::Uuid::from_u128(2);
+    fn project(id: &str) -> Project {
+        Project {
+            id: uuid::Uuid::from_u128(id.bytes().fold(0, |id, byte| id << 8 | u128::from(byte))),
+            server: SERVER,
+            name: id.into(),
+            path: Path::new(format!("/{id}").as_bytes()),
+        }
     }
     fn advance(batch: &mut Batch, resources: &Resources) -> Advance {
-        batch.advance(resources, "s", "filter", true)
+        batch.advance(resources, &SERVER.to_string(), "filter", true)
+    }
+    fn batch(projects: Vec<Project>) -> Batch {
+        Batch::new(SERVER.to_string(), "filter".into(), projects)
     }
     #[test]
     fn checks_are_sequential_deduplicated_and_coalesce_with_row_reads() {
         let a = project("a");
         let b = project("b");
         let mut foreign = project("c");
-        foreign["serverId"] = json!("other");
-        let mut batch = Batch::new(
-            "s".into(),
-            "filter".into(),
-            vec![a.clone(), foreign, a.clone(), b.clone()],
-        );
+        foreign.server = OTHER;
+        let mut batch = batch(vec![a.clone(), foreign, a.clone(), b.clone()]);
         let mut resources = Resources::default();
         let row_read = resources.begin(&status_key(&a)).unwrap();
         assert_eq!(batch.total, 2);
@@ -165,7 +159,7 @@ mod tests {
         assert_eq!(batch.completed, 1, "a failed check is settled, not retried");
         let request = resources.begin(&key).unwrap();
         assert_eq!(advance(&mut batch, &resources), Advance::Waiting);
-        resources.complete(&key, request, Ok(json!({})));
+        resources.complete_owned(&key, request, Ok(true));
         assert_eq!(advance(&mut batch, &resources), Advance::Finished);
         assert_eq!(advance(&mut batch, &resources), Advance::Finished);
         assert_eq!(batch.completed, 2);
@@ -173,55 +167,43 @@ mod tests {
     #[test]
     fn changed_scope_is_terminal_and_does_not_cancel_an_inflight_shared_read() {
         for (server, query, library) in [
-            ("other", "filter", true),
-            ("s", "edited", true),
-            ("s", "filter", false),
+            (OTHER, "filter", true),
+            (SERVER, "edited", true),
+            (SERVER, "filter", false),
         ] {
             let mut resources = Resources::default();
-            let mut batch = Batch::new(
-                "s".into(),
-                "filter".into(),
-                vec![project("a"), project("b")],
-            );
+            let mut batch = batch(vec![project("a"), project("b")]);
             let Advance::Read { key, .. } = advance(&mut batch, &resources) else {
                 panic!("read")
             };
             let request = resources.begin(&key).unwrap();
             assert_eq!(
-                batch.advance(&resources, server, query, library),
+                batch.advance(&resources, &server.to_string(), query, library),
                 Advance::Cancelled
             );
             assert_eq!(advance(&mut batch, &resources), Advance::Cancelled);
             assert_eq!(batch.completed, 0);
-            assert!(resources.complete(&key, request, Ok(json!({}))));
+            assert!(resources.complete_owned(&key, request, Ok(true)));
         }
     }
     #[test]
     fn invalidated_requests_are_not_counted_as_completed() {
         let mut resources = Resources::default();
-        let mut batch = Batch::new(
-            "s".into(),
-            "filter".into(),
-            vec![project("a"), project("b")],
-        );
+        let mut batch = batch(vec![project("a"), project("b")]);
         let Advance::Read { key, .. } = advance(&mut batch, &resources) else {
             panic!("read")
         };
         let generation = resources.begin(&key).unwrap();
         resources.invalidate(&key);
         assert_eq!(advance(&mut batch, &resources), Advance::Cancelled);
-        assert!(!resources.complete(&key, generation, Ok(json!({}))));
+        assert!(!resources.complete_owned(&key, generation, Ok(true)));
         assert_eq!(batch.completed, 0);
     }
     #[test]
     fn malformed_bookmark_paths_fail_locally_and_the_batch_can_continue() {
         let mut malformed = project("bad");
-        malformed["path"]["bytesB64"] = json!("not base64!");
-        let mut batch = Batch::new(
-            "s".into(),
-            "filter".into(),
-            vec![malformed, project("next")],
-        );
+        malformed.path.bytes_b64 = "not base64!".into();
+        let mut batch = batch(vec![malformed, project("next")]);
         let mut resources = Resources::default();
         let Advance::Read { key, request } = advance(&mut batch, &resources) else {
             panic!("first read");

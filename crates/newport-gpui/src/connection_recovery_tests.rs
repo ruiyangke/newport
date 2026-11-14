@@ -1,9 +1,9 @@
 //! Exercise actual snapshot completion/reset/reopen ordering without a backend.
 use crate::connections::fixtures::{self as discovery_fixture, Listener};
 use crate::project_library_state::typed_fixture::*;
+use crate::snapshot_fixture::{self as fixture, NEXT_INSTANCE, SERVER};
 use crate::{Completion, Page};
 use gpui_kit::TestAppContext;
-use serde_json::{Value, json};
 
 #[gpui_kit::test]
 fn connection_project_metadata_refreshes_independently_and_respects_retry_interval(
@@ -20,15 +20,14 @@ fn connection_project_metadata_refreshes_independently_and_respects_retry_interv
         this.work = work.into();
         this.page = Page::Ports;
         discovery_fixture::put(this, discovery_fixture::observation([]));
-        let data = json!([{"name":"Original", "path":"/srv/app"}]);
+        let data = vec![bookmark(1, TYPED_SERVER, "Original", "/srv/app")];
         let due = Instant::now() + Duration::from_secs(61);
         this.refresh_connection_projects(Instant::now());
         let initial = requests.try_recv().expect("initial project metadata read");
         assert_eq!(initial.key, "connection-projects");
-        this.resources
-            .complete("connection-projects", initial.generation, Ok(data.clone()));
+        this.complete_connection_projects(initial.generation, Ok(projects_reply(data.clone())));
         // Port discovery can be slow; it must not starve the local metadata read.
-        this.resources.begin("page").unwrap();
+        this.resources.begin("ports").unwrap();
         this.window_visible = false;
         this.poll_connections(due);
         assert!(requests.try_recv().is_err());
@@ -42,7 +41,7 @@ fn connection_project_metadata_refreshes_independently_and_respects_retry_interv
             server(&read),
             Some(uuid::Uuid::parse_str(TYPED_SERVER).unwrap())
         );
-        assert_eq!(this.value("connection-projects"), data);
+        assert_eq!(this.connection_bookmarks(), data);
         assert!(
             !this
                 .resources
@@ -63,7 +62,7 @@ fn connection_project_metadata_refreshes_independently_and_respects_retry_interv
             requests.try_recv().is_err(),
             "failed refreshes use completion time for backoff"
         );
-        assert_eq!(this.value("connection-projects"), data);
+        assert_eq!(this.connection_bookmarks(), data);
     });
 }
 
@@ -79,12 +78,11 @@ fn bookmark_changes_invalidate_only_the_owning_connections_metadata(cx: &mut Tes
         this.work = work.into();
         this.page = Page::Ports;
         discovery_fixture::put(this, discovery_fixture::observation([]));
-        let data = json!([{"name":"Original", "path":"/srv/app"}]);
+        let data = vec![bookmark(1, TYPED_SERVER, "Original", "/srv/app")];
         this.refresh_connection_projects(std::time::Instant::now());
         let initial = requests.try_recv().expect("initial project metadata read");
         assert_eq!(initial.key, "connection-projects");
-        this.resources
-            .complete("connection-projects", initial.generation, Ok(data.clone()));
+        this.complete_connection_projects(initial.generation, Ok(projects_reply(data.clone())));
         this.refresh();
         requests.try_iter().for_each(drop);
         this.project_bookmarks_changed("another-server");
@@ -98,14 +96,9 @@ fn bookmark_changes_invalidate_only_the_owning_connections_metadata(cx: &mut Tes
             .expect("bookmark write must invalidate the earlier metadata read");
         assert_eq!(fresh.key, "connection-projects");
         assert!(fresh.generation > old);
-        assert!(
-            !this
-                .resources
-                .complete("connection-projects", old, Ok(data.clone()))
-        );
-        assert_eq!(this.value("connection-projects"), data);
-        this.resources
-            .complete("connection-projects", fresh.generation, Ok(data.clone()));
+        assert!(!this.complete_connection_projects(old, Ok(projects_reply(data.clone()))));
+        assert_eq!(this.connection_bookmarks(), data);
+        this.complete_connection_projects(fresh.generation, Ok(projects_reply(data.clone())));
         this.navigate(Page::Integration, cx);
         requests.try_iter().for_each(drop);
         this.project_bookmarks_changed(TYPED_SERVER);
@@ -115,7 +108,7 @@ fn bookmark_changes_invalidate_only_the_owning_connections_metadata(cx: &mut Tes
             "hidden invalidation is deferred"
         );
         this.navigate(Page::Ports, cx);
-        assert_eq!(this.value("connection-projects"), data);
+        assert_eq!(this.connection_bookmarks(), data);
         let reads: Vec<_> = requests
             .try_iter()
             .filter(|work| work.key == "connection-projects")
@@ -126,19 +119,6 @@ fn bookmark_changes_invalidate_only_the_owning_connections_metadata(cx: &mut Tes
             "reopening must refresh even a recently cached bookmark list"
         );
     });
-}
-
-fn completion(key: &str, generation: u64, value: Value) -> Completion {
-    Completion {
-        discovery: None,
-        pdf: None,
-        pdf_text: None,
-        image: None,
-        server: TYPED_SERVER.into(),
-        key: key.into(),
-        generation,
-        result: Ok(value),
-    }
 }
 
 #[gpui_kit::test]
@@ -169,13 +149,13 @@ fn configuration_outage_keeps_connections_cache_and_recovery_revalidates_it(
             .filter = 1;
         this.suspend_connections();
         this.page = Page::Integration;
-        let original = this.snapshot.clone();
+        let original = this.snapshot.clone().unwrap();
         let mut unavailable = original.clone();
-        unavailable["loadError"] = json!("Vault temporarily unavailable");
-        unavailable["config"]["servers"] = json!([]);
+        unavailable.load_error = Some("Vault temporarily unavailable".into());
+        unavailable.config.servers.clear();
         let generation = this.resources.begin("snapshot").unwrap();
         replies
-            .send(completion("snapshot", generation, unavailable))
+            .send(fixture::completion(generation, unavailable))
             .unwrap();
         this.tick(cx);
         assert!(
@@ -200,7 +180,7 @@ fn configuration_outage_keeps_connections_cache_and_recovery_revalidates_it(
             .expect("Integration requests configuration recovery")
             .generation;
         replies
-            .send(completion("snapshot", generation, original.clone()))
+            .send(fixture::completion(generation, original.clone()))
             .unwrap();
         this.tick(cx);
         assert_eq!(this.connections_state[TYPED_SERVER].filter, 1);
@@ -220,7 +200,7 @@ fn configuration_outage_keeps_connections_cache_and_recovery_revalidates_it(
         this.suspend_connections();
         this.page = Page::Integration;
         let mut replacement = original;
-        replacement["runtime"]["connectionRevisions"][TYPED_SERVER] = json!(2);
+        fixture::set(&mut replacement.runtime.connection_revisions, SERVER, 2);
         // Recovery requested another snapshot while reopening the same route.
         let generation = requests
             .try_iter()
@@ -228,7 +208,7 @@ fn configuration_outage_keeps_connections_cache_and_recovery_revalidates_it(
             .expect("recovery revalidates the snapshot")
             .generation;
         replies
-            .send(completion("snapshot", generation, replacement))
+            .send(fixture::completion(generation, replacement))
             .unwrap();
         this.tick(cx);
         this.page = Page::Ports;
@@ -253,24 +233,24 @@ fn connections_opened_during_outage_restore_on_snapshot_recovery(cx: &mut TestAp
         this.work = work.into();
         this.replies = incoming;
         this.page = Page::Ports;
-        let original = this.snapshot.clone();
+        let original = this.snapshot.clone().unwrap();
         let data = discovery_fixture::observation([Listener::new(8080)]);
         discovery_fixture::put(this, data.clone());
         this.navigate(Page::Integration, cx);
         let request = requests.try_recv().unwrap();
         assert_eq!(request.key, "snapshot");
         let mut unavailable = original.clone();
-        unavailable["loadError"] = json!("Vault temporarily unavailable");
-        unavailable["config"]["servers"] = json!([]);
+        unavailable.load_error = Some("Vault temporarily unavailable".into());
+        unavailable.config.servers.clear();
         replies
-            .send(completion("snapshot", request.generation, unavailable))
+            .send(fixture::completion(request.generation, unavailable))
             .unwrap();
         this.tick(cx);
         this.navigate(Page::Ports, cx);
         assert!(requests.try_recv().is_err());
         let generation = this.resources.begin("snapshot").unwrap();
         replies
-            .send(completion("snapshot", generation, original))
+            .send(fixture::completion(generation, original))
             .unwrap();
         this.tick(cx);
         assert_eq!(
@@ -292,8 +272,8 @@ fn connections_opened_during_outage_restore_on_snapshot_recovery(cx: &mut TestAp
                 .count(),
             1
         );
-        assert!(this.resources.get("page").unwrap().pending);
-        assert!(!this.resources.get("page").unwrap().display_pending());
+        assert!(this.resources.get("ports").unwrap().pending);
+        assert!(!this.resources.get("ports").unwrap().display_pending());
     });
 }
 
@@ -312,20 +292,17 @@ fn connections_poll_waits_for_valid_configuration_without_losing_manual_intent(
         this.page = Page::Ports;
         this.window_visible = true;
         discovery_fixture::put(this, discovery_fixture::observation([]));
-        let generation = this.resources.begin("page").unwrap();
+        let generation = this.resources.begin("ports").unwrap();
         this.discover_connections(true); // Coalesced behind the pending read.
         let completion = crate::connections::DiscoveryCompletion {
-            scope: crate::terminal_scope::connection(
-                this.selected_server().unwrap(),
-                &this.snapshot,
-            ),
+            scope: this.selected_connection().unwrap(),
             reading: this.connections_state[TYPED_SERVER]
                 .reading
                 .clone()
                 .unwrap(),
         };
         assert!(this.complete_connections_reading(TYPED_SERVER, generation, completion));
-        this.snapshot["loadError"] = json!("Profile temporarily unavailable");
+        this.snapshot_mut().load_error = Some("Profile temporarily unavailable".into());
         assert!(
             !this.poll_connections(std::time::Instant::now() + std::time::Duration::from_secs(2))
         );
@@ -333,7 +310,7 @@ fn connections_poll_waits_for_valid_configuration_without_losing_manual_intent(
             requests.try_recv().is_err(),
             "an outage must not dispatch polls"
         );
-        this.snapshot["loadError"] = Value::Null;
+        this.snapshot_mut().load_error = None;
         this.poll_connections(std::time::Instant::now() + std::time::Duration::from_secs(3));
         let resumed: Vec<_> = requests.try_iter().collect();
         assert_eq!(resumed.len(), 2);
@@ -374,38 +351,41 @@ fn connection_epoch_reloads_bookmarks_then_reopens_worktree_and_rejects_old_read
             this.work = work.into();
             this.replies = incoming;
             this.page = Page::Projects;
-            this.snapshot["instanceId"] = json!(TYPED_INSTANCE);
-            this.snapshot["runtime"]["connectionRevisions"] = json!({(TYPED_SERVER):1});
-            let project = json!({"id":"bookmark", "serverId":TYPED_SERVER, "name":"Project",
-                "path":{"display":"/repo","bytesB64":"L3JlcG8="}});
-            let worktree = json!({"display":"/linked","bytesB64":"L2xpbmtlZA=="});
+            let project = bookmark(1, TYPED_SERVER, "Project", "/repo");
+            let worktree = newport_protocol::git::Path::new(b"/linked");
             this.selection = Some(project.clone());
             // A repository is still opening. No real descriptor/transport is
             // installed, so this fixture cannot send a remote release request.
-            this.git.opening_path = worktree.clone();
+            this.git.opening_path = Some(worktree.clone());
             this.git.tab = 1;
-            this.git.page = json!({"snapshot":"old", "entries":[]});
+            this.git.page = Some(crate::git_fixture::history_page("old", vec![], None));
             let old_read = this.resources.begin("git-list").unwrap();
             let snapshot_read = this.resources.begin("snapshot").unwrap();
-            let mut fresh = this.snapshot.clone();
+            let mut fresh = this.snapshot.clone().unwrap();
             if restart {
-                fresh["instanceId"] = json!(TYPED_NEXT_INSTANCE);
+                fresh.instance_id = NEXT_INSTANCE;
             } else {
-                fresh["runtime"]["connectionRevisions"][TYPED_SERVER] = json!(2);
+                fixture::set(&mut fresh.runtime.connection_revisions, SERVER, 2);
             }
             replies
-                .send(completion("snapshot", snapshot_read, fresh))
+                .send(fixture::completion(snapshot_read, fresh))
                 .unwrap();
             replies
-                .send(completion(
-                    "git-list",
-                    old_read,
-                    json!({"snapshot":"obsolete"}),
-                ))
+                .send(Completion {
+                    server: TYPED_SERVER.into(),
+                    key: "git-list".into(),
+                    generation: old_read,
+                    result: crate::Outcome::Git(Ok(crate::git_fixture::history_page(
+                        "obsolete",
+                        vec![],
+                        None,
+                    )
+                    .into_reply())),
+                })
                 .unwrap();
             this.tick(cx);
             assert!(this.selection.is_none());
-            assert!(this.git.page.is_null(), "old comparison must be retired");
+            assert!(this.git.page.is_none(), "old comparison must be retired");
             assert!(
                 this.resources.get("git-list").is_none(),
                 "late reply must be rejected"
@@ -418,13 +398,13 @@ fn connection_epoch_reloads_bookmarks_then_reopens_worktree_and_rejects_old_read
             let list = &pending[0];
             assert_eq!(kind(list), Some(Kind::PreferencesProjectsList));
             replies
-                .send(completion(
-                    "page",
+                .send(projects_completion(
+                    "projects",
                     list.generation,
                     if removed {
-                        json!([])
+                        Vec::new()
                     } else {
-                        json!([project.clone()])
+                        vec![project.clone()]
                     },
                 ))
                 .unwrap();
@@ -447,7 +427,7 @@ fn connection_epoch_reloads_bookmarks_then_reopens_worktree_and_rejects_old_read
             assert_eq!(
                 git_request(&pending[0]),
                 &newport_protocol::git::Request::Open {
-                    path: path(&worktree)
+                    path: worktree.clone()
                 }
             );
         });
@@ -467,20 +447,23 @@ fn ordinary_snapshot_and_configuration_outage_do_not_reset_repository(cx: &mut T
         this.work = work.into();
         this.replies = incoming;
         this.page = Page::Projects;
-        this.snapshot["instanceId"] = json!(TYPED_INSTANCE);
-        let selection = json!({"id":"bookmark","serverId":TYPED_SERVER});
+        let selection = bookmark(1, TYPED_SERVER, "Project", "/repo");
         this.selection = Some(selection.clone());
-        let cached = json!({"entries":["cached"],"snapshot":"current"});
+        let cached = Some(crate::git_fixture::history_page(
+            "current",
+            vec![crate::git_fixture::commit("cached", "Cached")],
+            None,
+        ));
         this.git.page = cached.clone();
         for unavailable in [false, true] {
             let generation = this.resources.begin("snapshot").unwrap();
-            let mut fresh = this.snapshot.clone();
+            let mut fresh = this.snapshot.clone().unwrap();
             if unavailable {
-                fresh["loadError"] = json!("Vault temporarily unavailable");
-                fresh["config"]["servers"] = json!([]);
+                fresh.load_error = Some("Vault temporarily unavailable".into());
+                fresh.config.servers.clear();
             }
             replies
-                .send(completion("snapshot", generation, fresh))
+                .send(fixture::completion(generation, fresh))
                 .unwrap();
             this.tick(cx);
             assert_eq!(this.selection, Some(selection.clone()));

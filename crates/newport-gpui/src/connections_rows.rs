@@ -1,21 +1,24 @@
 //! Shared row presentation and table ordering for Connections.
-use super::connections_grouped::{Entry, string, trouble_for};
+use super::connections_grouped::{Entry, active, forward_state, trouble_for};
 use super::*;
 use gpui_kit::base::{Table, TableBody, TableHead, TableHeader, TableRow};
 use gpui_kit::component::animation::cubic_bezier;
+use newport_protocol::desktop::configuration::ConnectionStatus;
 
 /// A steady core communicates connection state; a single ring expands and fades.
 /// Destination health remains separate from SSH transport state.
-fn transport_dot(status: &str, cx: &App) -> AnyElement {
+fn transport_dot(status: Option<ConnectionStatus>, cx: &App) -> AnyElement {
     let dark = cx.theme().is_dark();
     let tone = match status {
-        "error" => Some(theme::error(dark)),
-        "connecting" | "reconnecting" => Some(theme::warning(dark)),
-        "connected" => Some(theme::success(dark)),
-        _ => None,
+        Some(ConnectionStatus::Error) => Some(theme::error(dark)),
+        Some(ConnectionStatus::Connecting | ConnectionStatus::Reconnecting) => {
+            Some(theme::warning(dark))
+        }
+        Some(ConnectionStatus::Connected) => Some(theme::success(dark)),
+        Some(ConnectionStatus::Disconnected) | None => None,
     };
     let dot = crate::controls::status_dot(tone, cx).relative();
-    if status == "connected" {
+    if status == Some(ConnectionStatus::Connected) {
         let color = theme::success(dark);
         let dot = crate::controls::status_dot(Some(color), cx).relative();
         if cx.reduce_motion() {
@@ -52,7 +55,11 @@ fn transport_dot(status: &str, cx: &App) -> AnyElement {
             )
             .into_any_element();
     }
-    if matches!(status, "connecting" | "reconnecting") && !cx.reduce_motion() {
+    if matches!(
+        status,
+        Some(ConnectionStatus::Connecting | ConnectionStatus::Reconnecting)
+    ) && !cx.reduce_motion()
+    {
         dot.with_animation(
             "transport-pulse",
             Animation::new(Duration::from_secs(2))
@@ -68,28 +75,26 @@ fn transport_dot(status: &str, cx: &App) -> AnyElement {
 
 // Isolate animation invalidation from the Connections page and its tables.
 struct TransportIndicator {
-    props: (String, bool, bool),
+    props: (Option<ConnectionStatus>, bool, bool),
 }
 
 impl Render for TransportIndicator {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        transport_dot(&self.props.0, cx)
+        transport_dot(self.props.0, cx)
     }
 }
 
 fn retained_transport_dot(
     key: &str,
-    status: &str,
+    status: Option<ConnectionStatus>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let props = (status.to_owned(), cx.theme().is_dark(), cx.reduce_motion());
+    let props = (status, cx.theme().is_dark(), cx.reduce_motion());
     let indicator = window.use_keyed_state(
         SharedString::from(format!("transport-indicator-{key}")),
         cx,
-        |_, _| TransportIndicator {
-            props: props.clone(),
-        },
+        |_, _| TransportIndicator { props },
     );
     indicator.update(cx, |indicator, cx| {
         if indicator.props != props {
@@ -252,8 +257,8 @@ const WIDE_TABLE_MIN_WIDTH: f32 =
         / (1. - TABLE_PROJECT_SHARE);
 
 /// A row is Always on only when every saved forward on it is.
-fn always_on(forwards: &[Value]) -> bool {
-    !forwards.is_empty() && forwards.iter().all(|t| t["autoConnect"] == true)
+fn always_on(forwards: &[configuration::Tunnel]) -> bool {
+    !forwards.is_empty() && forwards.iter().all(|t| t.auto_connect)
 }
 
 pub(super) fn project_name(key: &str) -> &str {
@@ -266,9 +271,8 @@ pub(super) fn project_name(key: &str) -> &str {
             .unwrap_or_else(|| key.rsplit('/').next().unwrap_or(key))
     }
 }
-fn range(value: &Value, start: &str, end: &str) -> String {
-    let first = value[start].as_u64().unwrap_or_default();
-    match value[end].as_u64().filter(|last| *last != first) {
+fn range(first: u16, last: Option<u16>) -> String {
+    match last.filter(|last| *last != first) {
         Some(last) => format!("{first}–{last}"),
         None => first.to_string(),
     }
@@ -277,41 +281,49 @@ fn local_address(entry: &Entry) -> String {
     let Some(t) = entry.forwards.first() else {
         return String::new();
     };
-    if t["direction"] == "remote" {
-        let host = string(t, "remoteHost");
+    if t.direction == configuration::Direction::Remote {
+        let host = t.remote_host.as_str();
         let host = match host {
             "localhost" | "127.0.0.1" | "::1" => "server".into(),
             _ if host.contains(':') && !host.starts_with('[') => format!("[{host}]"),
             _ => host.to_owned(),
         };
-        return format!("{host}:{}", range(t, "remotePort", "remotePortEnd"));
+        return format!("{host}:{}", range(t.remote_port, t.remote_port_end));
     }
     let port = if entry.is_saved() {
-        range(t, "localPort", "localPortEnd")
+        range(t.local_port, t.local_port_end)
     } else {
         let offset = entry
             .port
             .number()
             .map(u64::from)
             .unwrap_or(0)
-            .saturating_sub(t["remotePort"].as_u64().unwrap_or(0));
-        (t["localPort"].as_u64().unwrap_or(0) + offset).to_string()
+            .saturating_sub(u64::from(t.remote_port));
+        (u64::from(t.local_port) + offset).to_string()
     };
     format!("localhost:{port}")
 }
 
 /// Select a connected local mapping; another forward's error must not retarget it.
-fn open_target(entry: &Entry, runtime: &Value) -> Option<(Value, Option<u16>)> {
+fn open_target(
+    entry: &Entry,
+    runtime: Option<&configuration::Runtime>,
+) -> Option<(configuration::Tunnel, Option<u16>)> {
     let remote_port = if entry.is_saved() {
         None
     } else {
         Some(entry.port.number()?)
     };
-    entry.forwards.iter().find_map(|value| {
-        let tunnel = serde_json::from_value::<newport_domain::model::Tunnel>(value.clone()).ok()?;
-        (runtime["tunnels"][tunnel.id.to_string()]["status"] == "connected"
-            && newport_domain::forwarding::local_endpoint(&tunnel, remote_port).is_ok())
-        .then(|| (value.clone(), remote_port))
+    entry.forwards.iter().find_map(|tunnel| {
+        (runtime
+            .and_then(|runtime| runtime.tunnel(tunnel.id))
+            .is_some_and(|state| state.status == ConnectionStatus::Connected)
+            && newport_domain::forwarding::local_endpoint(
+                &newport_domain::model::Tunnel::from(tunnel),
+                remote_port,
+            )
+            .is_ok())
+        .then(|| (tunnel.clone(), remote_port))
     })
 }
 
@@ -324,7 +336,7 @@ pub(super) fn editor_draft(
     port: u16,
     name: &str,
     project: &str,
-) -> Result<(Value, bool), String> {
+) -> Result<(newport_domain::model::Tunnel, bool), String> {
     let mut tunnel = newport_domain::forwarding::discovered_tunnel(tunnels, server, address, port)?;
     let existing = tunnels.iter().any(|saved| saved.id == tunnel.id);
     if !existing {
@@ -332,10 +344,7 @@ pub(super) fn editor_draft(
         tunnel.project = (!project.is_empty() && project != newport_domain::port_grouping::SYSTEM)
             .then(|| project.to_owned());
     }
-    Ok((
-        serde_json::to_value(tunnel).map_err(|e| e.to_string())?,
-        existing,
-    ))
+    Ok((tunnel, existing))
 }
 
 #[derive(Clone)]
@@ -356,9 +365,9 @@ pub(super) struct Row {
     generated_title: bool,
     detail: String,
     address: String,
-    open: Option<(Value, Option<u16>)>,
+    open: Option<(configuration::Tunnel, Option<u16>)>,
     status: String,
-    transport: String,
+    transport: Option<ConnectionStatus>,
     rank: u8,
     active: bool,
     problem: bool,
@@ -369,30 +378,34 @@ impl Row {
         std::rc::Rc::make_mut(&mut self.hover).enrich(&self.entry, view);
     }
 
-    pub(super) fn new(key: &str, entry: Entry, runtime: &Value, branches: bool) -> Self {
+    pub(super) fn new(
+        key: &str,
+        entry: Entry,
+        runtime: Option<&configuration::Runtime>,
+        branches: bool,
+    ) -> Self {
         let p = &entry.port;
         let worktree = (!p.reverse()).then(|| p.worktree()).flatten();
-        let destination_port = (!entry.is_saved())
-            .then(|| p.number().map(u64::from))
-            .flatten();
+        let destination_port = (!entry.is_saved()).then(|| p.number()).flatten();
         let forward = entry.forwards.first();
         let state = entry
             .forwards
             .iter()
-            .min_by_key(|t| {
+            .map(|t| forward_state(runtime, t).0)
+            .min_by_key(|state| {
                 // The dot describes SSH transport, independently of whether
                 // the process at a destination is listening (PortRow.rowState).
-                match string(&runtime["tunnels"][string(t, "id")], "status") {
-                    "error" => 0,
-                    "reconnecting" => 1,
-                    "connecting" => 2,
-                    "connected" => 3,
-                    _ => 4,
+                match state.map(|state| state.status) {
+                    Some(ConnectionStatus::Error) => 0,
+                    Some(ConnectionStatus::Reconnecting) => 1,
+                    Some(ConnectionStatus::Connecting) => 2,
+                    Some(ConnectionStatus::Connected) => 3,
+                    Some(ConnectionStatus::Disconnected) | None => 4,
                 }
             })
-            .map(|t| &runtime["tunnels"][string(t, "id")]);
-        let connection = state.map(|s| string(s, "status")).unwrap_or("");
-        let active = matches!(connection, "connected" | "connecting" | "reconnecting");
+            .flatten();
+        let connection = state.map(|state| state.status);
+        let active = connection.is_some_and(active);
         let problem = entry
             .forwards
             .iter()
@@ -400,14 +413,19 @@ impl Row {
         // With several forwards on a port, repair the failed one rather than
         // accidentally opening the first (possibly healthy) mapping.
         let fix = entry.forwards.iter().find_map(|t| {
-            (runtime["tunnels"][string(t, "id")]["status"] == "error")
-                .then(|| string(t, "id").to_owned())
+            forward_state(runtime, t)
+                .0
+                .is_some_and(|state| state.status == ConnectionStatus::Error)
+                .then(|| t.id.to_string())
         });
         let rank = if problem {
             0
-        } else if matches!(connection, "connecting" | "reconnecting") {
+        } else if matches!(
+            connection,
+            Some(ConnectionStatus::Connecting | ConnectionStatus::Reconnecting)
+        ) {
             1
-        } else if connection == "connected" {
+        } else if connection == Some(ConnectionStatus::Connected) {
             2
         } else if forward.is_some() {
             3
@@ -415,9 +433,9 @@ impl Row {
             4
         };
         let mut status = match rank {
-            0 if connection == "error" => "Failed",
+            0 if connection == Some(ConnectionStatus::Error) => "Failed",
             0 => "Unreachable",
-            1 if connection == "reconnecting" => "Reconnecting…",
+            1 if connection == Some(ConnectionStatus::Reconnecting) => "Reconnecting…",
             1 => "Connecting…",
             2 => "Forwarding",
             _ => "Forwarding off",
@@ -425,30 +443,19 @@ impl Row {
         .to_owned();
         // Always on retries without an attempt limit.
         if rank == 1
-            && connection == "reconnecting"
-            && state.is_some_and(|s| s["reconnectAttempt"].as_u64().unwrap_or(0) > 0)
+            && connection == Some(ConnectionStatus::Reconnecting)
+            && state.is_some_and(|s| s.reconnect_attempt > 0)
         {
             status = "Retrying…".to_owned();
         }
         let reverse = p.reverse();
-        let field = if !entry.is_saved() {
-            "port"
-        } else if reverse {
-            "localPort"
-        } else {
-            "remotePort"
-        };
         let number = p.number().map(u64::from).unwrap_or_default();
         let port = if let Some(definition) = p.definition() {
-            range(
-                definition,
-                field,
-                if reverse {
-                    "localPortEnd"
-                } else {
-                    "remotePortEnd"
-                },
-            )
+            if reverse {
+                range(definition.local_port, definition.local_port_end)
+            } else {
+                range(definition.remote_port, definition.remote_port_end)
+            }
         } else {
             number.to_string()
         };
@@ -460,7 +467,7 @@ impl Row {
         };
         let title = newport_domain::port_discovery::display(
             forward
-                .and_then(|t| t["name"].as_str())
+                .map(|t| t.name.as_str())
                 .filter(|s| !s.is_empty())
                 .unwrap_or(&fallback),
         );
@@ -473,12 +480,7 @@ impl Row {
         let generated_title = title == service
             || title == p.forward_name()
             || entry.forwards.iter().any(|forward| {
-                title
-                    == format!(
-                        "Terminal · {}:{}",
-                        string(forward, "remoteHost"),
-                        forward["remotePort"].as_u64().unwrap_or(0)
-                    )
+                title == format!("Terminal · {}:{}", forward.remote_host, forward.remote_port)
             });
         let mut details = Vec::new();
         // Every saved forward to the server says so, whatever its status:
@@ -488,18 +490,20 @@ impl Row {
         }
         if problem {
             for t in &entry.forwards {
-                let id = string(t, "id");
-                if let Some(error) = runtime["tunnels"][id]["errorMessage"]
-                    .as_str()
+                let (state, health) = forward_state(runtime, t);
+                if let Some(error) = state
+                    .and_then(|state| state.error_message.as_deref())
                     .filter(|s| !s.is_empty())
                 {
                     details.push(error.to_owned());
                 } else if trouble_for(runtime, t, destination_port) {
-                    details.push(if runtime["tunnels"][id]["status"] == "error" {
-                        "The forward stopped.".into()
-                    } else {
-                        forwarding::status_for(runtime, id, destination_port)
-                    });
+                    details.push(
+                        if state.is_some_and(|state| state.status == ConnectionStatus::Error) {
+                            "The forward stopped.".into()
+                        } else {
+                            forwarding::status_for(state, health, destination_port)
+                        },
+                    );
                 }
             }
         } else if rank == 1 {
@@ -535,7 +539,7 @@ impl Row {
             local_address(&entry)
         };
         let identity = p.key();
-        let transport = connection.to_owned();
+        let transport = connection;
         let process_icon = crate::connections_process_icon::ProcessIcon::for_port(p);
         let mut hover = crate::connections_hover::Card::new(
             &entry,
@@ -853,9 +857,9 @@ impl Newport {
             || row.active
             || row.entry.is_saved()
             || row.entry.forwards.iter().any(|t| {
-                t["direction"] == "remote"
-                    || t["localPort"] != t["remotePort"]
-                    || t["localPortEnd"] != t["remotePortEnd"]
+                t.direction == configuration::Direction::Remote
+                    || t.local_port != t.remote_port
+                    || t.local_port_end != t.remote_port_end
             });
         let hover = row.hover.clone();
         let (display_title, display_detail) = row.presentation_text(table);
@@ -866,7 +870,7 @@ impl Newport {
             2 => theme::success(cx.theme().is_dark()),
             _ => cx.theme().muted_foreground,
         };
-        let dot = retained_transport_dot(&row.key, &row.transport, window, cx);
+        let dot = retained_transport_dot(&row.key, row.transport, window, cx);
         let fix_server = self.server.clone();
         let fix = row.fix.clone();
         let identity = div()
@@ -1302,7 +1306,7 @@ impl Newport {
                 for t in &forwards {
                     let weak = weak.clone();
                     let server = server.clone();
-                    let id = string(t, "id").to_owned();
+                    let id = t.id.to_string();
                     let title = if forwards.len() == 1 {
                         "Edit…".into()
                     } else {
@@ -1372,14 +1376,11 @@ impl Newport {
     }
 
     fn edit_saved_connection(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let value = self.snapshot["config"]["tunnels"]
-            .as_array()
-            .and_then(|tunnels| {
-                tunnels
-                    .iter()
-                    .find(|t| string(t, "id") == id && string(t, "serverId") == self.server)
-            })
-            .cloned();
+        let value = self
+            .saved_forwards()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|t| t.id.to_string() == id && t.server_id.to_string() == self.server);
         if let Some(value) = value {
             self.edit_tunnel(Some(value), window, cx);
         } else {
@@ -1393,18 +1394,70 @@ impl Newport {
 mod tests {
     use super::{Entry, Row, always_on, local_address, open_target, sort};
     use crate::connections::fixtures::Listener;
+    use crate::snapshot_fixture as fixture;
     use newport_domain::port_grouping::Port;
-    use serde_json::json;
+    use newport_protocol::desktop::configuration::{
+        ConnectionState, ConnectionStatus, DestinationHealth, DestinationHealthList,
+        DestinationStatus, Runtime,
+    };
+    use newport_protocol::desktop::configuration::{Direction, Tunnel};
+    const A: &str = "00000000-0000-4000-8000-00000000000a";
+    const UP: &str = "00000000-0000-4000-8000-00000000000b";
+    const FAILED: &str = "00000000-0000-4000-8000-00000000000c";
+    fn id(value: &str) -> uuid::Uuid {
+        uuid::Uuid::parse_str(value).unwrap()
+    }
+    /// The saved forward `forward`, to port 0 until a test says otherwise.
+    fn tunnel(forward: &str) -> Tunnel {
+        fixture::tunnel(id(forward), fixture::SERVER, 0, 0)
+    }
+    /// Whether the saved forward is on whenever Newport runs.
+    fn policy(auto_connect: bool) -> Tunnel {
+        Tunnel {
+            auto_connect,
+            ..tunnel(A)
+        }
+    }
+    fn state(status: ConnectionStatus, error: Option<&str>) -> ConnectionState {
+        ConnectionState {
+            error_message: error.map(Into::into),
+            ..fixture::connection(status)
+        }
+    }
+    /// A runtime with these forwards' connections.
+    fn runtime(states: &[(&str, ConnectionState)]) -> Runtime {
+        let mut runtime = fixture::runtime();
+        for (forward, state) in states {
+            fixture::set(&mut runtime.tunnels, id(forward), state.clone());
+        }
+        runtime
+    }
+    fn health(
+        remote_port: u16,
+        status: DestinationStatus,
+        message: Option<&str>,
+    ) -> DestinationHealth {
+        DestinationHealth {
+            local_port: remote_port,
+            remote_port,
+            status,
+            message: message.map(Into::into),
+            checked_at: None,
+        }
+    }
+    fn set_health(runtime: &mut Runtime, forward: &str, values: Vec<DestinationHealth>) {
+        fixture::set(
+            &mut runtime.tunnel_health,
+            id(forward),
+            DestinationHealthList { values },
+        );
+    }
     #[test]
     fn always_on_requires_every_saved_forward_on_the_row() {
         assert!(!always_on(&[]), "an unsaved port has no policy");
-        assert!(always_on(&[json!({"autoConnect":true})]));
-        assert!(!always_on(&[json!({"autoConnect":false})]));
-        assert!(!always_on(&[json!({})]));
-        assert!(!always_on(&[
-            json!({"autoConnect":true}),
-            json!({"autoConnect":false})
-        ]));
+        assert!(always_on(&[policy(true)]));
+        assert!(!always_on(&[policy(false)]));
+        assert!(!always_on(&[policy(true), policy(false)]));
     }
     fn row(port: u64, project: &str) -> Row {
         Row::new(
@@ -1414,7 +1467,7 @@ mod tests {
                 port: Listener::new(u16::try_from(port).unwrap()).port(),
                 forwards: vec![],
             },
-            &json!({}),
+            None,
             false,
         )
     }
@@ -1427,57 +1480,55 @@ mod tests {
                 .checkout("/srv/app", Some("feature"), Some(false))
                 .port(),
             addresses: vec!["127.0.0.1".into()],
-            forwards: vec![json!({"id":"a","name":name,"remoteHost":"127.0.0.1",
-                "remotePort":5179,"localPort":5179})],
+            forwards: vec![Tunnel {
+                name: String::from(name),
+                remote_host: "127.0.0.1".into(),
+                ..fixture::tunnel(id(A), fixture::SERVER, 5179, 5179)
+            }],
         };
         for name in ["Vite", "Vite · feature", "Terminal · 127.0.0.1:5179"] {
-            let row = Row::new("/srv/app", entry(name), &json!({}), true);
+            let row = Row::new("/srv/app", entry(name), None, true);
             assert_eq!(row.presentation_text(false), ("Vite".into(), "".into()));
             assert_eq!(row.status, "Forwarding off");
-            assert_eq!(row.entry.forwards[0]["name"], name);
+            assert_eq!(row.entry.forwards[0].name, name);
         }
-        let row = Row::new("/srv/app", entry("Customer preview"), &json!({}), true);
+        let row = Row::new("/srv/app", entry("Customer preview"), None, true);
         assert_eq!(
             row.presentation_text(false),
             ("Customer preview".into(), "".into())
         );
         assert!(row.presentation_text(true).1.contains("Vite"));
-        let row = Row::new(
-            "/srv/app",
-            entry("Customer preview"),
-            &json!({"tunnels":{"a":{"status":"error","errorMessage":"Connection refused"}}}),
-            true,
-        );
+        let refused = runtime(&[(
+            A,
+            state(ConnectionStatus::Error, Some("Connection refused")),
+        )]);
+        let row = Row::new("/srv/app", entry("Customer preview"), Some(&refused), true);
         assert_eq!(
             row.presentation_text(false),
             ("Customer preview".into(), "Connection refused".into())
         );
         let mut saved = entry("Customer preview");
         saved.port = Port::saved(saved.forwards[0].clone());
-        let row = Row::new("/srv/app", saved.clone(), &json!({}), true);
+        let row = Row::new("/srv/app", saved.clone(), None, true);
         assert_eq!(row.presentation_text(false).0, "Customer preview");
         let detail = row.presentation_text(false).1;
         assert!(detail == "Destination not observed", "{detail}");
         // A failing or connecting saved forward still says so, so the label
         // always marks the forwards Clean up offers.
         for (runtime, status) in [
+            (refused, "Connection refused"),
             (
-                json!({"tunnels":{"a":{"status":"error","errorMessage":"Connection refused"}}}),
-                "Connection refused",
+                runtime(&[(A, state(ConnectionStatus::Connecting, None))]),
+                "",
             ),
-            (json!({"tunnels":{"a":{"status":"connecting"}}}), ""),
         ] {
-            let row = Row::new("/srv/app", saved.clone(), &runtime, true);
+            let row = Row::new("/srv/app", saved.clone(), Some(&runtime), true);
             let detail = row.presentation_text(false).1;
             assert!(detail.starts_with("Destination not observed"), "{detail}");
             assert!(detail.contains(status), "{detail}");
         }
-        let row = Row::new(
-            "/srv/app",
-            saved,
-            &json!({"tunnels":{"a":{"status":"connected"}}}),
-            true,
-        );
+        let connected = runtime(&[(A, state(ConnectionStatus::Connected, None))]);
+        let row = Row::new("/srv/app", saved, Some(&connected), true);
         assert_eq!(row.presentation_text(false).1, "Destination not observed");
     }
 
@@ -1505,15 +1556,17 @@ mod tests {
         let mut entry = Entry {
             addresses: vec![],
             port: Listener::new(3002).port(),
-            forwards: vec![
-                json!({"remotePort":3000,"remotePortEnd":3005,"localPort":9000,"localPortEnd":9005}),
-            ],
+            forwards: vec![Tunnel {
+                local_port_end: Some(9005),
+                remote_port_end: Some(3005),
+                ..fixture::tunnel(id(A), fixture::SERVER, 9000, 3000)
+            }],
         };
         assert_eq!(local_address(&entry), "localhost:9002");
         entry.port = Port::saved(entry.forwards[0].clone());
         assert_eq!(local_address(&entry), "localhost:9000–9005");
-        entry.forwards[0]["direction"] = json!("remote");
-        entry.forwards[0]["remoteHost"] = json!("::1");
+        entry.forwards[0].direction = Direction::Remote;
+        entry.forwards[0].remote_host = "::1".into();
         assert_eq!(local_address(&entry), "server:3000–3005");
     }
     #[test]
@@ -1521,15 +1574,18 @@ mod tests {
         let entry = Entry {
             addresses: vec![],
             port: Listener::new(3000).port(),
-            forwards: vec![json!({"id":"up"}), json!({"id":"failed"})],
+            forwards: vec![tunnel(UP), tunnel(FAILED)],
         };
-        let runtime = json!({"tunnels":{"up":{"status":"connected"},"failed":{"status":"error","errorMessage":"Denied"}}});
-        let row = Row::new("", entry, &runtime, false);
+        let runtime = runtime(&[
+            (UP, state(ConnectionStatus::Connected, None)),
+            (FAILED, state(ConnectionStatus::Error, Some("Denied"))),
+        ]);
+        let row = Row::new("", entry, Some(&runtime), false);
         assert_eq!(row.status, "Failed");
         assert_eq!(row.detail, "Denied");
         assert_eq!(row.rank, 0);
-        assert_eq!(row.fix.as_deref(), Some("failed"));
-        assert_eq!(row.transport, "error");
+        assert_eq!(row.fix.as_deref(), Some(FAILED));
+        assert_eq!(row.transport, Some(ConnectionStatus::Error));
     }
 
     #[test]
@@ -1537,27 +1593,43 @@ mod tests {
         let entry = Entry {
             addresses: vec![],
             port: Listener::new(8080).port(),
-            forwards: vec![json!({"id":"up"})],
+            forwards: vec![tunnel(UP)],
         };
-        let mut runtime = json!({"tunnels":{"up":{"status":"connected"}},
-            "tunnelHealth":{"up":[{"remotePort":8080,"status":"unavailable","message":"Connection refused"}]}});
-        let row = Row::new("", entry.clone(), &runtime, false);
-        assert_eq!(row.transport, "connected");
+        let mut runtime = runtime(&[(UP, state(ConnectionStatus::Connected, None))]);
+        set_health(
+            &mut runtime,
+            UP,
+            vec![health(
+                8080,
+                DestinationStatus::Unavailable,
+                Some("Connection refused"),
+            )],
+        );
+        let row = Row::new("", entry.clone(), Some(&runtime), false);
+        assert_eq!(row.transport, Some(ConnectionStatus::Connected));
         assert_eq!(row.status, "Unreachable");
         assert!(row.fix.is_none());
-        runtime["tunnels"]["up"] = json!({"status":"reconnecting","reconnectAttempt":3});
-        let row = Row::new("", entry.clone(), &runtime, false);
+        let retrying = |attempt| ConnectionState {
+            reconnect_attempt: attempt,
+            ..state(ConnectionStatus::Reconnecting, None)
+        };
+        fixture::set(&mut runtime.tunnels, id(UP), retrying(3));
+        let row = Row::new("", entry.clone(), Some(&runtime), false);
         assert_eq!(row.status, "Retrying…");
         assert_eq!(row.detail, row.status);
         assert!(row.fix.is_none());
         // A high attempt number still reads as retrying.
-        runtime["tunnels"]["up"] = json!({"status":"reconnecting","reconnectAttempt":12});
-        let row = Row::new("", entry.clone(), &runtime, false);
+        fixture::set(&mut runtime.tunnels, id(UP), retrying(12));
+        let row = Row::new("", entry.clone(), Some(&runtime), false);
         assert_eq!(row.status, "Retrying…");
-        runtime["tunnels"]["up"] = json!({"status":"error"});
-        let row = Row::new("", entry, &runtime, false);
+        fixture::set(
+            &mut runtime.tunnels,
+            id(UP),
+            state(ConnectionStatus::Error, None),
+        );
+        let row = Row::new("", entry, Some(&runtime), false);
         assert_eq!(row.detail, "The forward stopped.");
-        assert_eq!(row.fix.as_deref(), Some("up"));
+        assert_eq!(row.fix.as_deref(), Some(UP));
     }
 
     #[test]
@@ -1565,17 +1637,22 @@ mod tests {
         let mut entry = Entry {
             addresses: vec![],
             port: Listener::new(8080).port(),
-            forwards: vec![json!({"id":"up"}), json!({"id":"failed"})],
+            forwards: vec![tunnel(UP), tunnel(FAILED)],
         };
-        let runtime = json!({
-            "tunnels":{"up":{"status":"connected"},"failed":{"status":"error"}},
-            "tunnelHealth":{"up":[{"remotePort":8080,"status":"unavailable"}]}
-        });
+        let mut runtime = runtime(&[
+            (UP, state(ConnectionStatus::Connected, None)),
+            (FAILED, state(ConnectionStatus::Error, None)),
+        ]);
+        set_health(
+            &mut runtime,
+            UP,
+            vec![health(8080, DestinationStatus::Unavailable, None)],
+        );
         for _ in 0..2 {
-            let row = Row::new("", entry.clone(), &runtime, false);
-            assert_eq!(row.transport, "error");
+            let row = Row::new("", entry.clone(), Some(&runtime), false);
+            assert_eq!(row.transport, Some(ConnectionStatus::Error));
             assert_eq!(row.status, "Failed");
-            assert_eq!(row.fix.as_deref(), Some("failed"));
+            assert_eq!(row.fix.as_deref(), Some(FAILED));
             entry.forwards.reverse();
         }
     }
@@ -1592,43 +1669,72 @@ mod tests {
         second.id = uuid::Uuid::new_v4();
         second.local_port = 10000;
         second.local_port_end = Some(10005);
+        let (first, second) = (
+            newport_protocol::desktop::configuration::Tunnel::from(&first),
+            newport_protocol::desktop::configuration::Tunnel::from(&second),
+        );
         let entry = Entry {
             addresses: vec![],
             port: Listener::new(3002).port(),
-            forwards: vec![json!(first), json!(second)],
+            forwards: vec![first.clone(), second.clone()],
         };
-        let mut runtime = json!({"tunnels":{}});
-        runtime["tunnels"][first.id.to_string()] = json!({"status":"disconnected"});
-        runtime["tunnels"][second.id.to_string()] = json!({"status":"connected"});
-        let row = Row::new("", entry.clone(), &runtime, false);
+        let mut runtime = fixture::runtime();
+        fixture::set(
+            &mut runtime.tunnels,
+            first.id,
+            state(ConnectionStatus::Disconnected, None),
+        );
+        fixture::set(
+            &mut runtime.tunnels,
+            second.id,
+            state(ConnectionStatus::Connected, None),
+        );
+        let row = Row::new("", entry.clone(), Some(&runtime), false);
         assert_eq!(row.address, "localhost:10002");
-        assert_eq!(row.open, Some((json!(second), Some(3002))));
-        runtime["tunnelHealth"][second.id.to_string()] = json!([
-            {"remotePort":3000,"status":"unavailable","message":"Connection refused"},
-            {"remotePort":3002,"status":"reachable"}
-        ]);
-        let row = Row::new("", entry.clone(), &runtime, false);
+        assert_eq!(row.open, Some((second.clone(), Some(3002))));
+        set_health(
+            &mut runtime,
+            &second.id.to_string(),
+            vec![
+                health(
+                    3000,
+                    DestinationStatus::Unavailable,
+                    Some("Connection refused"),
+                ),
+                health(3002, DestinationStatus::Reachable, None),
+            ],
+        );
+        let row = Row::new("", entry.clone(), Some(&runtime), false);
         assert_eq!(row.status, "Forwarding");
         assert!(!row.problem);
-        for status in ["disconnected", "connecting", "reconnecting", "error"] {
-            runtime["tunnels"][second.id.to_string()]["status"] = json!(status);
-            assert!(open_target(&entry, &runtime).is_none(), "{status}");
+        for status in [
+            ConnectionStatus::Disconnected,
+            ConnectionStatus::Connecting,
+            ConnectionStatus::Reconnecting,
+            ConnectionStatus::Error,
+        ] {
+            fixture::set(&mut runtime.tunnels, second.id, state(status, None));
+            assert!(open_target(&entry, Some(&runtime)).is_none(), "{status:?}");
         }
-        runtime["tunnels"][second.id.to_string()]["status"] = json!("connected");
+        fixture::set(
+            &mut runtime.tunnels,
+            second.id,
+            state(ConnectionStatus::Connected, None),
+        );
         let mut reverse = entry.clone();
-        reverse.forwards[1]["direction"] = json!("remote");
-        assert!(open_target(&reverse, &runtime).is_none());
+        reverse.forwards[1].direction = Direction::Remote;
+        assert!(open_target(&reverse, Some(&runtime)).is_none());
         let mut outside = entry.clone();
         outside.port = Listener::new(3006).port();
-        assert!(open_target(&outside, &runtime).is_none());
+        assert!(open_target(&outside, Some(&runtime)).is_none());
         let saved = Entry {
             addresses: vec![],
-            port: Port::saved(json!(second)),
-            forwards: vec![json!(second)],
+            port: Port::saved(second.clone()),
+            forwards: vec![second.clone()],
         };
-        let row = Row::new("", saved, &runtime, false);
+        let row = Row::new("", saved, Some(&runtime), false);
         assert_eq!(row.address, "localhost:10000–10005");
-        assert_eq!(row.open, Some((json!(second), None)));
+        assert_eq!(row.open, Some((second, None)));
         assert!(
             row.problem,
             "A standalone saved range still shows its failed member"
@@ -1647,9 +1753,12 @@ mod tests {
                 )
                 .port(),
             addresses: vec!["127.0.0.1".into(), "::".into()],
-            forwards: vec![json!({"id":"a","name":"Customer preview"})],
+            forwards: vec![Tunnel {
+                name: "Customer preview".into(),
+                ..tunnel(A)
+            }],
         };
-        let row = Row::new("/srv/app", entry, &json!({}), false);
+        let row = Row::new("/srv/app", entry, None, false);
         assert_eq!(row.title, "Customer preview");
         assert_eq!(row.detail, "Vite · packages/web/ · Node · all interfaces");
         let mut first = super::tests::row(100, "/srv/z");
@@ -1679,13 +1788,13 @@ mod tests {
         )
         .unwrap();
         assert!(existing);
-        assert_eq!(value, json!(tunnel));
+        assert_eq!(value, tunnel);
         let (value, existing) =
             super::editor_draft(&[], server, "0.0.0.0", 8081, "Vite · feature", "/srv/new")
                 .unwrap();
         assert!(!existing);
-        assert_eq!(value["name"], "Vite · feature");
-        assert_eq!(value["project"], "/srv/new");
+        assert_eq!(value.name, "Vite · feature");
+        assert_eq!(value.project.as_deref(), Some("/srv/new"));
     }
     #[test]
     fn checkout_identity_and_relative_details_use_normalized_path() {
@@ -1703,8 +1812,8 @@ mod tests {
             addresses: vec!["127.0.0.1".into()],
             forwards: vec![],
         };
-        let first = Row::new("/srv", make("/srv/app/"), &json!({}), true);
-        let second = Row::new("/srv", make("/srv/app"), &json!({}), true);
+        let first = Row::new("/srv", make("/srv/app/"), None, true);
+        let second = Row::new("/srv", make("/srv/app"), None, true);
         assert_eq!(first.worktree, second.worktree);
         assert_eq!(first.detail, "packages/web/ · Node");
         assert_eq!(first.detail, second.detail);
@@ -1717,7 +1826,9 @@ mod motion_tests {
     use gpui::{Context, IntoElement, Render, TestAppContext, Window};
     use gpui_kit as gpui;
 
-    struct TransportHost(&'static str);
+    use newport_protocol::desktop::configuration::ConnectionStatus;
+
+    struct TransportHost(Option<ConnectionStatus>);
 
     impl Render for TransportHost {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1728,12 +1839,13 @@ mod motion_tests {
     #[gpui::test]
     fn pulse_stops_scheduling_frames_when_transport_disconnects(cx: &mut TestAppContext) {
         cx.update(gpui_kit::component::init);
-        let (view, cx) = cx.add_window_view(|_, _| TransportHost("connecting"));
+        let (view, cx) =
+            cx.add_window_view(|_, _| TransportHost(Some(ConnectionStatus::Connecting)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let frames = cx.update(|window, cx| window.simulate_next_frame(cx));
         assert!(frames > 0, "connecting transport schedules its pulse");
         view.update(cx, |view, cx| {
-            view.0 = "disconnected";
+            view.0 = Some(ConnectionStatus::Disconnected);
             cx.notify();
         });
         cx.update(|window, cx| {
@@ -1748,13 +1860,15 @@ mod motion_tests {
     #[gpui::test]
     fn reduced_motion_and_settled_states_do_not_schedule_animation(cx: &mut TestAppContext) {
         cx.update(gpui_kit::component::init);
-        let (view, cx) = cx.add_window_view(|_, _| TransportHost("disconnected"));
+        let (view, cx) =
+            cx.add_window_view(|_, _| TransportHost(Some(ConnectionStatus::Disconnected)));
         for (reduced, status) in [
-            (false, "disconnected"),
-            (true, "connected"),
-            (false, "error"),
-            (true, "connecting"),
-            (true, "reconnecting"),
+            (false, Some(ConnectionStatus::Disconnected)),
+            (true, Some(ConnectionStatus::Connected)),
+            (false, Some(ConnectionStatus::Error)),
+            (true, Some(ConnectionStatus::Connecting)),
+            (true, Some(ConnectionStatus::Reconnecting)),
+            (false, None),
         ] {
             view.update(cx, |view, _| {
                 view.0 = status;
@@ -1765,7 +1879,7 @@ mod motion_tests {
                 assert_eq!(
                     window.simulate_next_frame(cx),
                     0,
-                    "{status}, reduced={reduced}"
+                    "{status:?}, reduced={reduced}"
                 );
             });
         }

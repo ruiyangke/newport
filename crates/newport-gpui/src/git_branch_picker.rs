@@ -1,24 +1,26 @@
 //! An anchored branch browser with reads independent of the visible Git page.
 use super::*;
 use gpui_kit::component::popover::Popover;
-use newport_protocol::git::Request as GitRequest;
+use newport_client::git_branch::BranchPage;
+use newport_protocol::git::{Branch, Reply, Request as GitRequest};
 
 /// Branch row facts, read from the listing without another request.
 /// Keep the remote label because this picker has one mixed list.
-fn branch_details(entry: &Value) -> String {
-    let status = if entry["current"] == true {
+fn branch_details(entry: &Branch) -> String {
+    let status = if entry.current {
         "Current branch".to_owned()
-    } else if entry["remote"] == true {
+    } else if entry.remote {
         "Remote branch".to_owned()
     } else {
-        entry["oid"]["hex"]
-            .as_str()
+        Some(entry.oid.hex.as_str())
             .filter(|oid| !oid.is_empty())
             .map(|oid| oid.chars().take(8).collect())
             .unwrap_or_else(|| "Unavailable".into())
     };
-    let upstream = entry["upstream"]["display"]
-        .as_str()
+    let upstream = entry
+        .upstream
+        .as_ref()
+        .map(|upstream| upstream.display.as_str())
         .filter(|name| !name.is_empty());
     match upstream {
         Some(name) => {
@@ -35,12 +37,12 @@ fn branch_details(entry: &Value) -> String {
 #[derive(Default)]
 pub(super) struct Picker {
     pub open: bool,
-    pub page: Value,
-    pub selected: Value,
+    pub page: Option<BranchPage>,
+    pub selected: Option<Branch>,
     pub error: Option<String>,
     scroll: UniformListScrollHandle,
     cursor: Option<String>,
-    checkout: Option<Value>,
+    checkout: Option<Branch>,
     worktree: bool,
     highlighted: Option<usize>,
     keyboard_menu: Option<usize>,
@@ -50,13 +52,26 @@ pub(super) struct Picker {
 
 struct PrefetchedPage {
     cursor: String,
-    result: Option<Result<Value, String>>,
+    result: Option<Result<BranchPage, String>>,
 }
 
 impl Picker {
+    fn next_cursor(&self) -> Option<&str> {
+        self.page.as_ref()?.next_cursor.as_deref()
+    }
+    /// The loaded rows, in order.
+    pub(super) fn entries(&self) -> &[Branch] {
+        self.page
+            .as_ref()
+            .map(|page| page.entries.as_slice())
+            .unwrap_or_default()
+    }
+    pub(super) fn snapshot(&self) -> Option<&str> {
+        self.page.as_ref().map(|page| page.snapshot.as_str())
+    }
     fn reset_listing(&mut self) {
-        self.page = Value::Null;
-        self.selected = Value::Null;
+        self.page = None;
+        self.selected = None;
         self.highlighted = None;
         self.keyboard_menu = None;
         self.cursor = None;
@@ -71,7 +86,7 @@ impl Picker {
         if !self.open || self.error.is_some() || self.cursor.is_some() {
             return None;
         }
-        let cursor = self.page["nextCursor"].as_str()?.to_owned();
+        let cursor = self.next_cursor()?.to_owned();
         if self
             .prefetched
             .as_ref()
@@ -87,10 +102,11 @@ impl Picker {
     }
 
     fn demand_prefetch(&mut self) -> bool {
+        let next = self.next_cursor().map(str::to_owned);
         let Some(page) = self.prefetched.as_mut() else {
             return false;
         };
-        if !self.open || self.page["nextCursor"].as_str() != Some(&page.cursor) {
+        if !self.open || next.as_deref() != Some(page.cursor.as_str()) {
             return false;
         }
         self.cursor = Some(page.cursor.clone());
@@ -100,7 +116,7 @@ impl Picker {
         true
     }
 
-    fn consume_prefetch(&mut self, result: Result<Value, String>) {
+    fn consume_prefetch(&mut self, result: Result<BranchPage, String>) {
         self.prefetched = None;
         if let Err(error) = &result {
             // Speculative failures surface only once this page is requested.
@@ -109,11 +125,12 @@ impl Picker {
         self.accept_page("git-branches-more", result);
     }
 
-    fn accept_prefetch(&mut self, result: Result<Value, String>) {
+    fn accept_prefetch(&mut self, result: Result<BranchPage, String>) {
+        let next = self.next_cursor().map(str::to_owned);
         let Some(page) = self.prefetched.as_mut() else {
             return;
         };
-        if !self.open || self.page["nextCursor"].as_str() != Some(&page.cursor) {
+        if !self.open || next.as_deref() != Some(page.cursor.as_str()) {
             return;
         }
         if self.cursor.as_ref() == Some(&page.cursor) {
@@ -122,15 +139,15 @@ impl Picker {
             page.result = Some(result);
         }
     }
-    fn select(&mut self, entry: &Value) -> bool {
-        if !self.open || !rows(&self.page["entries"]).contains(entry) {
+    fn select(&mut self, entry: &Branch) -> bool {
+        if !self.open || !self.entries().contains(entry) {
             return false;
         }
-        self.selected = entry.clone();
+        self.selected = Some(entry.clone());
         self.checkout = None;
         true
     }
-    fn accept_page(&mut self, key: &str, result: Result<Value, String>) {
+    fn accept_page(&mut self, key: &str, result: Result<BranchPage, String>) {
         if !self.open {
             return;
         }
@@ -139,14 +156,18 @@ impl Picker {
             return; // The resource owns the actionable read error.
         };
         if key == "git-branches" {
-            self.page = value;
+            self.page = Some(value);
             self.highlighted = None;
             self.keyboard_menu = None;
         } else if key == "git-branches-more"
             && let Some(cursor) = self.cursor.take()
         {
-            match newport_client::git_page::merge(&self.page, value, &cursor) {
-                Ok(page) => self.page = page,
+            let merged = match &self.page {
+                Some(page) => newport_client::git_page::merge_pages(page, value, &cursor),
+                None => Err("Invalid repository page. Refresh to retry.".into()),
+            };
+            match merged {
+                Ok(page) => self.page = Some(page),
                 Err(error) => self.error = Some(error),
             }
         }
@@ -168,28 +189,32 @@ enum Action {
 #[derive(Clone)]
 struct MenuScope {
     server: String,
-    repo: Value,
-    snapshot: Value,
+    repo: Option<String>,
+    snapshot: Option<String>,
 }
 impl MenuScope {
     fn matches(&self, this: &Newport) -> bool {
         this.git.branches.open
             && !this.project_dialog_open
             && !this.branch_picker_reviewing()
-            && self.same_listing(&this.server, &this.git.repo, &this.git.branches.page)
+            && self.same_listing(
+                &this.server,
+                this.git.repo_id(),
+                this.git.branches.snapshot(),
+            )
     }
-    fn same_listing(&self, server: &str, repo: &Value, page: &Value) -> bool {
+    fn same_listing(&self, server: &str, repo: Option<&str>, snapshot: Option<&str>) -> bool {
         self.server == server
-            && self.repo.is_string()
-            && self.repo == repo["repoId"]
-            && self.snapshot.is_string()
-            && self.snapshot == page["snapshot"]
+            && self.repo.is_some()
+            && self.repo.as_deref() == repo
+            && self.snapshot.is_some()
+            && self.snapshot.as_deref() == snapshot
     }
 }
 fn branch_menu(
     mut menu: PopupMenu,
     owner: WeakEntity<Newport>,
-    entry: Value,
+    entry: Branch,
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
@@ -197,23 +222,28 @@ fn branch_menu(
         return menu;
     };
     let this = view.read(cx);
-    if !this.git.branches.open || !rows(&this.git.branches.page["entries"]).contains(&entry) {
+    if !this.git.branches.open || !this.git.branches.entries().contains(&entry) {
         return menu;
     }
     let scope = MenuScope {
         server: this.server.clone(),
-        repo: this.git.repo["repoId"].clone(),
-        snapshot: this.git.branches.page["snapshot"].clone(),
+        repo: this.git.repo_id().map(str::to_owned),
+        snapshot: this.git.branches.snapshot().map(str::to_owned),
     };
     let writable = this.git_can_write_branch();
-    let current = entry["current"] == true;
+    let current = entry.current;
     let local = git::local_branch_target(&entry).is_some();
     for (action, title, enabled) in [
         (Action::Rename, "Rename…", writable && local),
         (
             Action::Upstream,
             "Set upstream…",
-            writable && local && entry["tracking"]["editable"] == true,
+            writable
+                && local
+                && entry
+                    .tracking
+                    .as_ref()
+                    .is_some_and(|tracking| tracking.editable),
         ),
         (Action::Copy, "Copy branch name", true),
         (
@@ -333,32 +363,29 @@ impl Newport {
     pub(super) fn git_branch_picker_reload(&mut self) {
         self.git_reset_branch_listing();
         self.git_branch_picker_load(false);
-        for (key, request) in [
-            (
-                "git-branch-status",
-                GitRequest::Status {
-                    repo_id: self.git_repository_id(),
-                    page_size: 1,
-                    cursor: None,
-                    filter: None,
-                },
-            ),
-            (
-                "git-worktree-list",
-                GitRequest::Worktrees {
-                    repo_id: self.git_repository_id(),
-                    page_size: 1,
-                    cursor: None,
-                    filter: String::new(),
-                    branch: None,
-                    name: None,
-                    at_snapshot: None,
-                },
-            ),
-        ] {
-            self.resources.invalidate(key);
-            self.request_git(key, request);
-        }
+        self.resources.invalidate("git-branch-status");
+        self.request_git_typed(
+            "git-branch-status",
+            GitRequest::Status {
+                repo_id: self.git_repository_id(),
+                page_size: 1,
+                cursor: None,
+                filter: None,
+            },
+        );
+        self.resources.invalidate("git-worktree-list");
+        self.request_git_typed(
+            "git-worktree-list",
+            GitRequest::Worktrees {
+                repo_id: self.git_repository_id(),
+                page_size: 1,
+                cursor: None,
+                filter: String::new(),
+                branch: None,
+                name: None,
+                at_snapshot: None,
+            },
+        );
     }
     pub(super) fn git_branch_picker_load(&mut self, more: bool) {
         if !self.git.branches.open
@@ -385,16 +412,13 @@ impl Newport {
             }) {
                 return;
             }
-            let Some(cursor) = self.git.branches.page["nextCursor"]
-                .as_str()
-                .map(str::to_owned)
-            else {
+            let Some(cursor) = self.git.branches.next_cursor().map(str::to_owned) else {
                 return;
             };
             next_cursor = Some(cursor.clone());
             self.git.branches.cursor = Some(cursor);
         }
-        self.request_git(key, self.git_branch_listing_request(next_cursor));
+        self.request_git_typed(key, self.git_branch_listing_request(next_cursor));
         if self
             .resources
             .get(key)
@@ -408,10 +432,11 @@ impl Newport {
             if resource.pending {
                 return;
             }
-            let result = resource
-                .error
-                .clone()
-                .map_or_else(|| Ok(resource.value.clone()), Err);
+            let result = match (&resource.error, resource.git()) {
+                (Some(error), _) => Err(error.clone()),
+                (None, Some(Reply::Branches(page))) => Ok((**page).clone()),
+                (None, _) => Err("Invalid repository page. Refresh to retry.".into()),
+            };
             if key == "git-branches-prefetch" {
                 self.git.branches.accept_prefetch(result);
             } else if matches!(key, "git-branches" | "git-branches-more") {
@@ -445,7 +470,7 @@ impl Newport {
         };
         let request = self.git_branch_listing_request(Some(cursor));
         self.resources.invalidate("git-branches-prefetch");
-        self.request_git("git-branches-prefetch", request);
+        self.request_git_typed("git-branches-prefetch", request);
         // Dispatch can fail synchronously (e.g. a full worker queue).
         if self
             .resources
@@ -461,9 +486,7 @@ impl Newport {
         }
         if git_page_demand::near_uniform_end(
             &self.git.branches.scroll,
-            self.git.branches.page["entries"]
-                .as_array()
-                .map_or(0, Vec::len),
+            self.git.branches.entries().len(),
             git_layout::PICKER_ROW_HEIGHT,
         ) && self.page == Page::Projects
             && !self.project_dialog_open
@@ -478,7 +501,7 @@ impl Newport {
                 .is_some_and(|r| !r.pending)
         {
             let selected = self.git.branches.checkout.take().unwrap();
-            if selected == self.git.branches.selected {
+            if Some(&selected) == self.git.branches.selected.as_ref() {
                 if self.branch_owner_path().is_some() {
                     self.open_branch_worktree(cx);
                 } else if self.git_can_checkout() {
@@ -504,12 +527,12 @@ impl Newport {
                 .is_some_and(|r| r.is_branch_picker())
             || self.git.branches.worktree
     }
-    fn branch_picker_select(&mut self, entry: &Value) -> bool {
+    fn branch_picker_select(&mut self, entry: &Branch) -> bool {
         self.git.branches.select(entry)
     }
     fn branch_picker_action(
         &mut self,
-        entry: &Value,
+        entry: &Branch,
         action: Action,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -519,7 +542,7 @@ impl Newport {
         }
         match action {
             Action::Copy => {
-                cx.write_to_clipboard(ClipboardItem::new_string(text(&entry["name"], "display")))
+                cx.write_to_clipboard(ClipboardItem::new_string(entry.name.display.clone()))
             }
             Action::Rename => self.git_rename_branch(window, cx),
             Action::Upstream => {
@@ -558,12 +581,20 @@ impl Newport {
                 git_layout::picker(
                     "git-branch-navigation",
                     IconName::GitBranch,
-                    git::head_label(&self.git.repo["head"]),
+                    self.git
+                        .repo
+                        .as_ref()
+                        .map(|repo| git::head_label(&repo.head))
+                        .unwrap_or_default(),
                 )
                 .w_full()
                 .accessibility_label(format!(
                     "Branches: {}",
-                    git::head_label(&self.git.repo["head"])
+                    self.git
+                        .repo
+                        .as_ref()
+                        .map(|repo| git::head_label(&repo.head))
+                        .unwrap_or_default()
                 ))
                 .icon(Icon::new(IconName::GitBranch).text_color(cx.theme().muted_foreground))
                 .disabled(
@@ -596,8 +627,8 @@ impl Newport {
             })
             .into_any_element()
     }
-    fn activate_picker_branch(&mut self, entry: &Value, cx: &mut Context<Self>) {
-        if entry["current"] == true
+    fn activate_picker_branch(&mut self, entry: &Branch, cx: &mut Context<Self>) {
+        if entry.current
             || git::local_branch_target(entry).is_none()
             || !self.git_can_write_branch()
             || self.git.branches.checkout.is_some()
@@ -630,7 +661,7 @@ impl Newport {
                 .get("git-branches")
                 .is_some_and(|r| !r.pending && r.error.is_none())
             && let Some(index) = self.git.branches.highlighted
-            && index < rows(&self.git.branches.page["entries"]).len()
+            && index < self.git.branches.entries().len()
         {
             self.git.branches.keyboard_menu = Some(index);
             window.prevent_default();
@@ -667,7 +698,7 @@ impl Newport {
         {
             return;
         }
-        let entries = rows(&self.git.branches.page["entries"]);
+        let entries = self.git.branches.entries().to_vec();
         let Some(step) = git_picker_keys::step(key, self.git.branches.highlighted, entries.len())
         else {
             return;
@@ -690,7 +721,7 @@ impl Newport {
     }
     fn git_branch_picker_view(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let reviewing = self.branch_picker_reviewing();
-        let entries = rows(&self.git.branches.page["entries"]);
+        let entries = self.git.branches.entries().to_vec();
         let failed = self.git.branches.error.is_some()
             || ["git-branches", "git-branches-more", "git-branch-status"]
                 .iter()
@@ -811,8 +842,8 @@ impl Newport {
                                     let Some(entry) = entries.get(i) else {
                                         return git_layout::picker_loading_row("branches", i);
                                     };
-                                    let name = text(&entry["name"], "display");
-                                    let current = entry["current"] == true;
+                                    let name = entry.name.display.clone();
+                                    let current = entry.current;
                                     let local = git::local_branch_target(entry).is_some();
                                     let selected = entry.clone();
                                     let menu_entry = entry.clone();
@@ -870,7 +901,7 @@ impl Newport {
                                         .ghost()
                                         .accessibility_label(format!(
                                             "Actions for {}",
-                                            text(&entry["name"], "display")
+                                            entry.name.display.clone()
                                         ))
                                         .dropdown_menu(move |menu, window, cx| {
                                             branch_menu(
@@ -925,7 +956,7 @@ impl Newport {
                     .min_h_0(),
                 )
                 .when(
-                    !pending && !failed && rows(&self.git.branches.page["entries"]).is_empty(),
+                    !pending && !failed && self.git.branches.entries().is_empty(),
                     |view| view.child(empty::compact("No branches match.", cx)),
                 )
                 .child(self.git_branch_worktree_hint(cx))
@@ -967,7 +998,7 @@ impl Newport {
                     && !pending
                     && !failed
                     && count > 0
-                    && self.git.branches.page["nextCursor"].is_null(),
+                    && self.git.branches.next_cursor().is_none(),
                 |view| {
                     view.child(
                         crate::label("All matching branches loaded")
@@ -983,33 +1014,46 @@ impl Newport {
 
 #[cfg(test)]
 mod tests {
-    use super::{MenuScope, Picker};
-    use serde_json::{Value, json};
-    fn page(snapshot: &str, entries: &[&str], cursor: Option<&str>) -> Value {
-        json!({"snapshot":snapshot,"entries":entries,"nextCursor":cursor,"metadata":{}})
+    use super::{BranchPage, MenuScope, Picker};
+    use crate::git_fixture::branch;
+    use newport_protocol::git::{Page, TotalEntries};
+    fn page(snapshot: &str, entries: &[&str], cursor: Option<&str>) -> BranchPage {
+        Page {
+            snapshot: snapshot.into(),
+            entries: entries.iter().map(|name| branch(name, "a")).collect(),
+            next_cursor: cursor.map(Into::into),
+            metadata: TotalEntries { total_entries: 3 },
+        }
+    }
+    fn names(picker: &Picker) -> Vec<String> {
+        picker
+            .entries()
+            .iter()
+            .map(|entry| entry.name.display.clone())
+            .collect()
     }
     #[test]
     fn prefetch_reads_one_page_ahead_and_only_appends_on_demand() {
         let mut picker = Picker {
             open: true,
-            page: page("a", &["first"], Some("second")),
+            page: Some(page("a", &["first"], Some("second"))),
             ..Default::default()
         };
         assert_eq!(picker.next_prefetch().as_deref(), Some("second"));
         assert!(picker.next_prefetch().is_none());
         assert!(picker.cursor.is_none()); // Loaded branch actions remain available.
         picker.accept_prefetch(Ok(page("a", &["second"], Some("third"))));
-        assert_eq!(picker.page["entries"], json!(["first"]));
+        assert_eq!(names(&picker), ["first"]);
         assert!(picker.next_prefetch().is_none()); // Completion cannot drain all pages.
         assert!(picker.demand_prefetch());
-        assert_eq!(picker.page["entries"], json!(["first", "second"]));
+        assert_eq!(names(&picker), ["first", "second"]);
         assert!(picker.cursor.is_none());
         assert_eq!(picker.next_prefetch().as_deref(), Some("third"));
         assert!(picker.demand_prefetch()); // Join the running read, do not request twice.
         assert_eq!(picker.cursor.as_deref(), Some("third"));
         assert!(picker.next_prefetch().is_none());
         picker.accept_prefetch(Ok(page("a", &["third"], None)));
-        assert_eq!(picker.page["entries"], json!(["first", "second", "third"]));
+        assert_eq!(names(&picker), ["first", "second", "third"]);
         assert!(picker.cursor.is_none());
         assert!(picker.next_prefetch().is_none());
         assert!(!picker.demand_prefetch());
@@ -1020,23 +1064,23 @@ mod tests {
         let original = page("a", &["first"], Some("second"));
         let mut picker = Picker {
             open: true,
-            page: original.clone(),
+            page: Some(original.clone()),
             ..Default::default()
         };
         picker.next_prefetch();
         picker.accept_prefetch(Err("offline".into()));
         assert!(picker.error.is_none());
         assert!(picker.cursor.is_none());
-        assert!(picker.select(&json!("first")));
+        assert!(picker.select(&branch("first", "a")));
         assert!(picker.next_prefetch().is_none());
         assert!(picker.demand_prefetch());
         assert_eq!(picker.error.as_deref(), Some("offline"));
-        assert_eq!(picker.page, original);
+        assert_eq!(picker.page, Some(original));
         assert!(picker.cursor.is_none());
         assert!(picker.next_prefetch().is_none());
         picker.reset_listing();
         picker.accept_prefetch(Ok(page("a", &["late"], None)));
-        assert!(picker.page.is_null());
+        assert!(picker.page.is_none());
         assert!(picker.error.is_none());
     }
 
@@ -1045,58 +1089,42 @@ mod tests {
         let original = page("a", &["first"], Some("second"));
         let mut picker = Picker {
             open: true,
-            page: original.clone(),
+            page: Some(original.clone()),
             ..Default::default()
         };
         picker.next_prefetch();
         picker.accept_prefetch(Ok(page("b", &["wrong snapshot"], None)));
         assert!(picker.demand_prefetch());
-        assert_eq!(picker.page, original);
+        assert_eq!(picker.page, Some(original.clone()));
         assert!(picker.error.is_some());
         picker.reset_listing();
-        picker.page = original.clone();
+        picker.page = Some(original.clone());
         picker.next_prefetch();
         picker.open = false;
         picker.accept_prefetch(Ok(page("a", &["late"], None)));
         assert!(!picker.demand_prefetch());
         assert!(picker.next_prefetch().is_none());
-        assert_eq!(picker.page, original);
+        assert_eq!(picker.page, Some(original));
     }
     #[test]
     fn retained_menu_rejects_another_server_repository_or_snapshot() {
         let scope = MenuScope {
             server: "fixture".into(),
-            repo: json!("repo"),
-            snapshot: json!("s1"),
+            repo: Some("repo".into()),
+            snapshot: Some("s1".into()),
         };
-        assert!(scope.same_listing(
-            "fixture",
-            &json!({"repoId":"repo"}),
-            &json!({"snapshot":"s1"})
-        ));
-        assert!(!scope.same_listing(
-            "other-server",
-            &json!({"repoId":"repo"}),
-            &json!({"snapshot":"s1"})
-        ));
-        assert!(!scope.same_listing(
-            "fixture",
-            &json!({"repoId":"other"}),
-            &json!({"snapshot":"s1"})
-        ));
-        assert!(!scope.same_listing(
-            "fixture",
-            &json!({"repoId":"repo"}),
-            &json!({"snapshot":"s2"})
-        ));
-        assert!(!scope.same_listing("fixture", &Value::Null, &Value::Null));
+        assert!(scope.same_listing("fixture", Some("repo"), Some("s1")));
+        assert!(!scope.same_listing("other-server", Some("repo"), Some("s1")));
+        assert!(!scope.same_listing("fixture", Some("other"), Some("s1")));
+        assert!(!scope.same_listing("fixture", Some("repo"), Some("s2")));
+        assert!(!scope.same_listing("fixture", None, None));
     }
     #[test]
     fn filtering_cancels_checkout_and_rejects_old_menu_targets() {
         let mut picker = Picker {
             open: true,
-            page: page("a", &["old"], Some("next")),
-            checkout: Some(json!("old")),
+            page: Some(page("a", &["old"], Some("next"))),
+            checkout: Some(branch("old", "a")),
             highlighted: Some(0),
             ..Default::default()
         };
@@ -1104,24 +1132,24 @@ mod tests {
         assert!(picker.open);
         assert!(picker.checkout.is_none());
         assert!(picker.highlighted.is_none());
-        assert!(!picker.select(&json!("old")));
+        assert!(!picker.select(&branch("old", "a")));
         picker.accept_page("git-branches", Ok(page("b", &["new"], None)));
         assert!(picker.highlighted.is_none());
-        assert!(picker.select(&json!("new")));
-        assert!(!picker.select(&json!("old")));
-        assert_eq!(picker.selected, "new");
+        assert!(picker.select(&branch("new", "a")));
+        assert!(!picker.select(&branch("old", "a")));
+        assert_eq!(picker.selected, Some(branch("new", "a")));
     }
     #[test]
     fn pagination_rejects_changed_snapshot_without_replacing_visible_rows() {
         let original = page("a", &["first"], Some("next"));
         let mut picker = Picker {
             open: true,
-            page: original.clone(),
+            page: Some(original.clone()),
             cursor: Some("next".into()),
             ..Default::default()
         };
         picker.accept_page("git-branches-more", Ok(page("b", &["changed"], None)));
-        assert_eq!(picker.page, original);
+        assert_eq!(picker.page, Some(original));
         assert!(picker.error.is_some());
         assert!(picker.cursor.is_none());
     }
@@ -1129,7 +1157,7 @@ mod tests {
     fn continuation_failure_can_retry_and_closed_picker_ignores_results() {
         let mut picker = Picker {
             open: true,
-            page: page("a", &["first"], Some("next")),
+            page: Some(page("a", &["first"], Some("next"))),
             cursor: Some("next".into()),
             ..Default::default()
         };
@@ -1137,10 +1165,10 @@ mod tests {
         assert!(picker.cursor.is_none());
         picker.cursor = Some("next".into());
         picker.accept_page("git-branches-more", Ok(page("a", &["second"], None)));
-        assert_eq!(picker.page["entries"], json!(["first", "second"]));
+        assert_eq!(names(&picker), ["first", "second"]);
         picker = Picker::default();
         picker.accept_page("git-branches", Ok(page("b", &["late"], None)));
-        assert!(picker.page.is_null());
-        assert!(!picker.select(&json!("late")));
+        assert!(picker.page.is_none());
+        assert!(!picker.select(&branch("late", "a")));
     }
 }

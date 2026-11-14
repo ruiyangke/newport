@@ -357,6 +357,7 @@ pub fn decode(body: Bytes) -> Result<Packet, Error> {
     Ok(packet)
 }
 #[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug))]
 enum Shape {
     Empty,
     Secret,
@@ -393,24 +394,25 @@ enum Kind {
     Path,
     Message(Shape),
 }
-fn scan(mut body: &[u8], shape: Shape) -> Result<(), Error> {
+/// The case `shape` holds in field `number`, for shapes that are one oneof.
+fn case(shape: Shape, number: u32) -> Option<Shape> {
+    use Shape::*;
+    Some(match (shape, number) {
+        (Outcome, 1) => Rejection,
+        (Outcome, 2) => Snapshot,
+        (Outcome, 3) => ReadResult,
+        (Outcome, 4) => Published,
+        (Outcome, 5) => FileWrite,
+        (FileWrite, 1 | 3) => Empty,
+        (FileWrite, 2) => Committed,
+        _ => return None,
+    })
+}
+/// The fields `shape` knows, and how it reads them.
+fn known(shape: Shape) -> &'static [(u32, Kind)] {
     use Kind::*;
     use Shape::*;
-    if matches!(shape, Outcome | FileWrite) {
-        let field = fields::single(body)?;
-        let inner = match (shape, field.number) {
-            (Outcome, 1) => Rejection,
-            (Outcome, 2) => Snapshot,
-            (Outcome, 3) => ReadResult,
-            (Outcome, 4) => Published,
-            (Outcome, 5) => FileWrite,
-            (FileWrite, 1 | 3) => Empty,
-            (FileWrite, 2) => Committed,
-            _ => return Err(Invalid("outcome").into()),
-        };
-        return scan(field.bytes()?, inner);
-    }
-    let known: &[(u32, Kind)] = match shape {
+    match shape {
         Empty | Outcome | FileWrite => &[],
         Secret => &[(1, Nonce)],
         Greeting => &[(1, Unsigned), (2, Message(Secret))],
@@ -435,7 +437,16 @@ fn scan(mut body: &[u8], shape: Shape) -> Result<(), Error> {
         Admitted => &[(1, Integer), (2, Boolean)],
         Demand => &[(1, Integer), (2, Integer), (3, Text)],
         Data => &[(1, Integer), (2, Boolean), (3, Payload)],
-    };
+    }
+}
+fn scan(mut body: &[u8], shape: Shape) -> Result<(), Error> {
+    use Kind::*;
+    if matches!(shape, Shape::Outcome | Shape::FileWrite) {
+        let field = fields::single(body)?;
+        let inner = case(shape, field.number).ok_or(Invalid("outcome"))?;
+        return scan(field.bytes()?, inner);
+    }
+    let known = known(shape);
     let mut seen = 0u16;
     let mut formats = 0;
     while !body.is_empty() {
@@ -495,10 +506,9 @@ fn scan(mut body: &[u8], shape: Shape) -> Result<(), Error> {
     }
     Ok(())
 }
-fn scan_frame(body: &[u8]) -> Result<(), Error> {
+fn frame_shape(number: u32) -> Option<Shape> {
     use Shape::*;
-    let field = fields::single(body)?;
-    let shape = match field.number {
+    Some(match number {
         1 | 2 => Greeting,
         3 | 12 => Id,
         4 => Read,
@@ -511,9 +521,60 @@ fn scan_frame(body: &[u8]) -> Result<(), Error> {
         11 => Data,
         13 | 14 => Source,
         15 => Empty,
-        _ => return Err(Invalid("message").into()),
-    };
+        _ => return None,
+    })
+}
+fn scan_frame(body: &[u8]) -> Result<(), Error> {
+    let field = fields::single(body)?;
+    let shape = frame_shape(field.number).ok_or(Invalid("message"))?;
     scan(field.bytes()?, shape)
+}
+
+#[cfg(test)]
+use crate::desktop::wire::wire_tables::{EnumMap, Row, Table, Wire, enum_map};
+
+#[cfg(test)]
+pub(crate) fn tables() -> Vec<(Table, &'static str)> {
+    let shape = |number| frame_shape(number).map(table);
+    vec![(
+        Table::dispatch("clipboard provider frame", shape),
+        "newport.clipboard.provider.Frame",
+    )]
+}
+
+#[cfg(test)]
+pub(crate) fn enum_maps() -> Vec<EnumMap> {
+    vec![enum_map(
+        "newport.clipboard.provider.PublicationStage",
+        |value| read_stage(value).ok(),
+        |value| stage(*value) as i32,
+    )]
+}
+
+#[cfg(test)]
+fn table(shape: Shape) -> Table {
+    if matches!(shape, Shape::Outcome | Shape::FileWrite) {
+        return Table::dispatch(format!("clipboard provider {shape:?}"), move |number| {
+            case(shape, number).map(table)
+        });
+    }
+    Table::new(format!("clipboard provider {shape:?}"), move || {
+        known(shape)
+            .iter()
+            .map(|&(number, kind)| {
+                let wire = match kind {
+                    Kind::Integer => Wire::Varint,
+                    Kind::Unsigned => Wire::Varint32,
+                    Kind::Boolean => Wire::Bool,
+                    Kind::Text | Kind::Nonce | Kind::Formats | Kind::Payload | Kind::Path => {
+                        Wire::Len
+                    }
+                    Kind::Message(child) => Wire::Message(table(child)),
+                };
+                Row::new(number, wire).repeated(matches!(kind, Kind::Formats))
+            })
+            .collect()
+    })
 }
 #[cfg(test)]
 mod tests;

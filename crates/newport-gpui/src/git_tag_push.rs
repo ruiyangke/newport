@@ -1,7 +1,7 @@
 //! Tag publishing keeps the selected object and remote configuration under review.
 use super::*;
 use crate::git_remote_picker::RemotePicker;
-use newport_protocol::git::Action;
+use newport_protocol::git::{Action, Remote};
 
 pub(super) struct Form {
     name: String,
@@ -10,9 +10,9 @@ pub(super) struct Form {
     picker: Entity<RemotePicker>,
     _subscription: Subscription,
 }
-fn push_action(name: &str, oid: &str, remote: &Value) -> Option<Action> {
-    let remote_name = remote["name"].as_str().filter(|s| !s.is_empty())?;
-    let token = remote["token"].as_str().filter(|s| !s.is_empty())?;
+fn push_action(name: &str, oid: &str, remote: &Remote) -> Option<Action> {
+    let remote_name = Some(remote.name.as_str()).filter(|s| !s.is_empty())?;
+    let token = Some(remote.token.as_str()).filter(|s| !s.is_empty())?;
     if name.is_empty() || oid.is_empty() {
         return None;
     }
@@ -32,7 +32,7 @@ impl Newport {
         {
             return;
         }
-        let Some((name, oid)) = git_tags::tag_identity(&self.git.selected) else {
+        let Some((name, oid)) = git_tags::tag_identity(self.git.selected.as_ref()) else {
             return;
         };
         let server = self.server.clone();
@@ -42,7 +42,7 @@ impl Newport {
         self.git.tag_push = Some(Form {
             name,
             oid,
-            snapshot: text(&self.value("git-tag-status"), "snapshot"),
+            snapshot: self.tag_status_snapshot(),
             picker,
             _subscription: subscription,
         });
@@ -59,8 +59,8 @@ impl Newport {
     fn can_push_tag(&self, cx: &App) -> bool {
         self.can_modify_tag()
             && self.git.tag_push.as_ref().is_some_and(|form| {
-                form.snapshot == text(&self.value("git-tag-status"), "snapshot")
-                    && git_tags::tag_identity(&self.git.selected)
+                form.snapshot == self.tag_status_snapshot()
+                    && git_tags::tag_identity(self.git.selected.as_ref())
                         == Some((form.name.clone(), form.oid.clone()))
                     && form
                         .picker
@@ -78,7 +78,7 @@ impl Newport {
         let remote = form.picker.read(cx).remote().unwrap();
         let action = push_action(&form.name, &form.oid, remote).unwrap();
         let snapshot = form.snapshot.clone();
-        let title = format!("Push tag {} to {}", form.name, text(remote, "name"));
+        let title = format!("Push tag {} to {}", form.name, remote.name);
         self.start_git_mutation(
             self.git_repository_id(),
             title,
@@ -116,20 +116,32 @@ impl Newport {
 #[cfg(test)]
 mod tests {
     use super::push_action;
-    use serde_json::json;
+    use newport_protocol::git::{Action, Remote};
     #[test]
     fn publish_keeps_exact_tag_object_and_remote_configuration() {
-        let remote =
-            json!({"name":"backup","token":"reviewed","url":"/source","pushUrl":"/destination"});
-        let action = serde_json::to_value(
-            push_action("v1", "tag-object-not-peeled-commit", &remote).unwrap(),
-        )
-        .unwrap();
+        let remote = Remote {
+            name: "backup".into(),
+            token: "reviewed".into(),
+            url: Some("/source".into()),
+            push_url: Some("/destination".into()),
+        };
         assert_eq!(
-            action,
-            json!({"kind":"tag.push","name":"v1","expectedOid":"tag-object-not-peeled-commit","remote":"backup","expectedToken":"reviewed"})
+            push_action("v1", "tag-object-not-peeled-commit", &remote).unwrap(),
+            Action::TagPush {
+                name: "v1".into(),
+                expected_oid: "tag-object-not-peeled-commit".into(),
+                remote: "backup".into(),
+                expected_token: "reviewed".into(),
+            }
         );
-        assert!(push_action("v1", "object", &json!({"name":"origin"})).is_none());
+        let unreviewed = Remote {
+            name: "origin".into(),
+            token: String::new(),
+            url: None,
+            push_url: None,
+        };
+        assert!(push_action("v1", "object", &unreviewed).is_none());
         assert!(push_action("", "object", &remote).is_none());
+        assert!(push_action("v1", "", &remote).is_none());
     }
 }
