@@ -40,6 +40,7 @@ fn value() -> Discovery {
                 },
                 target_port: 80,
                 target_address: None,
+                engine_kind: crate::monitor::ports::discovery::EngineKind::Docker,
                 compose: None,
             }],
             ..Snapshot::default()

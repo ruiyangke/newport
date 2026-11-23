@@ -218,6 +218,10 @@ impl Engine {
     pub(crate) fn cell_size(&self) -> (u16, u16) {
         (self.size.width, self.size.height)
     }
+    /// When a synchronized update now held back is shown anyway.
+    pub fn sync_deadline(&self) -> Option<Instant> {
+        self.parser.sync_timeout().sync_timeout()
+    }
     pub fn flush_expired(&mut self) -> Result<Effects> {
         self.flush_expired_at(Instant::now())
     }

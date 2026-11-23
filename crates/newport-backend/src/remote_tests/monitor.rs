@@ -31,7 +31,14 @@ async fn overview_query_records_in_background_without_profile_or_service_lock_an
     let worker = tokio::spawn(metrics_sampler::run(state.clone(), db.clone()));
     let first = tokio::time::timeout(
         Duration::from_secs(30),
-        commands::cockpit_collect(&state, &db, None, server.id, cockpit::Section::Overview),
+        commands::cockpit_collect(
+            &state,
+            &db,
+            None,
+            server.id,
+            cockpit::Section::Overview,
+            None,
+        ),
     )
     .await
     .expect("metrics must not wait for another feature or profile writer")
@@ -204,6 +211,18 @@ async fn monitoring_requires_explicit_install_without_changing_shell_integration
     .await
     .unwrap();
     assert!(reading["cpus"].as_array().is_some_and(|c| !c.is_empty()));
+    // The agent finds itself by name, however quiet it is.
+    let found = cockpit::search(&crate::remote_tests::owner(&server), "NEWPORT-AG".into())
+        .await
+        .unwrap();
+    let processes = found["processes"].as_array().unwrap();
+    assert!(!processes.is_empty());
+    assert!(processes.iter().all(|process| {
+        format!("{} {}", process["name"], process["command"])
+            .to_lowercase()
+            .contains("newport-ag")
+    }));
+    assert!(found["processMatches"].as_u64().unwrap() >= processes.len() as u64);
     // Sampling a server must never rewrite its shell profile or shadow its
     // xclip and xdg-open; those belong to the opt-in integration.
     let after = crate::remote::Shell::new(&server)

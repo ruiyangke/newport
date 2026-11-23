@@ -450,7 +450,7 @@ fn terminal_identity(command: &[u8]) -> Option<Shell> {
         None => (uuid::Uuid::nil(), None),
     };
     [false, true].into_iter().find_map(|display| {
-        (command == newport_backend::ssh::terminal_command(routing, terminal, display))
+        (command == newport_backend::ssh::terminal_command(routing, terminal, display, None))
             .then_some(Shell { terminal, display })
     })
 }
@@ -818,8 +818,12 @@ mod tests {
     fn terminal_scripts_keep_their_route_optional_tab_identity_and_display() {
         for terminal in [None, Some(uuid::Uuid::new_v4())] {
             for display in [false, true] {
-                let command =
-                    newport_backend::ssh::terminal_command(uuid::Uuid::new_v4(), terminal, display);
+                let command = newport_backend::ssh::terminal_command(
+                    uuid::Uuid::new_v4(),
+                    terminal,
+                    display,
+                    None,
+                );
                 assert!(posix_script(command.as_bytes()).is_none());
                 assert_eq!(
                     terminal_identity(command.as_bytes()),

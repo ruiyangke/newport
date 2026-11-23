@@ -9,6 +9,7 @@ pub const MAX_PROCESSES: usize = 100;
 pub const MAX_HISTORY: usize = 60;
 pub const MAX_TEXT: usize = 4096;
 pub const MAX_COMMAND: usize = 512;
+pub const MAX_SEARCH: usize = 256;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,6 +30,8 @@ pub struct Snapshot {
     pub network: Vec<Network>,
     pub processes: Vec<Process>,
     pub process_count: u32,
+    /// Processes that match the request's search; every process without one.
+    pub process_matches: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -72,6 +75,14 @@ pub struct Process {
     pub command: Option<String>,
 }
 
+/// No search is `None`, so an empty one is invalid.
+pub fn validate_search(search: &str) -> Result<(), Invalid> {
+    if search.is_empty() || !text(search, MAX_SEARCH) {
+        return Err(Invalid("process search"));
+    }
+    Ok(())
+}
+
 fn text(value: &str, limit: usize) -> bool {
     value.len() <= limit && !value.contains('\0')
 }
@@ -90,6 +101,7 @@ impl Snapshot {
             || self.disks.len() > MAX_DISKS
             || self.network.len() > MAX_INTERFACES
             || self.processes.len() > MAX_PROCESSES
+            || self.process_matches > self.process_count
         {
             return Err(Invalid("metrics count"));
         }

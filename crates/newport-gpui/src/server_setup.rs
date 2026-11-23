@@ -258,6 +258,7 @@ impl Newport {
                         server,
                         refresh: true,
                         section: desktop::metrics::Section::Overview,
+                        search: None,
                     }),
                 )))
             }),

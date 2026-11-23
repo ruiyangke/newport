@@ -156,6 +156,7 @@ fn nat_publication_does_not_require_a_host_socket() {
         },
         target_port: 80,
         target_address: None,
+        engine_kind: EngineKind::Docker,
         compose: None,
     });
     assert!(value.validate().is_err());

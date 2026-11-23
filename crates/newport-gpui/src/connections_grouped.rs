@@ -53,7 +53,7 @@ impl ProjectsCache {
                 projects: self
                     .projects
                     .iter()
-                    .filter(|p| !p.key.is_empty() && p.key != newport_domain::port_grouping::SYSTEM)
+                    .filter(|p| newport_domain::port_grouping::is_project(&p.key))
                     .count(),
                 active: mine
                     .clone()
@@ -629,6 +629,11 @@ impl Newport {
         } else {
             state.filter
         };
+        // Needle runs as the SSH account, so that account is what it can see.
+        let login = self
+            .selected_server()
+            .map(|server| server.ssh_user.as_str())
+            .filter(|user| !user.is_empty());
         let visible = state
             .visible
             .borrow_mut()
@@ -653,7 +658,8 @@ impl Newport {
                             })
                             .cloned()
                             .map(|e| {
-                                let mut row = connections_rows::Row::new(key, e, runtime, branches);
+                                let mut row =
+                                    connections_rows::Row::new(key, e, runtime, branches, login);
                                 if let Some(view) = state
                                     .reading
                                     .as_ref()
@@ -1552,6 +1558,66 @@ mod tests {
     }
 
     #[test]
+    fn counts_count_one_row_per_program_and_container_port() {
+        use newport_domain::port_discovery as d;
+        let mut members = Vec::new();
+        let mut id = 0;
+        let mut next = |mut member: d::Member, publication: bool| {
+            id += 1;
+            member.reference.record = if publication {
+                d::Record::Publication(usize::try_from(id).unwrap())
+            } else {
+                d::Record::Socket(id)
+            };
+            member
+        };
+        for (index, port) in (2201..=2205).enumerate() {
+            let pid = 100 + 2 * u32::try_from(index).unwrap();
+            let Port::Observed(row) =
+                crate::connections::fixtures::publication(port, &format!("fx-{port}"), "debian")
+            else {
+                unreachable!()
+            };
+            for (offset, address) in ["0.0.0.0", "::"].into_iter().enumerate() {
+                let mut published = row.members[0].clone();
+                published.endpoint.address = address.parse().unwrap();
+                members.push(next(published, true));
+                let proxy = Listener::new(port)
+                    .address(address)
+                    .pid(pid + u32::try_from(offset).unwrap())
+                    .process("docker-proxy", "docker-proxy", &[], None)
+                    .member();
+                members.push(next(proxy, false));
+            }
+        }
+        for (pid, address) in [(50, "0.0.0.0"), (51, "::")] {
+            let sshd = Listener::new(22)
+                .address(address)
+                .pid(pid)
+                .process("sshd", "sshd", &[], None)
+                .member();
+            members.push(next(sshd, false));
+        }
+        let projects = newport_domain::port_grouping::group(
+            members,
+            &[],
+            crate::snapshot_fixture::SERVER,
+            &[],
+        );
+        assert_eq!(
+            projects
+                .iter()
+                .map(|p| (p.name.as_str(), p.entries.len()))
+                .collect::<Vec<_>>(),
+            [("Containers", 5), ("Other services", 1)]
+        );
+        let mut cache = super::ProjectsCache::default();
+        cache.get([1, 1, 1], || projects);
+        let counts = cache.counts(&[], None, None);
+        assert_eq!((counts.all, counts.listening, counts.projects), (6, 6, 0));
+    }
+
+    #[test]
     fn saved_checkout_rows_stay_with_their_live_siblings() {
         let make = |port| {
             Row::new(
@@ -1563,6 +1629,7 @@ mod tests {
                 },
                 None,
                 true,
+                None,
             )
         };
         let mut rows = vec![
@@ -2318,6 +2385,7 @@ mod tests {
                 },
                 None,
                 false,
+                None,
             )
         };
         let mut rows = vec![

@@ -22,6 +22,9 @@ pub const MAX_TEXT: usize = 16 * 1024;
 /// The longest agent status a holder lists; see [`Holder::agent`].
 pub const MAX_AGENT: usize = 8 * 1024;
 pub const MAX_COMPUTER_NAME: usize = 1024;
+/// The longest folder a new shell may start in: Linux's `PATH_MAX`, which
+/// counts the terminating NUL.
+pub const MAX_DIRECTORY: usize = 4095;
 pub const MAX_HOLDERS: usize = 4096;
 pub const MAX_ATTACHED: usize = 256;
 /// The code of a start that failed before Needle launched anything: no holder
@@ -76,6 +79,8 @@ pub enum Request {
         command: String,
         creator: Computer,
         stable_display: bool,
+        /// The folder the new shell starts in; see [`valid_directory`].
+        directory: Option<String>,
     },
     List,
     Rename {
@@ -130,6 +135,18 @@ fn text(value: &str, limit: usize) -> bool {
 fn socket(value: &str) -> bool {
     value.starts_with('/') && text(value, 4096)
 }
+/// A folder a new shell may be asked to start in: absolute, bounded, and
+/// free of control characters, which a terminal or shell would act on.
+pub fn valid_directory(directory: &str) -> bool {
+    directory.starts_with('/')
+        && directory.len() <= MAX_DIRECTORY
+        && !directory.chars().any(char::is_control)
+}
+/// What a new shell shows when it can't start in the folder it was asked to,
+/// as it starts in the home folder instead.
+pub fn unavailable_directory(directory: &str) -> String {
+    format!("Newport couldn't open {directory}; starting in your home folder.")
+}
 fn computer(id: &str, name: &str) -> bool {
     uuid::Uuid::parse_str(id).is_ok_and(|id| !id.is_nil()) && text(name, MAX_COMPUTER_NAME)
 }
@@ -143,6 +160,7 @@ impl Request {
                 rows,
                 command,
                 creator,
+                directory,
                 ..
             } => {
                 valid_id(id)
@@ -151,6 +169,7 @@ impl Request {
                     && !command.is_empty()
                     && text(command, MAX_COMMAND)
                     && computer(&creator.id, &creator.name)
+                    && directory.as_deref().is_none_or(valid_directory)
             }
             Self::List | Self::Watch => true,
             Self::Rename { id, name } => valid_id(id) && text(name, MAX_TEXT),

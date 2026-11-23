@@ -144,6 +144,9 @@ pub struct CollectArgs {
     /// Defaults to false when absent on the wire.
     pub refresh: bool,
     pub section: crate::desktop::metrics::Section,
+    /// Finds processes by name, command line, user or PID; see
+    /// [`crate::monitor::Request::Metrics`].
+    pub search: Option<String>,
 }
 
 #[derive(Clone, Debug)]

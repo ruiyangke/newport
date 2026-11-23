@@ -49,6 +49,11 @@ impl Server {
     /// Starts a holder whose creating Mac will show the stable display, or
     /// not.
     fn start_with(&self, command: &str, stable_display: bool) -> Holder {
+        self.start_in(command, stable_display, None)
+    }
+
+    /// Starts a holder whose shell is asked to start in `folder`.
+    fn start_in(&self, command: &str, stable_display: bool, folder: Option<&str>) -> Holder {
         let id = uuid::Uuid::new_v4().simple().to_string();
         let directory = self.directory();
         std::fs::create_dir_all(&directory).unwrap();
@@ -62,6 +67,7 @@ impl Server {
             "command": command,
             "creator": { "id": "studio", "name": "Studio" },
             "stable_display": stable_display,
+            "directory": folder,
         });
         std::fs::write(directory.join(format!("{id}.start")), start.to_string()).unwrap();
         let status = Command::new(env!("CARGO_BIN_EXE_newport-agent"))
@@ -252,6 +258,30 @@ fn a_shell_keeps_running_between_clients_and_comes_back_with_its_screen() {
     assert!(contains(&snapshot, "alpha-42"), "history survives");
     assert!(contains(&snapshot, "beta-42"), "output while detached");
     third.send(ClientMessage::End);
+}
+
+#[test]
+fn a_shell_starts_in_its_folder_or_says_why_it_starts_at_home() {
+    let server = Server::new();
+    let folder = server.home.join("it's a \"project\" 项目");
+    std::fs::create_dir(&folder).unwrap();
+    let folder = folder.to_str().unwrap().to_owned();
+    let home = server.home.to_str().unwrap().to_owned();
+    // Short enough to fit one line of the terminal, whatever wraps it.
+    for (directory, cwd, notice) in [
+        (folder.as_str(), folder.as_str(), false),
+        ("/nonexistent-newport", home.as_str(), true),
+        ("/dev/null", home.as_str(), true),
+    ] {
+        let holder = server.start_in(SHELL, false, Some(directory));
+        let mut client = holder.attach();
+        let mut seen = String::from_utf8_lossy(&client.greeting()).into_owned();
+        client.input(b"echo \"cwd=$(pwd -P)|\"\n");
+        seen.push_str(&client.output_until(&format!("cwd={cwd}|")));
+        let said = newport_protocol::terminal::unavailable_directory(directory);
+        assert_eq!(seen.contains(&said), notice, "{directory}: {seen:?}");
+        client.send(ClientMessage::End);
+    }
 }
 
 #[test]
@@ -996,12 +1026,13 @@ fn a_shell_the_stable_display_will_show_on_gets_its_aliases_before_it_runs() {
     let server = Server::new();
     let holder = server.start_with(SHELL, true);
     let display = server.runtime.join("newport-display");
+    let mut client = holder.attach();
+    // A holder greets once its shell runs, after it made the display's folder
+    // and reserved the number for the display to take.
+    client.greeting();
     let mode = std::fs::metadata(&display).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o700);
-    // The number reserved for the display to take.
     let number = std::fs::read_to_string(display.join("x11-display")).unwrap();
-    let mut client = holder.attach();
-    client.greeting();
     client.input(DISPLAY_VARIABLES);
     client.output_until(&format!(
         "w={}/wayland-0 d=:{number} a=xauth_newport-display m=unset",

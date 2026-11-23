@@ -74,6 +74,28 @@ pub(crate) fn option_as_meta(cx: &App) -> bool {
 
 /// How long a draft waits for a shell that never turns bracketed paste on.
 const DRAFT_FALLBACK: Duration = Duration::from_secs(1);
+/// The longest pause before a held tab attaches again after losing its
+/// stream to the backend.
+const REATTACH_LIMIT: Duration = Duration::from_secs(30);
+/// How long one tick may spend on output before it lets the window draw and
+/// comes back for the rest.
+const TICK_TIME: Duration = Duration::from_millis(3);
+/// How often a tab ticks while it is in front or has timed work.
+const TICK: Duration = Duration::from_millis(20);
+/// How often a hidden, idle tab looks in; its output wakes it sooner.
+const IDLE_TICK: Duration = Duration::from_millis(500);
+/// The shortest time between ticks that output starts, so a steady trickle
+/// of small writes doesn't tick for each one.
+const OUTPUT_PACE: Duration = Duration::from_millis(4);
+
+/// What a tick leaves for the next one.
+#[derive(Clone, Copy)]
+struct Tick {
+    /// Output is waiting: come back as soon as the window has drawn.
+    more: bool,
+    /// Work waits on time, not output, so the regular tick runs.
+    timed: bool,
+}
 
 /// Space between the view's edges and its cell grid.
 const PADDING: Size<Pixels> = Size {
@@ -105,8 +127,16 @@ pub struct TerminalView {
     /// Whether this tab's shell may be held on the server, to outlive the
     /// connection and Newport.
     holdable: bool,
+    /// The folder each new shell of this tab starts in, as a project's do.
+    directory: Option<String>,
     /// The held shell this tab shows: it attaches here when it opens again.
     held: Option<uuid::Uuid>,
+    /// When a held tab whose stream to the backend broke attaches again, and
+    /// how often it has tried since it last attached.
+    reattach: Option<Instant>,
+    /// Nudges this tab's tick when its shell's output arrives.
+    wake: async_channel::Sender<()>,
+    reattempts: u32,
     /// Explicit End acknowledgement keeps the last tab as a visible outcome.
     end_acknowledged: bool,
     /// Whether the holder last said this tab is its shell's active one: the
@@ -201,6 +231,7 @@ impl TerminalView {
         .detach();
     }
     pub fn new(server: String, cx: &mut Context<Self>) -> Self {
+        let (wake, woken) = async_channel::bounded(1);
         let mut this = Self {
             find: None,
             find_draft: Default::default(),
@@ -220,6 +251,10 @@ impl TerminalView {
             session: None,
             holdable: false,
             held: None,
+            reattach: None,
+            wake,
+            reattempts: 0,
+            directory: None,
             end_acknowledged: false,
             holder_active: None,
             activate_pending: false,
@@ -261,12 +296,49 @@ impl TerminalView {
             .set_theme(crate::terminal_paint::theme(this.dark))
             .expect("valid terminal theme");
         cx.spawn(async move |view, cx| {
+            let mut next = Tick {
+                more: false,
+                timed: true,
+            };
+            // A GPUI timer can't be cancelled: one is armed again only once
+            // it has fired, never for every tick.
+            let mut timer: Option<(gpui::Task<()>, Duration)> = None;
+            let mut last = Instant::now();
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(20))
+                if next.more {
+                    // Let the window draw what came in before taking the rest.
+                    futures_lite::future::yield_now().await;
+                } else {
+                    let period = if next.timed { TICK } else { IDLE_TICK };
+                    if timer.as_ref().is_none_or(|(_, armed)| *armed > period) {
+                        timer = Some((cx.background_executor().timer(period), period));
+                    }
+                    let (pending, _) = timer.as_mut().expect("armed timer");
+                    // Output is shown as soon as it arrives; the timer keeps
+                    // titles, drafts and selection scrolling moving.
+                    let fired = futures_lite::future::or(
+                        async {
+                            pending.await;
+                            true
+                        },
+                        async {
+                            if woken.recv().await.is_err() {
+                                std::future::pending::<()>().await;
+                            }
+                            false
+                        },
+                    )
                     .await;
-                if view.update(cx, |this, cx| this.tick(cx)).is_err() {
-                    break;
+                    if fired {
+                        timer = None;
+                    } else if let Some(wait) = OUTPUT_PACE.checked_sub(last.elapsed()) {
+                        cx.background_executor().timer(wait).await;
+                    }
+                }
+                last = Instant::now();
+                match view.update(cx, |this, cx| this.tick(cx)) {
+                    Ok(tick) => next = tick,
+                    Err(_) => break,
                 }
             }
         })
@@ -367,6 +439,10 @@ impl TerminalView {
     pub(crate) fn set_holdable(&mut self, holdable: bool) {
         self.holdable = holdable;
     }
+    /// Its new shells start in `directory`; one it attaches to stays where it is.
+    pub(crate) fn set_directory(&mut self, directory: Option<String>) {
+        self.directory = directory;
+    }
     /// The held shell this tab shows.
     pub(crate) fn held(&self) -> Option<uuid::Uuid> {
         self.held
@@ -383,6 +459,10 @@ impl TerminalView {
     #[cfg(test)]
     pub(crate) fn holdable(&self) -> bool {
         self.holdable
+    }
+    #[cfg(test)]
+    pub(crate) fn directory(&self) -> Option<&str> {
+        self.directory.as_deref()
     }
     #[cfg(test)]
     pub(crate) fn receive_for_test(&mut self, event: Event) {
@@ -435,6 +515,7 @@ impl TerminalView {
     }
     pub fn close(&mut self) {
         self.open_on_show = false;
+        self.reattach = None;
         self.session.take();
         self.observed_ready = false;
         self.clear_input();
@@ -489,16 +570,23 @@ impl TerminalView {
         let colors = self.colors();
         self.holder_active = None;
         self.shows_display = false;
+        let directory = self.directory.clone();
         let session = match self.held {
             Some(held) => Session::attach(&self.server, held, columns, rows, colors),
-            None if self.holdable => Session::open_held(&self.server, columns, rows, colors),
-            None => Session::open(&self.server, columns, rows),
+            None if self.holdable => {
+                Session::open_held(&self.server, columns, rows, colors, directory)
+            }
+            None => Session::open(&self.server, columns, rows, directory),
         };
         match session {
             Ok(session) => {
                 // A GUI app launched in this shell may ask for setup. That
                 // question never holds up, changes or ends the shell.
                 crate::terminal_setup::register(session.id(), &self.server, cx.weak_entity(), cx);
+                let wake = self.wake.clone();
+                session.on_output(move || {
+                    let _ = wake.try_send(());
+                });
                 self.session = Some(session);
             }
             Err(error) => {
@@ -640,7 +728,22 @@ impl TerminalView {
             false
         }
     }
-    fn tick(&mut self, cx: &mut Context<Self>) {
+    /// Whether the tab has work that waits on time rather than output.
+    fn wants_ticks(&self) -> bool {
+        self.visible
+            || self.selecting
+            || self.pending_title.is_some()
+            || self.draft_armed_at.is_some()
+            || self.reattach.is_some()
+            || !self.input.is_empty()
+            || self.resize_pending
+            || self.activate_pending
+            || self.engine.sync_deadline().is_some()
+    }
+    fn tick(&mut self, cx: &mut Context<Self>) -> Tick {
+        if self.reattach.is_some_and(|at| Instant::now() >= at) {
+            self.reconnect(cx);
+        }
         let hidden_presentation = (!self.visible).then(|| self.tab_presentation());
         let mut changed = self.scroll_selection();
         // The transport may already be ahead of the bounded output consumer.
@@ -653,7 +756,13 @@ impl TerminalView {
             changed |= !self.composition.is_empty();
             self.clear_input();
         }
-        for _ in 0..32 {
+        let started = Instant::now();
+        let mut more = false;
+        loop {
+            if started.elapsed() >= TICK_TIME {
+                more = true;
+                break;
+            }
             let event = self
                 .session
                 .as_ref()
@@ -681,6 +790,10 @@ impl TerminalView {
             cx.notify();
         }
         self.refresh_find_output(changed, cx);
+        Tick {
+            more,
+            timed: self.wants_ticks(),
+        }
     }
     fn flush_input(&mut self) {
         if let Some(session) = &self.session
@@ -694,10 +807,8 @@ impl TerminalView {
                 self.shows_display = true;
                 self.used_in_focus = true;
             }
-            for _ in 0..16 {
-                let Some(bytes) = self.input.front() else {
-                    break;
-                };
+            // Until the transport refuses: its input window bounds a paste.
+            while let Some(bytes) = self.input.front() {
                 if session
                     .send_for_epoch(bytes.clone(), self.observed_epoch)
                     .is_err()
@@ -737,8 +848,7 @@ impl TerminalView {
             use newport_client::terminal_command::CommandDelivery;
             let (command, execute) = match delivery {
                 CommandDelivery::Review(command) => (command, false),
-                CommandDelivery::ContainerShell(command)
-                | CommandDelivery::ProjectDirectory(command) => (command, true),
+                CommandDelivery::ContainerShell(command) => (command, true),
             };
             let result = self.engine.encode_paste(&command);
             let Some(mut input) = self.engine_result(result) else {
@@ -764,6 +874,7 @@ impl TerminalView {
                 self.deliver_draft(Instant::now());
             }
             Event::Ready => {
+                self.reattempts = 0;
                 self.observed_ready = true;
                 self.accept_ready(self.ready());
             }
@@ -836,6 +947,22 @@ impl TerminalView {
                 self.observed_ready = false;
                 self.status.failed(error);
                 self.clear_input();
+            }
+            Event::Lost(error) => {
+                self.observed_epoch = self.observed_epoch.wrapping_add(1);
+                self.observed_ready = false;
+                self.clear_input();
+                if self.held.is_some() {
+                    // The server still holds the shell: attach again after a
+                    // pause that grows with each try.
+                    self.reattempts = self.reattempts.saturating_add(1);
+                    let pause =
+                        Duration::from_secs(1 << (self.reattempts - 1).min(5)).min(REATTACH_LIMIT);
+                    self.reattach = Some(Instant::now() + pause);
+                    self.status.reconnecting(self.reattempts);
+                } else {
+                    self.status.failed(error);
+                }
             }
         }
     }
@@ -1569,6 +1696,10 @@ impl Render for TerminalView {
         self.hovered_link = link_modifier(link_modifiers)
             .then(|| self.link_at(window.mouse_position()))
             .flatten();
+        if !self.visible {
+            // Its regular tick starts now, not at its next idle one.
+            let _ = self.wake.try_send(());
+        }
         self.visible = true;
         // A finish on a tab in front of the person is seen, wherever the
         // window's focus is.
@@ -1923,6 +2054,57 @@ mod tests {
         assert!(feed(cx, b"\x1b[?2004lsleep 600\r\n"));
         assert!(feed(cx, b"\x1b[?1049h"));
         assert!(!feed(cx, b"\x1b[?1049l\x1b[?2004h$ "));
+    }
+
+    #[gpui::test]
+    fn an_idle_hidden_tab_waits_for_output_instead_of_ticking(cx: &mut TestAppContext) {
+        let view = fixture(cx);
+        view.update(cx, |view, _| {
+            view.visible = false;
+            assert!(!view.wants_ticks());
+            view.pending_title = Some(("title".into(), Instant::now()));
+            assert!(view.wants_ticks(), "a title shows after its delay");
+            view.pending_title = None;
+            view.input.push_back(b"x".to_vec());
+            assert!(view.wants_ticks(), "queued input is retried");
+            view.input.clear();
+            view.reattach = Some(Instant::now());
+            assert!(view.wants_ticks(), "a held tab attaches again on time");
+            view.reattach = None;
+            view.visible = true;
+            assert!(view.wants_ticks());
+        });
+    }
+
+    #[gpui::test]
+    fn a_held_tab_attaches_again_after_losing_its_stream_and_a_plain_one_fails(
+        cx: &mut TestAppContext,
+    ) {
+        let lost = "Lost the terminal’s connection to Newport’s backend: closed";
+        let view = fixture(cx);
+        let held = uuid::Uuid::new_v4();
+        view.update(cx, |view, _| {
+            view.attach_to(held);
+            let mut pauses = Vec::new();
+            for _ in 0..7 {
+                let before = Instant::now();
+                view.receive(Event::Lost(lost.into()));
+                assert!(view.status.error().is_none());
+                pauses.push(view.reattach.unwrap().duration_since(before).as_secs());
+            }
+            assert_eq!(pauses, [1, 2, 4, 8, 16, 30, 30]);
+            assert_eq!(view.held(), Some(held));
+            view.receive(Event::Ready);
+            assert_eq!(view.reattempts, 0);
+            view.close();
+            assert!(view.reattach.is_none());
+        });
+        let plain = fixture(cx);
+        plain.update(cx, |view, _| {
+            view.receive(Event::Lost(lost.into()));
+            assert!(view.reattach.is_none());
+            assert_eq!(view.status.error(), Some(lost));
+        });
     }
 
     #[gpui::test]

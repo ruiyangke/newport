@@ -17,6 +17,8 @@ pub struct TerminalOpenArgs {
     /// Defaults to false when absent on the wire.
     pub attach: bool,
     pub colors: Option<[[u8; 3]; 3]>,
+    /// The folder a new shell starts in. Attaching keeps the held shell's.
+    pub directory: Option<String>,
 }
 
 #[derive(Clone, Debug)]

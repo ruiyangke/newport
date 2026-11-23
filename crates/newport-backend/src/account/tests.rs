@@ -57,6 +57,9 @@ type Script = dyn Fn(&Seen) -> (u16, Value) + Send + Sync;
 /// Every fake response's `Date`: the account site's clock.
 const PORTAL_DATE: &str = "Tue, 20 Oct 2026 09:30:00 GMT";
 const PORTAL_TIME: i64 = 1_792_488_600;
+/// When `token_issued`'s tokens end: far enough ahead that the real clock,
+/// which a license check also reads, never passes it.
+const TOKEN_END: &str = "2099-11-20T08:30:15Z";
 
 /// A stand-in for the account site's desktop API.
 struct Portal {
@@ -597,10 +600,10 @@ async fn a_failed_exchange_offers_to_try_again() {
     assert_eq!(notice.action, Some("tryAgain"));
 }
 
-/// A token as the account site shapes one, issued at `iat`. Newport never
-/// checks the signature, so zeros stand in for it.
+/// A token as the account site shapes one, issued at `iat` and ending at
+/// `TOKEN_END`. Newport never checks the signature, so zeros stand in for it.
 fn token_issued(iat: &str) -> String {
-    let mut body = format!(r#"{{"iat":"{iat}","exp":"2026-11-20T08:30:15Z"}}"#).into_bytes();
+    let mut body = format!(r#"{{"iat":"{iat}","exp":"{TOKEN_END}"}}"#).into_bytes();
     body.extend([0u8; 64]);
     format!("v4.public.{}.e30", URL_SAFE_NO_PAD.encode(body))
 }
@@ -878,10 +881,7 @@ async fn remote_license_trusts_the_latest_server_time() {
     let granted = fixture.account.remote_license().await.unwrap();
     assert_eq!(*granted.token, token);
     assert_eq!(granted.trusted_time, PORTAL_TIME);
-    assert_eq!(
-        granted.expires_at,
-        unix_seconds("2026-11-20T08:30:15Z").unwrap()
-    );
+    assert_eq!(granted.expires_at, unix_seconds(TOKEN_END).unwrap());
     assert_eq!(granted.machine, machine().unwrap());
     assert_eq!(
         fixture.store.account().unwrap().unwrap().trusted_time,

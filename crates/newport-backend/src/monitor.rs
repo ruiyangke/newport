@@ -100,7 +100,7 @@ pub(crate) struct Channels([Arc<Mutex<Slot>>; 6]);
 impl Channels {
     pub(crate) fn for_request(&self, request: &Request) -> Arc<Mutex<Slot>> {
         let lane = match request {
-            Request::Metrics | Request::StableDisplay => 0,
+            Request::Metrics { .. } | Request::StableDisplay => 0,
             Request::Services(_) => 1,
             Request::Containers(_) => 2,
             Request::Compose(_) => 3,
@@ -159,7 +159,7 @@ pub(crate) async fn retry_overview(server: &Arc<ServerSession>) {
     server.agent_runtime.retry_failed().await;
     server
         .monitor
-        .for_request(&Request::Metrics)
+        .for_request(&Request::Metrics { search: None })
         .lock()
         .await
         .drain()
@@ -168,7 +168,17 @@ pub(crate) async fn retry_overview(server: &Arc<ServerSession>) {
 
 /// An Overview reading from the server's agent.
 pub async fn snapshot(server: &Arc<ServerSession>) -> Result<Snapshot, String> {
-    match ask(server, &Request::Metrics, REPLY_TIMEOUT).await? {
+    reading(server, None).await
+}
+
+/// An Overview reading whose processes are chosen among those that match
+/// `search`.
+pub async fn search(server: &Arc<ServerSession>, search: String) -> Result<Snapshot, String> {
+    reading(server, Some(search)).await
+}
+
+async fn reading(server: &Arc<ServerSession>, search: Option<String>) -> Result<Snapshot, String> {
+    match ask(server, &Request::Metrics { search }, REPLY_TIMEOUT).await? {
         Reply::Metrics(value) => Ok(value),
         _ => Err("Invalid metrics response operation.".into()),
     }
@@ -301,7 +311,7 @@ pub async fn ask(
 fn retryable_read(request: &Request) -> bool {
     use newport_protocol::monitor::{compose, containers, services};
     match request {
-        Request::Metrics | Request::StableDisplay | Request::Ports(_) => true,
+        Request::Metrics { .. } | Request::StableDisplay | Request::Ports(_) => true,
         Request::Services(
             services::Request::Snapshot
             | services::Request::Logs(_)
@@ -468,7 +478,14 @@ mod tests {
 
     fn requests() -> Vec<(Request, bool, usize)> {
         vec![
-            (Request::Metrics, true, 0),
+            (Request::Metrics { search: None }, true, 0),
+            (
+                Request::Metrics {
+                    search: Some("nginx".into()),
+                },
+                true,
+                0,
+            ),
             (Request::StableDisplay, true, 0),
             (Request::Services(services::Request::Snapshot), true, 1),
             (
@@ -920,7 +937,7 @@ mod tests {
         }
         assert_eq!(
             unavailable(
-                &Request::Metrics,
+                &Request::Metrics { search: None },
                 Error::Unavailable("The Newport agent requires Linux.".into()),
             )
             .to_string(),

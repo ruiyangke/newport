@@ -14,9 +14,10 @@ use newport_protocol::{
     },
 };
 use std::{
+    collections::VecDeque,
     net::Shutdown,
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, SyncSender},
     },
@@ -53,6 +54,10 @@ pub enum Event {
     },
     Exit(Option<u32>),
     Error(String),
+    /// This session's stream to Newport's backend broke before the shell's
+    /// outcome. A held shell carries on on the server, and
+    /// attaching again finds it.
+    Lost(String),
     /// The terminal's whole state: reset the view and replay it. `prompted`
     /// says whether the shell has prompted, which the replay can't show.
     Restore {
@@ -168,17 +173,133 @@ impl Lifecycle {
     }
 }
 
+/// The most events waiting for the tab before the reader waits for it to read.
+const INBOX_EVENTS: usize = 256;
+/// The largest block consecutive output merges into.
+const INBOX_BLOCK: usize = 64 * 1024;
+
+/// Events waiting for the tab. Consecutive output merges into one block, so a
+/// program's many small writes cost the tab one read, and the reader never
+/// waits on the tab for each event. Output stays bounded by the backend's
+/// output credit, which only reading returns; other events by count.
+#[derive(Default)]
+struct Inbox {
+    state: Mutex<Waiting>,
+    changed: Condvar,
+    wake: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+}
+#[derive(Default)]
+struct Waiting {
+    events: VecDeque<Event>,
+    /// The reader has nothing more to deliver.
+    finished: bool,
+    /// The session is gone: nothing more is read.
+    closed: bool,
+}
+impl Inbox {
+    fn waiting(&self) -> MutexGuard<'_, Waiting> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+    /// Queues an event for the tab, waiting only while the inbox is full.
+    /// False once the session is gone.
+    fn push(&self, event: Event) -> bool {
+        let mut waiting = self.waiting();
+        while waiting.events.len() >= INBOX_EVENTS && !waiting.closed {
+            waiting = self
+                .changed
+                .wait(waiting)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        if waiting.closed {
+            return false;
+        }
+        match (waiting.events.back_mut(), event) {
+            (Some(Event::Data(queued)), Event::Data(more))
+                if queued.len() + more.len() <= INBOX_BLOCK =>
+            {
+                queued.extend_from_slice(&more);
+            }
+            (_, event) => waiting.events.push_back(event),
+        }
+        drop(waiting);
+        self.changed.notify_all();
+        self.wake();
+        true
+    }
+    fn wake(&self) {
+        if let Some(wake) = self
+            .wake
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+        {
+            wake();
+        }
+    }
+    fn finish(&self) {
+        self.waiting().finished = true;
+        self.changed.notify_all();
+        self.wake();
+    }
+    fn close(&self) {
+        self.waiting().closed = true;
+        self.changed.notify_all();
+    }
+    fn try_pop(&self) -> Result<Event, mpsc::TryRecvError> {
+        let mut waiting = self.waiting();
+        let event = waiting.events.pop_front();
+        let finished = waiting.finished;
+        drop(waiting);
+        match event {
+            Some(event) => {
+                self.changed.notify_all();
+                Ok(event)
+            }
+            None if finished => Err(mpsc::TryRecvError::Disconnected),
+            None => Err(mpsc::TryRecvError::Empty),
+        }
+    }
+    fn pop_timeout(&self, timeout: Duration) -> Option<Event> {
+        let deadline = Instant::now() + timeout;
+        let mut waiting = self.waiting();
+        loop {
+            if let Some(event) = waiting.events.pop_front() {
+                drop(waiting);
+                self.changed.notify_all();
+                return Some(event);
+            }
+            if waiting.finished {
+                return None;
+            }
+            let left = deadline.checked_duration_since(Instant::now())?;
+            waiting = self
+                .changed
+                .wait_timeout(waiting, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+}
+
 /// Dropping a session closes its socket, which ends its shell, or detaches
 /// from a persistent one; so does the end of this process.
 pub struct Session {
     id: uuid::Uuid,
     outgoing: SyncSender<Outgoing>,
-    output: Receiver<Event>,
+    inbox: Arc<Inbox>,
     lifecycle: Arc<Lifecycle>,
 }
 impl Session {
-    pub fn open(server: &str, columns: u16, rows: u16) -> Result<Self, String> {
-        Self::open_with_backend(Backend::discover(), server, columns, rows)
+    /// A shell that starts in `directory`, or where the server's shells
+    /// start without one.
+    pub fn open(
+        server: &str,
+        columns: u16,
+        rows: u16,
+        directory: Option<String>,
+    ) -> Result<Self, String> {
+        let backend = Arc::new(Backend::discover());
+        Self::start(backend, server, Hold::No, columns, rows, directory)
     }
 
     /// A shell the server holds apart from this session where it can, so
@@ -188,9 +309,11 @@ impl Session {
         columns: u16,
         rows: u16,
         colors: Colors,
+        directory: Option<String>,
     ) -> Result<Self, String> {
         let backend = Arc::new(Backend::discover());
-        Self::start(backend, server, Hold::WhenAvailable(colors), columns, rows)
+        let hold = Hold::WhenAvailable(colors);
+        Self::start(backend, server, hold, columns, rows, directory)
     }
 
     /// Attaches to the held shell of terminal `id`, never starting a new one;
@@ -203,7 +326,14 @@ impl Session {
         colors: Colors,
     ) -> Result<Self, String> {
         let backend = Arc::new(Backend::discover());
-        Self::start(backend, server, Hold::Attach(id, colors), columns, rows)
+        Self::start(
+            backend,
+            server,
+            Hold::Attach(id, colors),
+            columns,
+            rows,
+            None,
+        )
     }
 
     /// Open against an explicitly owned backend without changing process-wide
@@ -214,7 +344,7 @@ impl Session {
         columns: u16,
         rows: u16,
     ) -> Result<Self, String> {
-        Self::start(Arc::new(backend), server, Hold::No, columns, rows)
+        Self::start(Arc::new(backend), server, Hold::No, columns, rows, None)
     }
 
     fn start(
@@ -223,6 +353,7 @@ impl Session {
         hold: Hold,
         columns: u16,
         rows: u16,
+        directory: Option<String>,
     ) -> Result<Self, String> {
         dimensions(columns, rows)?;
         let server = uuid::Uuid::parse_str(server).map_err(|_| "Invalid terminal server ID")?;
@@ -232,7 +363,8 @@ impl Session {
             Hold::No => (uuid::Uuid::new_v4(), None),
         };
         let (outgoing, commands) = mpsc::sync_channel(256);
-        let (events, output) = mpsc::sync_channel(1);
+        let inbox = Arc::new(Inbox::default());
+        let events = inbox.clone();
         let lifecycle = Arc::new(Lifecycle::default());
         let state = lifecycle.clone();
         let closer = outgoing.clone();
@@ -247,6 +379,7 @@ impl Session {
                 persist: matches!(hold, Hold::WhenAvailable(_)),
                 attach: matches!(hold, Hold::Attach(..)),
                 colors,
+                directory,
             };
             let opened = lease.open(request).and_then(|opened| {
                 let cancellation = opened
@@ -266,14 +399,18 @@ impl Session {
             let Opened { reader, writer, .. } = match opened {
                 Ok(opened) => opened,
                 Err(error) => {
-                    let _ = events.send(Event::Error(error));
+                    events.push(Event::Error(error));
                     state.stopped.store(true, Ordering::Release);
+                    events.finish();
                     return;
                 }
             };
             let reader = {
                 let state = state.clone();
-                thread::spawn(move || read(reader, &state, &events, &closer))
+                thread::spawn(move || {
+                    read(reader, &state, &events, &closer);
+                    events.finish();
+                })
             };
             write(writer, &commands, &state);
             let _ = reader.join();
@@ -281,7 +418,7 @@ impl Session {
         Ok(Self {
             id,
             outgoing,
-            output,
+            inbox,
             lifecycle,
         })
     }
@@ -343,7 +480,7 @@ impl Session {
                         if Instant::now() >= deadline {
                             return;
                         }
-                        if let Ok(Event::Data(bytes)) = self.output.try_recv() {
+                        if let Ok(Event::Data(bytes)) = self.inbox.try_pop() {
                             self.acknowledge(bytes.len() as u64);
                         }
                         thread::sleep(Duration::from_millis(2));
@@ -351,12 +488,13 @@ impl Session {
                 }
             }
             while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-                match self.output.recv_timeout(left) {
-                    Ok(Event::Data(bytes)) => {
+                match self.inbox.pop_timeout(left) {
+                    Some(Event::Data(bytes)) => {
                         self.acknowledge(bytes.len() as u64);
                     }
-                    Ok(Event::Exit(_) | Event::Error(_) | Event::Ended) | Err(_) => break,
-                    Ok(_) => {}
+                    Some(Event::Exit(_) | Event::Error(_) | Event::Lost(_) | Event::Ended)
+                    | None => break,
+                    Some(_) => {}
                 }
             }
             drop(self);
@@ -383,24 +521,41 @@ impl Session {
             .map_err(|_| "Terminal is closed.".into())
     }
     fn acknowledge(&self, bytes: u64) {
-        if self
-            .lifecycle
-            .pending_acks
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
-                pending.checked_add(bytes)
-            })
-            .is_err()
-        {
+        let Ok(before) = self.lifecycle.pending_acks.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |pending| pending.checked_add(bytes),
+        ) else {
             self.lifecycle.cancel();
             return;
+        };
+        // Only the first acknowledgment since the writer last took them wakes
+        // it; later ones go out with that one. A full queue already wakes the
+        // writer, which drains this counter first.
+        if before == 0 {
+            let _ = self.outgoing.try_send(Outgoing::Wake);
         }
-        // A full queue already wakes the writer, which drains this counter first.
-        let _ = self.outgoing.try_send(Outgoing::Wake);
+    }
+    /// Calls `wake` whenever events arrive for [`Session::try_read`], from the
+    /// session's own thread, and once now if some already wait. It replaces
+    /// any earlier one and must return quickly.
+    pub fn on_output(&self, wake: impl Fn() + Send + Sync + 'static) {
+        *self
+            .inbox
+            .wake
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(wake));
+        let waiting = self.inbox.waiting();
+        let ready = !waiting.events.is_empty() || waiting.finished;
+        drop(waiting);
+        if ready {
+            self.inbox.wake();
+        }
     }
     /// The next event. Output read here is acknowledged: the caller draws
     /// what it reads, and the backend sends more as it does.
     pub fn try_read(&self) -> Result<Event, mpsc::TryRecvError> {
-        let event = self.output.try_recv()?;
+        let event = self.inbox.try_pop()?;
         if let Event::Data(bytes) = &event {
             self.acknowledge(bytes.len() as u64);
         }
@@ -409,6 +564,7 @@ impl Session {
 }
 impl Drop for Session {
     fn drop(&mut self) {
+        self.inbox.close();
         self.lifecycle.stopped.store(true, Ordering::Release);
         self.lifecycle.ready.store(false, Ordering::Release);
         self.lifecycle.cancel();
@@ -479,12 +635,7 @@ fn write(mut writer: Writer, commands: &Receiver<Outgoing>, state: &Lifecycle) {
 }
 
 /// Deliver a final terminal outcome only after its stream has closed cleanly.
-fn read(
-    mut reader: Reader,
-    state: &Lifecycle,
-    events: &SyncSender<Event>,
-    writer: &SyncSender<Outgoing>,
-) {
+fn read(mut reader: Reader, state: &Lifecycle, events: &Inbox, writer: &SyncSender<Outgoing>) {
     let result = (|| -> Result<(), std::io::Error> {
         loop {
             let frame = reader
@@ -552,22 +703,25 @@ fn read(
                                 "Terminal data followed its final outcome",
                             ));
                         }
-                        let _ = events.send((*value).into());
+                        events.push((*value).into());
                         return Ok(());
                     }
                     (*value).into()
                 }
             };
-            if events.send(event).is_err() {
+            if !events.push(event) {
                 return Ok(());
             }
+            // Waiting for the tab to take that event is this side's pause, not
+            // the backend's: it never ends a frame the backend already sent.
+            reader.resume();
         }
     })();
     if let Err(error) = result
         && !state.stopped.load(Ordering::Acquire)
     {
         let _ = state.end_shell();
-        let _ = events.send(Event::Error(format!(
+        events.push(Event::Lost(format!(
             "Lost the terminal’s connection to Newport’s backend: {error}"
         )));
     }

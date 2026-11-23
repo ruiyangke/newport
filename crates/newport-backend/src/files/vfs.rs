@@ -170,7 +170,7 @@ impl Vfs {
         let result = async {
             let root = match super::canonical(session, &request.root).await {
                 Ok(root) => root,
-                Err(error) if missing(&error) => {
+                Err(error) if super::missing(&error) => {
                     return Ok(BTreeMap::from([(request.root.clone(), Value::Null)]));
                 }
                 Err(error) => return Err(error),
@@ -181,7 +181,7 @@ impl Vfs {
                 let listing = match super::list(session, directory).await {
                     Ok(listing) => listing,
                     Err(e) => {
-                        if missing(&e) {
+                        if super::missing(&e) {
                             entries.insert(directory.clone(), Value::Null);
                             continue;
                         }
@@ -248,10 +248,6 @@ impl Vfs {
                 })
         });
     }
-}
-fn missing(error: &anyhow::Error) -> bool {
-    matches!(error.downcast_ref::<russh_sftp::client::error::Error>(),
-        Some(russh_sftp::client::error::Error::Status(status)) if status.status_code==russh_sftp::protocol::StatusCode::NoSuchFile)
 }
 fn changed(before: &BTreeMap<String, Value>, after: &BTreeMap<String, Value>) -> Vec<String> {
     before

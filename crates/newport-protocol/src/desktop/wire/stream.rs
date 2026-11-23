@@ -19,6 +19,7 @@ impl Convert for crate::desktop::stream::TerminalOpenArgs {
                         ))
                     })
                     .transpose()?,
+                directory: self.directory.clone(),
             },
         )
     }
@@ -31,6 +32,7 @@ impl Convert for crate::desktop::stream::TerminalOpenArgs {
             persist: value.persist.unwrap_or(false),
             attach: value.attach.unwrap_or(false),
             colors: value.colors.map(rgb3).transpose()?,
+            directory: value.directory,
         })
     }
 }

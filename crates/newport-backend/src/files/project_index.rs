@@ -91,8 +91,14 @@ pub async fn dispatch(
             request.operation,
             Some(&expected),
             async |_server, owner| {
-                let output = crate::remote::command::stdout(owner.link(), &command, None).await?;
-                parse(&output)
+                use crate::remote::command::{Error, stdout};
+                match stdout(owner.link(), &command, None).await {
+                    Ok(output) => parse(&output),
+                    Err(error @ Error::Failed { .. }) => {
+                        Err(super::project_failure(&owner, &request.root, error.into()).await)
+                    }
+                    Err(error) => Err(error.into()),
+                }
             },
         )
         .await

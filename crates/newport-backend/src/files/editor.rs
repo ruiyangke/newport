@@ -1,6 +1,6 @@
 //! Bounded, connection-scoped editing over SFTP. Saves replace atomically;
 //! an observed remote edit is a conflict, never an implicit overwrite.
-use super::{Operations, Remote, canonical, child, path_valid, status};
+use super::{Operations, Remote, canonical, child, gone, missing, path_valid, status};
 use crate::{manager::Shared, remote::sftp::Session};
 use anyhow::{Context, Result, bail, ensure};
 use russh_sftp::protocol::{FileAttributes, OpenFlags, Packet, StatusCode};
@@ -69,8 +69,12 @@ async fn target(session: &Session, root: &str, path: &str) -> Result<String> {
         root.starts_with('/') && path.starts_with('/'),
         "Choose an absolute worktree path."
     );
+    let canonical_root = match canonical(session, root).await {
+        Err(error) if missing(&error) => return Err(gone(root)),
+        result => result?,
+    };
     ensure!(
-        canonical(session, root).await? == root,
+        canonical_root == root,
         "The worktree path changed. Reopen the project."
     );
     ensure!(inside(root, path), "The file is outside this worktree.");
@@ -459,6 +463,14 @@ mod tests {
             .is_err()
         );
         assert!(target(&session, "/Documents", "/other.txt").await.is_err());
+        let gone = format!("/gone-{}", Uuid::new_v4());
+        assert_eq!(
+            target(&session, &gone, &format!("{gone}/main.rs"))
+                .await
+                .unwrap_err()
+                .to_string(),
+            format!("{gone} isn’t on the server any more.")
+        );
         request.revision = Some(after.revision);
         request.content = Some("".into());
         save(&operations, &remote, &session, &request)

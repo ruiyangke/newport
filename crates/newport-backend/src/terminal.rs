@@ -12,10 +12,11 @@ pub(crate) mod holder_channel;
 pub(crate) mod shell_channel;
 
 /// What a tab's shell may use besides its server: the account's display,
-/// where this computer may show it.
+/// where this computer may show it, and the folder a new shell starts in.
 #[derive(Clone, Default)]
 pub(crate) struct Shell {
     pub display: Option<display::Access>,
+    pub directory: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -172,15 +173,15 @@ impl Sessions {
         rows: u32,
         owner: Arc<crate::server_session::ServerSession>,
     ) -> Result<Io, String> {
-        self.open_bound_with_display(id, server, (cols, rows), owner, None, Hold::No)
+        self.open_bound_shell(id, server, (cols, rows), owner, Shell::default(), Hold::No)
     }
-    pub(crate) fn open_bound_with_display(
+    pub(crate) fn open_bound_shell(
         &self,
         id: Uuid,
         server: Server,
         (cols, rows): (u32, u32),
         owner: Arc<crate::server_session::ServerSession>,
-        display: Option<display::Access>,
+        shell: Shell,
         hold: Hold,
     ) -> Result<Io, String> {
         size(cols, rows)?;
@@ -202,7 +203,6 @@ impl Sessions {
         let server_id = server.id;
         let task_owner = owner.clone();
         let task = tokio::spawn(async move {
-            let shell = Shell { display };
             // A shell Needle can hold outlives this connection; otherwise it
             // is the connection's own, as on servers without Needle.
             let result = match hold {
@@ -423,12 +423,15 @@ mod tests {
             });
             let factory: display::Source = Arc::new(|| Box::pin(std::future::pending()));
             let _io = sessions
-                .open_bound_with_display(
+                .open_bound_shell(
                     Uuid::new_v4(),
                     server,
                     (80, 24),
                     owner.clone(),
-                    Some(display::Access::new(checks, factory)),
+                    Shell {
+                        display: Some(display::Access::new(checks, factory)),
+                        directory: None,
+                    },
                     Hold::No,
                 )
                 .unwrap();
@@ -960,12 +963,15 @@ mod tests {
         let fake = FakeView::new();
         let id = Uuid::new_v4();
         let mut io = sessions
-            .open_bound_with_display(
+            .open_bound_shell(
                 id,
                 server.clone(),
                 (80, 24),
                 owner.clone(),
-                Some(display::Access::showing(fake.view())),
+                Shell {
+                    display: Some(display::Access::showing(fake.view())),
+                    directory: None,
+                },
                 Hold::No,
             )
             .unwrap();
@@ -1015,7 +1021,7 @@ mod tests {
         // Where this computer may not use Remote apps, nothing is named.
         let id = Uuid::new_v4();
         let mut io = sessions
-            .open_bound_with_display(id, server, (80, 24), owner, None, Hold::No)
+            .open_bound_shell(id, server, (80, 24), owner, Shell::default(), Hold::No)
             .unwrap();
         until(&mut io, "fixture> ").await;
         type_in(&io, b"printf 'named=%s\\n' \"${WAYLAND_DISPLAY-none}\"\r").await;

@@ -1920,8 +1920,7 @@ impl CodeWorkspace {
                 let server = self.server.clone();
                 let connection = self.connection.clone();
                 let root = self.root.clone();
-                if newport_client::terminal_command::CommandDraft::project_directory(&root).is_err()
-                {
+                if !newport_protocol::terminal::valid_directory(&root) {
                     return;
                 }
                 let terminal = cx.new(|cx| {

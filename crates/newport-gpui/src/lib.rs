@@ -1099,6 +1099,9 @@ impl Newport {
                 Outcome::Typed(result) if matches!(reply.key.as_str(), "overview" | "history") => {
                     self.complete_metrics(&reply.key, reply.generation, result)
                 }
+                Outcome::Typed(result) if reply.key == overview_process::SEARCH_KEY => {
+                    self.complete_process_search(reply.generation, result)
+                }
                 Outcome::Typed(result) if reply.key == "file-places" => {
                     self.complete_file_places(reply.generation, result)
                 }
@@ -1320,7 +1323,9 @@ impl Newport {
                             // A backend restart or connection reset invalidates reads,
                             // not the user's repository/worktree destination. Reopen
                             // it only after reloading the same server's bookmarks.
-                            let destination = (current == old_server)
+                            // No server listed before (at launch, or until the
+                            // profile first loads) is no switch away from one.
+                            let destination = (old_server.is_none() || current == old_server)
                                 .then(|| self.git_destination())
                                 .flatten();
                             if current.is_none() {
@@ -1486,6 +1491,9 @@ impl Newport {
             browser.active = false;
         }
         self.git_release();
+        for processes in self.overview_state.processes.values_mut() {
+            processes.abandon_search();
+        }
         if navigation {
             // Remote apps keeps its readings so a return draws them at once;
             // its own polling reads them again.
@@ -1531,10 +1539,12 @@ impl Newport {
                                 server,
                                 refresh: false,
                                 section: desktop::metrics::Section::Overview,
+                                search: None,
                             }),
                         )))
                     }),
                 );
+                self.search_overview_processes();
                 self.request_typed_refresh(
                     "history",
                     desktop_server(&self.server).and_then(|server| {

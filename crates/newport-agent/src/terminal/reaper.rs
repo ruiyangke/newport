@@ -33,15 +33,17 @@ const IGNORED: [libc::c_int; 11] = [
     libc::SIGTTOU,
 ];
 
-/// `terminal reaper <id> <command>`, with the PTY and status pipe at their
-/// descriptors and the shell's environment as its own.
+/// `terminal reaper <id> <directory> <command>`, with the PTY and status
+/// pipe at their descriptors and the shell's environment as its own. An
+/// empty directory starts the shell where the reaper is, the home folder.
 pub(crate) fn run(args: &[String]) -> io::Result<()> {
-    let [id, command] = args else {
+    let [id, directory, command] = args else {
         return Err(io::Error::other("Invalid terminal reaper arguments."));
     };
     let id = super::valid_id(id)?;
     let shell =
         CString::new(command.as_str()).map_err(|_| io::Error::other("Invalid shell command."))?;
+    let start = (!directory.is_empty()).then(|| Folder::new(directory));
     for signal in IGNORED {
         // SAFETY: signal takes scalar arguments.
         unsafe { libc::signal(signal, libc::SIG_IGN) };
@@ -52,7 +54,7 @@ pub(crate) fn run(args: &[String]) -> io::Result<()> {
     unsafe { libc::setpgid(0, 0) };
     become_subreaper();
     scope::enter(&id);
-    let pid = spawn(&shell);
+    let pid = spawn(&shell, start.as_ref());
     // SAFETY: the reaper has no other use for the terminal side; the PTY
     // reports the shell's end only once nothing has it open.
     unsafe { libc::close(TERMINAL_FD) };
@@ -91,8 +93,36 @@ pub(super) fn default_signals() {
     }
 }
 
-/// Starts `sh -c command` as the session leader of the PTY.
-fn spawn(command: &CString) -> io::Result<libc::pid_t> {
+/// The folder a shell was asked to start in: the folder, when the shell may
+/// enter it, and what the shell's terminal shows when it can't.
+struct Folder {
+    path: Option<CString>,
+    notice: Vec<u8>,
+}
+
+impl Folder {
+    /// Built before the fork, so the child only enters it or writes.
+    fn new(directory: &str) -> Self {
+        let path = CString::new(directory)
+            .ok()
+            .filter(|path| std::path::Path::new(directory).is_dir() && searchable(path));
+        let notice = newport_protocol::terminal::unavailable_directory(directory);
+        Self {
+            path,
+            notice: format!("{notice}\r\n").into_bytes(),
+        }
+    }
+}
+
+/// Whether this account may enter `path`.
+fn searchable(path: &CString) -> bool {
+    // SAFETY: `path` is a valid C string.
+    unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
+}
+
+/// Starts `sh -c command` as the session leader of the PTY, in `folder`
+/// when it can, or else where the reaper is, saying why.
+fn spawn(command: &CString, folder: Option<&Folder>) -> io::Result<libc::pid_t> {
     let shell = c"/bin/sh";
     let argv = [
         c"sh".as_ptr(),
@@ -114,6 +144,15 @@ fn spawn(command: &CString) -> io::Result<libc::pid_t> {
             }
             libc::close(TERMINAL_FD);
             libc::close(STATUS_FD);
+            if let Some(folder) = folder {
+                let entered = folder
+                    .path
+                    .as_ref()
+                    .is_some_and(|path| libc::chdir(path.as_ptr()) == 0);
+                if !entered {
+                    libc::write(1, folder.notice.as_ptr().cast(), folder.notice.len());
+                }
+            }
             libc::execv(shell.as_ptr(), argv.as_ptr());
             libc::_exit(127)
         },
@@ -274,6 +313,46 @@ pub(crate) mod scope {
 mod scope {
     /// Only Linux has user managers.
     pub(super) fn enter(_id: &str) {}
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::Folder;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn notice(directory: &std::path::Path) -> Vec<u8> {
+        let notice = newport_protocol::terminal::unavailable_directory(directory.to_str().unwrap());
+        format!("{notice}\r\n").into_bytes()
+    }
+
+    #[test]
+    fn a_shell_enters_only_a_folder_it_may_search() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("it's a \"project\" 项目");
+        std::fs::create_dir(&folder).unwrap();
+        let start = Folder::new(folder.to_str().unwrap());
+        assert_eq!(
+            start.path.as_deref().and_then(|path| path.to_str().ok()),
+            folder.to_str()
+        );
+        assert_eq!(start.notice, notice(&folder));
+        let file = root.path().join("a file");
+        std::fs::write(&file, "").unwrap();
+        let mut unusable = vec![root.path().join("gone"), file];
+        // An account with the right to search any folder may enter this one.
+        // SAFETY: geteuid takes no arguments.
+        if unsafe { libc::geteuid() } != 0 {
+            let locked = root.path().join("locked");
+            std::fs::create_dir(&locked).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
+            unusable.push(locked);
+        }
+        for directory in unusable {
+            let start = Folder::new(directory.to_str().unwrap());
+            assert!(start.path.is_none(), "{directory:?}");
+            assert_eq!(start.notice, notice(&directory));
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]

@@ -223,6 +223,7 @@ pub(crate) fn publication(port: u16, name: &str, image: &str) -> Port {
     member.reference.record = d::Record::Publication(0);
     member.kind = d::Kind::Publication(d::Publication {
         engine: Some("engine".into()),
+        engine_kind: d::EngineKind::Docker,
         container: name.into(),
         name: name.into(),
         image: Some(image.into()),

@@ -134,6 +134,12 @@ enum ContainerState {
   CONTAINER_STATE_STOPPED = 2;
   CONTAINER_STATE_UNKNOWN = 3;
 }
+// The container engine that published a port.
+enum EngineKind {
+  ENGINE_KIND_UNSPECIFIED = 0;
+  ENGINE_KIND_DOCKER = 1;
+  ENGINE_KIND_PODMAN = 2;
+}
 message Compose {
   optional string project = 1;
   optional string service = 2;
@@ -152,6 +158,7 @@ message Publication {
   uint32 target_port = 7;
   optional bytes target_address = 8;
   Compose compose = 9;
+  EngineKind engine_kind = 10;
 }
 
 enum Outcome {

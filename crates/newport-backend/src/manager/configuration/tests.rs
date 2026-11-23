@@ -170,14 +170,122 @@ async fn server_editor_rebases_without_blocking_another_server_or_overwriting_fe
         &unaffected,
         &state.owner(saved.servers[1].id).unwrap()
     ));
+    // A new password signs in to the same account.
     let replaced = store.load().unwrap();
-    assert!(!replaced.servers[0].agent_install_approved);
-    assert!(!replaced.servers[0].setup_complete);
-    assert!(!replaced.servers[0].browser_enabled);
+    assert!(replaced.servers[0].agent_install_approved);
+    assert!(replaced.servers[0].setup_complete);
+    assert!(replaced.servers[0].browser_enabled);
     assert_eq!(
         store.password(saved.servers[0].id).unwrap().as_str(),
         "replacement-secret"
     );
+    crate::manager::shutdown(&state).await;
+}
+
+/// Saves `server` from an editor, as the desktop does.
+async fn save(state: &Shared, server: Server) {
+    crate::commands::save_server(
+        &Default::default(),
+        &Default::default(),
+        state,
+        Arc::new(NoDesktop),
+        server,
+        None,
+    )
+    .await
+    .unwrap();
+}
+
+/// The first server once set up, with its integrations on.
+async fn set_up(state: &Shared) -> Server {
+    state
+        .edit_configuration(None, |manager| {
+            let mut config = manager.config.clone();
+            let server = &mut config.servers[0];
+            server.agent_install_approved = true;
+            server.setup_complete = true;
+            server.clipboard_enabled = true;
+            server.browser_enabled = true;
+            Ok((config, ()))
+        })
+        .await
+        .unwrap();
+    state.snapshot().config.servers[0].clone()
+}
+
+/// A change made in the editor, with what it needs.
+type Edit<T> = fn(&mut Server, T);
+
+fn setup_and_integrations(server: &Server) -> [bool; 4] {
+    [
+        server.agent_install_approved,
+        server.setup_complete,
+        server.clipboard_enabled,
+        server.browser_enabled,
+    ]
+}
+
+#[tokio::test]
+async fn signing_in_another_way_reconnects_but_keeps_setup_and_integrations() {
+    let (_directory, state, store) = fixture().await;
+    let fingerprint = format!("SHA256:{}", "a".repeat(43));
+    let changes: [(&str, Edit<&str>); 3] = [
+        ("key file", |server, _| {
+            server.identity_file = Some("~/.ssh/id_work".into());
+        }),
+        ("agent key", |server, fingerprint| {
+            server.identity_file = None;
+            server.agent_source = Some("onePassword".into());
+            server.agent_key_fingerprint = Some(fingerprint.into());
+        }),
+        ("password", |server, _| {
+            server.agent_source = None;
+            server.agent_key_fingerprint = None;
+            server.auth_method = crate::model::AuthMethod::Password;
+        }),
+    ];
+    for (change, apply) in changes {
+        let mut server = set_up(&state).await;
+        let owner = state.owner(server.id).unwrap();
+        apply(&mut server, &fingerprint);
+        // A stale editor carries none of the consent.
+        server.agent_install_approved = false;
+        server.setup_complete = false;
+        save(&state, server.clone()).await;
+        assert!(owner.is_revoked(), "{change}: reconnects");
+        let saved = &store.load().unwrap().servers[0];
+        assert!(saved.same_connection(&server), "{change}");
+        assert_eq!(setup_and_integrations(saved), [true; 4], "{change}");
+    }
+    crate::manager::shutdown(&state).await;
+}
+
+#[tokio::test]
+async fn pointing_at_another_server_starts_setup_over() {
+    let (_directory, state, store) = fixture().await;
+    let jump = state.snapshot().config.servers[1].id;
+    let changes: [(&str, Edit<Uuid>); 5] = [
+        ("host", |server, _| {
+            server.ssh_host = "elsewhere.invalid".into()
+        }),
+        ("port", |server, _| server.ssh_port = 2222),
+        ("user", |server, _| server.ssh_user = "other".into()),
+        ("jump host", |server, jump| {
+            server.proxy = Some(crate::model::Proxy::Jump(jump));
+        }),
+        ("proxy command", |server, _| {
+            server.proxy = Some(crate::model::Proxy::Command("nc %h %p".into()));
+        }),
+    ];
+    for (change, apply) in changes {
+        let mut server = set_up(&state).await;
+        let owner = state.owner(server.id).unwrap();
+        apply(&mut server, jump);
+        save(&state, server).await;
+        assert!(owner.is_revoked(), "{change}: reconnects");
+        let saved = &store.load().unwrap().servers[0];
+        assert_eq!(setup_and_integrations(saved), [false; 4], "{change}");
+    }
     crate::manager::shutdown(&state).await;
 }
 

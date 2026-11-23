@@ -148,6 +148,7 @@ fn holder(value: &p::Process) -> d::Holder {
         },
         name: value.name.clone(),
         executable: value.executable_name.clone(),
+        path: facts.executable.map(str::to_owned),
         label: facts.label(),
         account: value.account.clone(),
         uid: value.uid,
@@ -239,6 +240,10 @@ fn append(snapshot: &p::Snapshot, stale: bool, members: &mut Vec<d::Member>) {
             stale,
             kind: d::Kind::Publication(d::Publication {
                 engine: publication.engine.clone(),
+                engine_kind: match publication.engine_kind {
+                    p::EngineKind::Docker => d::EngineKind::Docker,
+                    p::EngineKind::Podman => d::EngineKind::Podman,
+                },
                 container: publication.container.clone(),
                 name: publication.name.clone(),
                 image: publication.image.clone(),

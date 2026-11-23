@@ -91,7 +91,7 @@ impl Events {
             Ok(match message {
                 ServerMessage::Failed(error) => return Err(failure(error)),
                 ServerMessage::Export(event) => {
-                    self.exports.accept(event)?;
+                    self.exports.accept(event).map_err(Failure::Clipboard)?;
                     // Only metadata is deferred; payloads stay in the bounded receiver.
                     Event::ExportsChanged
                 }

@@ -155,6 +155,11 @@ schema!(METRICS_SNAPSHOT {
     14 => (metrics::MAX_INTERFACES, false, Kind::Message(METRICS_NETWORK)),
     15 => (metrics::MAX_PROCESSES, false, Kind::Message(METRICS_PROCESS)),
     16 => (1, false, Kind::Integer32),
+    17 => (1, false, Kind::Integer32),
+});
+
+schema!(METRICS_REQUEST {
+    1 => (1, false, Kind::Text(metrics::MAX_SEARCH)),
 });
 
 schema!(METRICS_CORE {
@@ -661,7 +666,7 @@ schema!(COMPOSE_REPLY {
 
 schema!(CALL {
     1 => (1, false, Kind::Scalar),
-    2 => (1, true, Kind::Message(PRESENT)),
+    2 => (1, true, Kind::Message(METRICS_REQUEST)),
     3 => (1, true, Kind::Message(PRESENT)),
     4 => (1, true, Kind::Message(SERVICES_REQUEST)),
     5 => (1, true, Kind::Message(CONTAINERS_REQUEST)),

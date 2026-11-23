@@ -353,14 +353,36 @@ fn os_name(text: &str) -> String {
 }
 
 impl Source {
-    fn snapshot(&self, previous: &Sample, latest: &Sample) -> Snapshot {
+    fn snapshot(&self, previous: &Sample, latest: &Sample, search: Option<&str>) -> Snapshot {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|age| age.as_secs())
             .unwrap_or(0);
-        self.snapshot_at(previous, latest, now)
+        self.snapshot_at(previous, latest, now, search)
     }
-    fn snapshot_at(&self, previous: &Sample, latest: &Sample, now_epoch: u64) -> Snapshot {
+    /// A process's user and command line, from two more reads.
+    fn owner_and_command(
+        &self,
+        pid: u32,
+        names: &HashMap<u32, String>,
+    ) -> (String, Option<String>) {
+        let user = self
+            .read(&format!("proc/{pid}/status"))
+            .and_then(|status| uid(&status))
+            .map(|uid| names.get(&uid).cloned().unwrap_or_else(|| uid.to_string()))
+            .unwrap_or_default();
+        let command = self
+            .read(&format!("proc/{pid}/cmdline"))
+            .and_then(|raw| command_line(&raw));
+        (user, command)
+    }
+    fn snapshot_at(
+        &self,
+        previous: &Sample,
+        latest: &Sample,
+        now_epoch: u64,
+        search: Option<&str>,
+    ) -> Snapshot {
         let elapsed = latest
             .at
             .duration_since(previous.at)
@@ -382,12 +404,31 @@ impl Source {
                 (cpu, *pid, task)
             })
             .collect();
+        let names = users(&self.read("etc/passwd").unwrap_or_default());
+        // Only a search reads the user and command line of processes the
+        // reply leaves out, and only when the name and PID don't match.
+        let mut details = HashMap::new();
+        if let Some(search) = search {
+            let search = search.to_lowercase();
+            let finds = |text: &str| text.to_lowercase().contains(&search);
+            processes.retain(|(_, pid, task)| {
+                if finds(&task.name) || pid.to_string().contains(&search) {
+                    return true;
+                }
+                let (user, command) = self.owner_and_command(*pid, &names);
+                let found = finds(&user) || command.as_deref().is_some_and(finds);
+                if found {
+                    details.insert(*pid, (user, command));
+                }
+                found
+            });
+        }
+        let process_matches = processes.len() as u32;
         processes.sort_by(|a, b| {
             b.0.total_cmp(&a.0)
                 .then(b.2.rss_pages.cmp(&a.2.rss_pages))
                 .then(a.1.cmp(&b.1))
         });
-        let names = users(&self.read("etc/passwd").unwrap_or_default());
         // The busiest by CPU and the largest by memory, so sorting the list
         // either way shows the real leaders rather than re-sorting one set.
         let mut by_memory: Vec<&(f64, u32, &Task)> = processes.iter().collect();
@@ -397,26 +438,29 @@ impl Source {
             .take(TOP_PROCESSES)
             .map(|(_, pid, _)| *pid)
             .collect();
-        let top: Vec<Process> = processes
+        let selected: Vec<_> = processes
             .iter()
             .enumerate()
             .filter(|(rank, (_, pid, _))| *rank < TOP_PROCESSES || largest.contains(pid))
             .map(|(_, process)| process)
-            .map(|(cpu, pid, task)| Process {
-                pid: *pid,
-                user: self
-                    .read(&format!("proc/{pid}/status"))
-                    .and_then(|status| uid(&status))
-                    .map(|uid| names.get(&uid).cloned().unwrap_or_else(|| uid.to_string()))
-                    .unwrap_or_default(),
-                cpu: (cpu * 10.0).round() / 10.0,
-                memory: task.rss_pages * self.page_size,
-                state: task.state.clone(),
-                name: task.name.clone(),
-                elapsed: elapsed_secs(now_epoch, latest.boot, task.started, self.clock_ticks),
-                command: self
-                    .read(&format!("proc/{pid}/cmdline"))
-                    .and_then(|raw| command_line(&raw)),
+            .collect();
+        details.retain(|pid, _| selected.iter().any(|(_, kept, _)| kept == pid));
+        let top: Vec<Process> = selected
+            .into_iter()
+            .map(|(cpu, pid, task)| {
+                let (user, command) = details
+                    .remove(pid)
+                    .unwrap_or_else(|| self.owner_and_command(*pid, &names));
+                Process {
+                    pid: *pid,
+                    user,
+                    cpu: (cpu * 10.0).round() / 10.0,
+                    memory: task.rss_pages * self.page_size,
+                    state: task.state.clone(),
+                    name: task.name.clone(),
+                    elapsed: elapsed_secs(now_epoch, latest.boot, task.started, self.clock_ticks),
+                    command,
+                }
             })
             .collect();
         let cpus = latest
@@ -487,6 +531,7 @@ impl Source {
             network: network(&self.read("proc/net/dev").unwrap_or_default()),
             processes: top,
             process_count: latest.tasks.len() as u32,
+            process_matches,
         }
     }
 }
@@ -554,7 +599,7 @@ impl Monitor {
         });
     }
     /// Waits briefly for a second sample so the first reply already has rates.
-    fn snapshot(&self) -> Result<Snapshot, Error> {
+    fn snapshot(&self, search: Option<&str>) -> Result<Snapshot, Error> {
         let samples = self
             .samples
             .lock()
@@ -563,17 +608,16 @@ impl Monitor {
             .ready
             .wait_timeout_while(samples, INTERVAL * 3, |s| s.0.is_none() || s.1.is_none())
             .unwrap();
-        let mut snapshot = match &*samples {
-            (Some(previous), Some(latest)) => self.source.snapshot(previous, latest),
-            _ => {
-                return Err(Error {
-                    code: "not_ready".into(),
-                    message: "The first readings are not ready yet.".into(),
-                    retry: Retry::Yes,
-                });
-            }
+        // A copy lets the sampler publish while this reply reads /proc.
+        let (Some(previous), Some(latest)) = samples.clone() else {
+            return Err(Error {
+                code: "not_ready".into(),
+                message: "The first readings are not ready yet.".into(),
+                retry: Retry::Yes,
+            });
         };
         drop(samples);
+        let mut snapshot = self.source.snapshot(&previous, &latest, search);
         let history = self
             .history
             .lock()
@@ -601,7 +645,7 @@ pub fn handle(
     output: impl Write,
 ) -> io::Result<()> {
     handle_bound(
-        || monitor.snapshot(),
+        |search| monitor.snapshot(search),
         services,
         containers,
         input,
@@ -610,7 +654,7 @@ pub fn handle(
     )
 }
 fn handle_bound(
-    snapshot: impl Fn() -> Result<Snapshot, Error>,
+    snapshot: impl Fn(Option<&str>) -> Result<Snapshot, Error>,
     services: &crate::services::Services,
     containers: &crate::containers::Containers,
     input: impl BufRead,
@@ -628,7 +672,7 @@ fn handle_bound(
         };
         cancellation.check()?;
         let result = match &call.request {
-            Request::Metrics => snapshot().map(Reply::Metrics),
+            Request::Metrics { search } => snapshot(search.as_deref()).map(Reply::Metrics),
             Request::FileWatch(request) => file_watches
                 .get_or_insert_with(crate::file_watch::Watches::new)
                 .handle(request)
@@ -699,9 +743,9 @@ pub(crate) fn serve_bound(cancellation: crate::transport::Cancellation) -> io::R
     let services = crate::services::Services::system();
     let containers = crate::containers::Containers::system();
     let result = handle_bound(
-        || {
+        |search| {
             monitor.start();
-            monitor.snapshot()
+            monitor.snapshot(search)
         },
         &services,
         &containers,
@@ -824,7 +868,7 @@ mod tests {
         );
         let first = source.sample();
         let second = source.sample();
-        let snapshot = source.snapshot_at(&first, &second, 1_700_003_601);
+        let snapshot = source.snapshot_at(&first, &second, 1_700_003_601, None);
         let processes = &snapshot.processes;
         assert_eq!(processes[0].name, "old");
         // Started one second after boot, read one hour later.
@@ -844,7 +888,7 @@ mod tests {
         );
         let first = source.sample();
         let second = source.sample();
-        let snapshot = source.snapshot_at(&first, &second, 1_700_003_601);
+        let snapshot = source.snapshot_at(&first, &second, 1_700_003_601, None);
         assert!(snapshot.processes[0].elapsed.is_none());
     }
 
@@ -875,7 +919,7 @@ mod tests {
         write(root, "proc/12/stat", &task(12, "new", 500, 50));
         let mut second = source.sample();
         at(&mut second, base, 1.0);
-        let snapshot = source.snapshot(&first, &second);
+        let snapshot = source.snapshot(&first, &second, None);
         snapshot.validate().unwrap();
         assert_eq!(snapshot.cpu, 50.0);
         assert_eq!(snapshot.cores, 2);
@@ -923,7 +967,7 @@ mod tests {
         write(root, "proc/7/stat", &task(7, "hot", 250, 1));
         let mut second = source.sample();
         at(&mut second, base, 2.0);
-        let snapshot = source.snapshot(&first, &second);
+        let snapshot = source.snapshot(&first, &second, None);
         snapshot.validate().unwrap();
         let processes = &snapshot.processes;
         // 250 ticks over 2 s at 100 Hz is 125%: more than one core, as htop shows.
@@ -938,6 +982,164 @@ mod tests {
         assert!(pids.contains(&11));
         assert!(!pids.contains(&10));
         assert_eq!(snapshot.process_count, 60);
+    }
+
+    /// Many large idle workers and a small quiet daemon at pid 5.
+    fn crowded(root: &Path) -> (Sample, Sample) {
+        write(root, "proc/stat", "cpu  0 0 0 0 0 0 0 0\n");
+        write(
+            root,
+            "etc/passwd",
+            "root:x:0:0::/root:/bin/sh\npostgres:x:70:70::/var/lib/postgresql:/bin/sh\n",
+        );
+        for pid in 100..220 {
+            write(
+                root,
+                &format!("proc/{pid}/stat"),
+                &task(pid, "worker", 0, u64::from(pid)),
+            );
+            write(root, &format!("proc/{pid}/status"), "Uid:\t0\t0\t0\t0\n");
+        }
+        write(root, "proc/5/stat", &task(5, "QuietD", 0, 1));
+        write(root, "proc/5/status", "Uid:\t70\t70\t70\t70\n");
+        write(
+            root,
+            "proc/5/cmdline",
+            "/usr/sbin/quietd\0--config\0/etc/quiet.toml\0",
+        );
+        let source = source(root);
+        let base = Instant::now();
+        let mut first = source.sample();
+        at(&mut first, base, 0.0);
+        let mut second = source.sample();
+        at(&mut second, base, 1.0);
+        (first, second)
+    }
+
+    #[test]
+    fn a_search_finds_a_quiet_process_the_busiest_and_largest_leave_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, second) = crowded(dir.path());
+        let source = source(dir.path());
+        let everything = source.snapshot(&first, &second, None);
+        assert!(everything.processes.iter().all(|p| p.pid != 5));
+        let found = source.snapshot(&first, &second, Some("quiet"));
+        found.validate().unwrap();
+        assert_eq!(
+            found.processes.iter().map(|p| p.pid).collect::<Vec<_>>(),
+            [5]
+        );
+        assert_eq!(found.processes[0].user, "postgres");
+        assert_eq!(
+            found.processes[0].command.as_deref(),
+            Some("/usr/sbin/quietd --config /etc/quiet.toml")
+        );
+        assert_eq!((found.process_matches, found.process_count), (1, 121));
+    }
+
+    #[test]
+    fn a_search_matches_the_command_line_user_or_pid_ignoring_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, second) = crowded(dir.path());
+        let source = source(dir.path());
+        for search in ["/ETC/QUIET.toml", "Postgres", "5"] {
+            let found = source.snapshot(&first, &second, Some(search));
+            assert!(found.processes.iter().any(|p| p.pid == 5), "{search}");
+        }
+        // Pids 105, 115, 125… and 150–159 also contain a 5.
+        let fives = source.snapshot(&first, &second, Some("5"));
+        let expected = 1
+            + (100..220)
+                .filter(|pid: &u32| pid.to_string().contains('5'))
+                .count();
+        assert_eq!(fives.process_matches as usize, expected);
+        assert!(
+            fives
+                .processes
+                .iter()
+                .all(|p| p.pid.to_string().contains('5'))
+        );
+        let none = source.snapshot(&first, &second, Some("nothing runs this"));
+        assert!(none.processes.is_empty());
+        assert_eq!((none.process_matches, none.process_count), (0, 121));
+    }
+
+    #[test]
+    fn many_matches_keep_the_busiest_and_largest_among_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, second) = crowded(dir.path());
+        let source = source(dir.path());
+        let workers = source.snapshot(&first, &second, Some("WORK"));
+        workers.validate().unwrap();
+        assert_eq!(workers.process_matches, 120);
+        // Idle workers rank by memory, so both leader lists are the largest.
+        assert_eq!(workers.processes.len(), TOP_PROCESSES);
+        assert_eq!(workers.processes[0].pid, 219);
+        assert!(workers.processes.iter().all(|p| p.name == "worker"));
+    }
+
+    #[test]
+    fn without_a_search_every_process_matches_and_the_selection_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, second) = crowded(dir.path());
+        let source = source(dir.path());
+        let everything = source.snapshot(&first, &second, None);
+        assert_eq!(
+            (everything.process_matches, everything.process_count),
+            (121, 121)
+        );
+        let pids: Vec<u32> = everything.processes.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, (170..220).rev().collect::<Vec<_>>());
+        assert!(everything.processes.iter().all(|p| p.user == "root"));
+    }
+
+    #[test]
+    fn a_process_that_exits_during_a_search_is_matched_only_by_what_was_sampled() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, second) = crowded(dir.path());
+        fs::remove_dir_all(dir.path().join("proc/5")).unwrap();
+        let source = source(dir.path());
+        let by_user = source.snapshot(&first, &second, Some("postgres"));
+        assert!(by_user.processes.is_empty());
+        assert_eq!(by_user.process_matches, 0);
+        let by_name = source.snapshot(&first, &second, Some("quietd"));
+        by_name.validate().unwrap();
+        assert_eq!(by_name.processes.len(), 1);
+        assert_eq!(by_name.processes[0].user, "");
+        assert_eq!(by_name.processes[0].command, None);
+    }
+
+    #[test]
+    fn a_reading_leaves_the_samples_free_for_the_sampler() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static MONITOR: OnceLock<Arc<Monitor>> = OnceLock::new();
+        static READ: AtomicBool = AtomicBool::new(false);
+        static FREE: AtomicBool = AtomicBool::new(false);
+        // Disks are read after the processes, so the sampler's lock is
+        // checked while the reply is still being built.
+        fn watching(_: &str) -> Option<FsUsage> {
+            let free = MONITOR
+                .get()
+                .is_some_and(|monitor| monitor.samples.try_lock().is_ok());
+            FREE.store(free, Ordering::SeqCst);
+            READ.store(true, Ordering::SeqCst);
+            None
+        }
+        let dir = tempfile::tempdir().unwrap();
+        crowded(dir.path());
+        write(dir.path(), "proc/self/mounts", "/dev/vda1 / ext4 rw 0 0\n");
+        let monitor = MONITOR.get_or_init(|| {
+            Monitor::new(Source {
+                statvfs: watching,
+                ..source(dir.path())
+            })
+        });
+        monitor.tick();
+        monitor.tick();
+        let found = monitor.snapshot(Some("postgres")).unwrap();
+        assert_eq!(found.process_matches, 1);
+        assert!(READ.load(Ordering::SeqCst));
+        assert!(FREE.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -998,7 +1200,7 @@ mod tests {
             "Name:\tsshd\nUid:\t1000\t1000\t1000\t1000\n",
         );
         let first = source.sample();
-        let snapshot = source.snapshot(&first, &first);
+        let snapshot = source.snapshot(&first, &first, None);
         snapshot.validate().unwrap();
         assert_eq!(snapshot.hostname, "atlas-01");
         assert_eq!(snapshot.kernel, "6.12.0");
@@ -1077,7 +1279,7 @@ mod tests {
             })
         };
         let sample = source.sample();
-        let snapshot = source.snapshot(&sample, &sample);
+        let snapshot = source.snapshot(&sample, &sample, None);
         let disks = &snapshot.disks;
         assert_eq!(
             disks
@@ -1111,7 +1313,10 @@ mod tests {
         write(root, "proc/meminfo", "MemTotal: 10 kB\nMemFree: 4 kB\n");
         let source = source(root);
         let sample = source.sample();
-        assert_eq!(source.snapshot(&sample, &sample).memory_used, 6 * 1024);
+        assert_eq!(
+            source.snapshot(&sample, &sample, None).memory_used,
+            6 * 1024
+        );
     }
 
     #[test]
@@ -1136,7 +1341,7 @@ mod tests {
             write(root, "proc/stat", &stat(n, true));
             monitor.tick();
         }
-        let snapshot = monitor.snapshot().unwrap();
+        let snapshot = monitor.snapshot(None).unwrap();
         let busy = &snapshot.cpus[0].history;
         assert_eq!(busy.len(), CORE_HISTORY, "capped at a minute");
         assert!(busy.iter().all(|v| *v == 100.0));
@@ -1173,7 +1378,7 @@ mod tests {
             .collect();
         let mut output = Vec::new();
         handle_bound(
-            || panic!("discovery must not sample metrics"),
+            |_| panic!("discovery must not sample metrics"),
             &no_services(),
             &no_containers(),
             input.as_slice(),
@@ -1207,9 +1412,9 @@ mod tests {
         );
         let mut output = Vec::new();
         handle_bound(
-            || {
+            |_| {
                 monitor.start();
-                monitor.snapshot()
+                monitor.snapshot(None)
             },
             &no_services(),
             &no_containers(),
@@ -1234,7 +1439,7 @@ mod tests {
         let call = call(9, Request::StableDisplay);
         let mut output = Vec::new();
         handle_bound(
-            || panic!("stable display requests must not sample metrics"),
+            |_| panic!("stable display requests must not sample metrics"),
             &no_services(),
             &no_containers(),
             wire::encode_request(&call).unwrap().as_slice(),
@@ -1259,7 +1464,7 @@ mod tests {
         monitor.tick();
         monitor.tick();
         let requests = [
-            call(11, Request::Metrics),
+            call(11, Request::Metrics { search: None }),
             call(
                 12,
                 Request::Containers(newport_protocol::monitor::containers::Request::Snapshot),
@@ -1291,6 +1496,41 @@ mod tests {
     }
 
     #[test]
+    fn a_metrics_call_hands_its_search_to_the_sampler() {
+        let requests = [
+            call(1, Request::Metrics { search: None }),
+            call(
+                2,
+                Request::Metrics {
+                    search: Some("nginx".into()),
+                },
+            ),
+        ];
+        let input: Vec<u8> = requests
+            .iter()
+            .flat_map(|call| wire::encode_request(call).unwrap())
+            .collect();
+        let seen = std::cell::RefCell::new(Vec::new());
+        let mut output = Vec::new();
+        handle_bound(
+            |search| {
+                seen.borrow_mut().push(search.map(str::to_owned));
+                Ok(Snapshot {
+                    cores: 1,
+                    ..Default::default()
+                })
+            },
+            &no_services(),
+            &no_containers(),
+            input.as_slice(),
+            &mut output,
+            &crate::transport::Cancellation::default(),
+        )
+        .unwrap();
+        assert_eq!(*seen.borrow(), [None, Some("nginx".to_owned())]);
+    }
+
+    #[test]
     fn invalid_frames_execute_no_operation() {
         let mut oversized = Vec::new();
         newport_protocol::encoding::protobuf::write_frame(
@@ -1301,7 +1541,7 @@ mod tests {
         for bytes in [oversized, vec![0x82], vec![4, 0x0a, 2, 0x12, 0]] {
             assert!(
                 handle_bound(
-                    || panic!("invalid call reached sampling"),
+                    |_| panic!("invalid call reached sampling"),
                     &no_services(),
                     &no_containers(),
                     bytes.as_slice(),
@@ -1318,9 +1558,9 @@ mod tests {
         use std::cell::Cell;
         let next = Cell::new(0);
         let requests = [
-            call(1, Request::Metrics),
-            call(2, Request::Metrics),
-            call(3, Request::Metrics),
+            call(1, Request::Metrics { search: None }),
+            call(2, Request::Metrics { search: None }),
+            call(3, Request::Metrics { search: None }),
         ];
         let input: Vec<u8> = requests
             .iter()
@@ -1328,7 +1568,7 @@ mod tests {
             .collect();
         let mut output = Vec::new();
         handle_bound(
-            || {
+            |_| {
                 next.set(next.get() + 1);
                 match next.get() {
                     1 => Err(Error {

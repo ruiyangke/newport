@@ -55,6 +55,7 @@ pub(crate) fn enum_maps() -> Vec<crate::desktop::wire::wire_tables::EnumMap> {
         map::<SocketSource>("newport.discovery.SocketSource"),
         map::<HolderState>("newport.discovery.HolderState"),
         map::<ContainerState>("newport.discovery.ContainerState"),
+        map::<EngineKind>("newport.discovery.EngineKind"),
         map::<Outcome>("newport.discovery.Outcome"),
         map::<IssueKind>("newport.discovery.IssueKind"),
     ]
@@ -62,6 +63,7 @@ pub(crate) fn enum_maps() -> Vec<crate::desktop::wire::wire_tables::EnumMap> {
 enumeration!(SocketSource { Diagnostic = 1, Proc = 2 });
 enumeration!(HolderState { Unresolved = 1, Observed = 2, Changed = 3 });
 enumeration!(ContainerState { Running = 1, Stopped = 2, Unknown = 3 });
+enumeration!(EngineKind { Docker = 1, Podman = 2 });
 enumeration!(Outcome { NotAttempted = 1, Complete = 2, Partial = 3, Unavailable = 4, NotApplicable = 5 });
 enumeration!(IssueKind { PermissionDenied = 1, Unsupported = 2, TimedOut = 3,
     Interrupted = 4, BudgetExceeded = 5, Io = 6, InvalidResponse = 7, Unavailable = 8 });
@@ -382,6 +384,7 @@ impl Record for Publication {
             target_port: u32::from(self.target_port),
             target_address: self.target_address.as_ref().map(address),
             compose: self.compose.as_ref().map(Record::to_wire),
+            engine_kind: self.engine_kind.to_wire(),
         }
     }
     fn from_wire(v: Self::Wire) -> Result<Self, Invalid> {
@@ -396,6 +399,7 @@ impl Record for Publication {
                 .map_err(|_| Invalid("discovery target port"))?,
             target_address: v.target_address.as_deref().map(parse_address).transpose()?,
             compose: v.compose.map(Compose::from_wire).transpose()?,
+            engine_kind: EngineKind::from_wire(v.engine_kind)?,
         })
     }
 }

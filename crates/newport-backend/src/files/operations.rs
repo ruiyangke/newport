@@ -47,7 +47,7 @@ fn file_error(error: anyhow::Error) -> String {
         // protocol errors intact rather than misclassifying every unexpected reply.
         Some(Error::UnexpectedBehavior(message)) if message == "sender dropped" =>
             "The file connection closed before the operation finished. Refresh the folder and check the destination before retrying a transfer.".into(),
-        _ => format!("{error:#}"),
+        _ => super::chain_message(&error),
     }
 }
 impl Drop for Guard<'_> {
@@ -315,6 +315,13 @@ mod tests {
             file_error(anyhow::anyhow!("Permission denied")),
             "Permission denied"
         );
+        let denied = Error::Status(russh_sftp::protocol::Status {
+            id: 1,
+            status_code: russh_sftp::protocol::StatusCode::PermissionDenied,
+            error_message: "Permission denied".into(),
+            language_tag: "en-US".into(),
+        });
+        assert_eq!(file_error(denied.into()), "Permission denied");
     }
 
     #[test]

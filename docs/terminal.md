@@ -28,6 +28,8 @@ If Needle can't start the shell for a new tab, the tab opens an ordinary shell i
 
 Terminals in the project editor are not kept. They end when you close them or the editor, or quit Newport.
 
+A terminal in the project editor starts in the project's folder. If your shell's startup files change folder, for example with a `cd` in `~/.profile`, the shell starts there instead. If the project's folder is gone or you can't open it, the shell starts in your home folder and says so.
+
 ## Work with tabs
 
 - Choose **+** (**New terminal**), or press **Cmd+T** on macOS, to open another shell.

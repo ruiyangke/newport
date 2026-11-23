@@ -17,6 +17,7 @@ fn publication(engine: &str) -> Publication {
         },
         target_port: 80,
         target_address: None,
+        engine_kind: newport_protocol::monitor::ports::discovery::EngineKind::Docker,
         compose: None,
     }
 }

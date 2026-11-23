@@ -21,6 +21,7 @@ impl Record for contract::Snapshot {
             network: self.network.iter().map(Record::to_wire).collect(),
             processes: self.processes.iter().map(Record::to_wire).collect(),
             process_count: self.process_count,
+            process_matches: self.process_matches,
         }
     }
     fn from_wire(value: Self::Wire) -> Result<Self, Invalid> {
@@ -60,6 +61,7 @@ impl Record for contract::Snapshot {
                 .map(contract::Process::from_wire)
                 .collect::<Result<_, _>>()?,
             process_count: value.process_count,
+            process_matches: value.process_matches,
         })
     }
 }

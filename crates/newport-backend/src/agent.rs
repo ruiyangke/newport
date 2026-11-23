@@ -245,12 +245,15 @@ pub enum Failure {
     Interrupted(String),
     /// The agent refused, or spoke out of protocol; trying again won't help.
     Refused(String),
+    /// Clipboard sharing broke on this connection. A new connection starts it
+    /// afresh, so it never stops browser links or clipboard requests for good.
+    Clipboard(String),
 }
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Failure::Interrupted(cause) => write!(f, "SSH transport interrupted: {cause}"),
-            Failure::Refused(message) => f.write_str(message),
+            Failure::Refused(message) | Failure::Clipboard(message) => f.write_str(message),
         }
     }
 }

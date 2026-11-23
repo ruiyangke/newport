@@ -249,7 +249,7 @@ async fn failure_never_returns_a_partial_representation_and_disable_is_immediate
 
 #[tokio::test]
 async fn protocol_errors_and_disconnect_revoke_even_already_delivered_results() {
-    for error in 0..5 {
+    for error in 0..4 {
         let (mut receiver, offer) = setup();
         let (read, _) = receiver.read(&offer, "text/plain").unwrap();
         data(&mut receiver, read.id(), 0, b"completed", true).unwrap();
@@ -257,9 +257,8 @@ async fn protocol_errors_and_disconnect_revoke_even_already_delivered_results() 
         let (waiting, _) = receiver.read(&offer, "text/plain").unwrap();
         let result = match error {
             0 => data(&mut receiver, waiting.id(), 5, b"wrong offset", true),
-            1 => data(&mut receiver, 1, 0, b"duplicate result", true),
-            2 => data(&mut receiver, 99, 0, b"unrequested", true),
-            3 => {
+            1 => data(&mut receiver, 99, 0, b"unrequested", true),
+            2 => {
                 let mut other = offer.clone();
                 other.offer.runtime = uuid::Uuid::new_v4().to_string();
                 accept(&mut receiver, Event::Offer { offer: Some(other) })
@@ -279,6 +278,41 @@ async fn protocol_errors_and_disconnect_revoke_even_already_delivered_results() 
     let (read, _) = receiver.read(&offer, "text/plain").unwrap();
     drop(receiver);
     assert!(read.receive().await.is_err());
+}
+
+#[tokio::test]
+async fn late_replies_to_withdrawn_or_finished_reads_keep_the_connection() {
+    let (mut receiver, first) = setup();
+    let (finished, _) = receiver.read(&first, "text/plain").unwrap();
+    let finished_id = finished.id();
+    data(&mut receiver, finished_id, 0, b"done", true).unwrap();
+    finished.receive().await.unwrap();
+    // Sent before the runtime announced a new offer, which it then refuses.
+    let (raced, _) = receiver.read(&first, "text/plain").unwrap();
+    let raced_id = raced.id();
+    let second = offer(2, 2);
+    accept(
+        &mut receiver,
+        Event::Offer {
+            offer: Some(second.clone()),
+        },
+    )
+    .unwrap();
+    assert!(raced.receive().await.is_err());
+    accept(
+        &mut receiver,
+        Event::Data {
+            id: raced_id,
+            offset: 0,
+            chunk: None,
+        },
+    )
+    .unwrap();
+    data(&mut receiver, finished_id, 4, b"again", true).unwrap();
+    assert!(receiver.connection().is_some());
+    let (next, _) = receiver.read(&second, "text/plain").unwrap();
+    data(&mut receiver, next.id(), 0, b"next", true).unwrap();
+    assert_eq!(next.receive().await.unwrap().bytes().unwrap(), b"next");
 }
 
 #[test]

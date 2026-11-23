@@ -68,6 +68,13 @@ impl Peer {
     }
 }
 fn start_holding(hold: Hold, refuse: Option<String>) -> (Session, Arc<Fake>, Receiver<Stream>) {
+    start_in(hold, refuse, None)
+}
+fn start_in(
+    hold: Hold,
+    refuse: Option<String>,
+    directory: Option<String>,
+) -> (Session, Arc<Fake>, Receiver<Stream>) {
     let (peers, receiver) = mpsc::channel();
     let fake = Arc::new(Fake {
         opens: Mutex::default(),
@@ -80,6 +87,7 @@ fn start_holding(hold: Hold, refuse: Option<String>) -> (Session, Arc<Fake>, Rec
         hold,
         80,
         24,
+        directory,
     )
     .unwrap();
     (session, fake, receiver)
@@ -124,12 +132,16 @@ fn wait(mut condition: impl FnMut() -> bool) {
 
 #[test]
 fn a_terminal_opens_with_one_typed_request_carrying_its_identity_size_and_holding() {
-    for hold in [
-        Hold::No,
-        Hold::WhenAvailable(Some([[1, 2, 3]; 3])),
-        Hold::Attach(uuid::Uuid::new_v4(), None),
+    for (hold, directory) in [
+        (Hold::No, None),
+        (Hold::No, Some("/srv/project")),
+        (
+            Hold::WhenAvailable(Some([[1, 2, 3]; 3])),
+            Some("/srv/project"),
+        ),
+        (Hold::Attach(uuid::Uuid::new_v4(), None), None),
     ] {
-        let (session, fake, receiver) = start_holding(hold, None);
+        let (session, fake, receiver) = start_in(hold, None, directory.map(str::to_owned));
         let peer = receiver.recv_timeout(Duration::from_secs(3)).unwrap();
         let requests = fake.opens.lock().unwrap();
         assert_eq!(requests.len(), 1);
@@ -138,6 +150,7 @@ fn a_terminal_opens_with_one_typed_request_carrying_its_identity_size_and_holdin
         assert_eq!((request.columns, request.rows), (80, 24));
         assert_eq!(request.persist, matches!(hold, Hold::WhenAvailable(_)));
         assert_eq!(request.attach, matches!(hold, Hold::Attach(..)));
+        assert_eq!(request.directory.as_deref(), directory);
         if let Hold::Attach(id, _) = hold {
             assert_eq!(request.session, id);
         }
@@ -236,6 +249,55 @@ fn output_is_acknowledged_only_when_the_view_reads_it() {
     assert!(matches!(peer.next(), Some(TerminalClient::Ack(value)) if value.bytes == 4));
 }
 #[test]
+fn a_burst_of_small_output_reaches_the_tab_in_one_read_and_wakes_it() {
+    let (session, mut peer) = ready();
+    let woken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    session.on_output({
+        let woken = woken.clone();
+        move || {
+            woken.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    let lines = (0..500).map(|line| format!("line {line}\r\n").into_bytes());
+    let expected: Vec<u8> = lines.clone().flatten().collect();
+    for line in lines {
+        peer.output(&line);
+    }
+    peer.event(TerminalEvent::Active(Box::new(stream::Active {
+        active: true,
+    })));
+    wait(|| {
+        matches!(
+            session.inbox.waiting().events.back(),
+            Some(Event::Active(_))
+        )
+    });
+    // The tab reads until the first empty read.
+    let mut events = Vec::new();
+    while let Ok(event) = session.try_read() {
+        events.push(event);
+    }
+    assert_eq!(events, [Event::Data(expected), Event::Active(true)]);
+    assert!(woken.load(Ordering::Relaxed) > 0);
+}
+#[test]
+fn the_inbox_holds_a_bounded_number_of_events_and_loses_none() {
+    let (session, mut peer) = ready();
+    let sending = thread::spawn(move || {
+        for active in (0..300).map(|n| n % 2 == 0) {
+            peer.event(TerminalEvent::Active(Box::new(stream::Active { active })));
+        }
+        peer
+    });
+    wait(|| session.inbox.waiting().events.len() == INBOX_EVENTS);
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(session.inbox.waiting().events.len(), INBOX_EVENTS);
+    for active in (0..300).map(|n| n % 2 == 0) {
+        assert_eq!(next(&session), Event::Active(active));
+    }
+    drop(sending.join().unwrap());
+}
+#[test]
 fn input_credit_remains_with_caller_until_backend_takes_bytes() {
     let (session, mut peer) = ready();
     let chunk = vec![b'p'; desktop::MAX_DATA];
@@ -270,7 +332,7 @@ fn final_events_require_eof_and_no_trailing_frames() {
     );
     peer.stream.write_all(&bytes).unwrap();
     peer.close();
-    assert!(matches!(next(&session), Event::Error(message) if message.contains("final outcome")));
+    assert!(matches!(next(&session), Event::Lost(message) if message.contains("final outcome")));
     let (session, mut peer) = ready();
     peer.event(TerminalEvent::Exit(Box::new(stream::Exit {
         code: Some(7),
@@ -282,7 +344,7 @@ fn final_events_require_eof_and_no_trailing_frames() {
 fn excess_taken_credit_closes_the_stream_without_restoring_input_capacity() {
     let (session, mut peer) = ready();
     peer.send(TerminalServer::Taken(Box::new(stream::Taken { bytes: 1 })));
-    assert!(matches!(next(&session), Event::Error(message) if message.contains("acknowledgement")));
+    assert!(matches!(next(&session), Event::Lost(message) if message.contains("acknowledgement")));
     assert!(session.send(vec![1]).is_err());
 }
 #[test]
@@ -293,7 +355,7 @@ fn truncated_or_closed_peer_reports_failure_instead_of_exit() {
             peer.stream.write_all(&[10, 8]).unwrap();
         }
         peer.close();
-        assert!(matches!(next(&session), Event::Error(_)));
+        assert!(matches!(next(&session), Event::Lost(_)));
         wait(|| session.is_closed());
     }
 }
@@ -308,21 +370,21 @@ fn dropping_the_session_interrupts_a_blocked_reader_and_releases_the_lease() {
 #[test]
 fn full_command_queue_preserves_acknowledgements_and_refuses_unqueued_input() {
     let (outgoing, commands) = mpsc::sync_channel(2);
-    let (events, output) = mpsc::sync_channel(1);
+    let inbox = Arc::new(Inbox::default());
     let lifecycle = Arc::new(Lifecycle::default());
     lifecycle.ready.store(true, Ordering::Release);
     lifecycle.flow.lock().unwrap().output(4).unwrap();
     let session = Session {
         id: uuid::Uuid::new_v4(),
         outgoing,
-        output,
+        inbox: inbox.clone(),
         lifecycle: lifecycle.clone(),
     };
     session.resize(80, 24).unwrap();
     session.resize(90, 30).unwrap();
     assert!(session.send(vec![1]).is_err());
     assert_eq!(lifecycle.unapplied.load(Ordering::Acquire), 0);
-    events.send(Event::Data(vec![0; 4])).unwrap();
+    assert!(inbox.push(Event::Data(vec![0; 4])));
     assert_eq!(session.try_read().unwrap(), Event::Data(vec![0; 4]));
     assert_eq!(lifecycle.pending_acks.load(Ordering::Acquire), 4);
     let (client, peer) = Stream::pair().unwrap();

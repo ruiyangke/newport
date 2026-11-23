@@ -225,7 +225,7 @@ mod tests {
         call.validate().unwrap();
         Response { id: 1, reply: Reply::StableDisplay(State::default()) }.validate_for(&call).unwrap();
         assert!(Response { id: 2, reply: Reply::StableDisplay(State::default()) }.validate_for(&call).is_err());
-        assert!(Call { id: 0, request: Request::Metrics }.validate().is_err());
+        assert!(Call { id: 0, request: Request::Metrics { search: None } }.validate().is_err());
     }
 
     #[test]

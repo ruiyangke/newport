@@ -16,7 +16,7 @@ Open **Overview** to see how busy the selected server is: CPU, memory, load, net
 - **Load** counts tasks running or waiting for CPU or disk, as a share of the cores. High load can explain a slow server even when CPU use is low.
 - **Cores** shows each core over the last minute.
 - **Storage** shows how full each filesystem is.
-- **Processes** lists the busiest and largest processes. Use **Find a process** to filter them.
+- **Processes** lists the busiest and largest processes. Use **Find a process** to search every process on the server by name, command line, user or PID. The list shows the busiest and largest matches and says how many processes match.
 
 ## Look back in time
 

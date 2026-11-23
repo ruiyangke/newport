@@ -5,12 +5,23 @@ fn holder(pid: u32) -> Holder {
         identity: Process { pid, start: 100 },
         name: Some("worker".into()),
         executable: Some("node".into()),
+        path: None,
         label: Some("node".into()),
         account: None,
         uid: Some(1000),
         project: None,
         kinds: vec!["Node"],
         details: vec![],
+    }
+}
+
+/// A holder of another program, run by the same account as `holder`.
+fn program(pid: u32, name: &str) -> Holder {
+    Holder {
+        name: Some(name.into()),
+        executable: Some(name.into()),
+        label: Some(name.into()),
+        ..holder(pid)
     }
 }
 
@@ -110,7 +121,7 @@ fn automatic_loopback_choice_rejects_ambiguous_or_incomplete_evidence() {
         let mut other = b.clone();
         match case {
             0 => socket(&mut other).holders.clear(),
-            1 => socket(&mut other).holders = vec![Arc::new(holder(3))],
+            1 => socket(&mut other).holders = vec![Arc::new(program(3, "other"))],
             2 => socket(&mut other).holder_coverage = HolderCoverage::Truncated,
             3 => other.scope = None,
             4 => other.reference.generation += 1,
@@ -118,11 +129,7 @@ fn automatic_loopback_choice_rejects_ambiguous_or_incomplete_evidence() {
             6 => other.endpoint.interface = Some(2),
             7 => other.endpoint.port += 1,
             8 => Arc::make_mut(other.scope.as_mut().unwrap()).boot = "reboot".into(),
-            9 => {
-                Arc::make_mut(&mut socket(&mut other).holders[0])
-                    .identity
-                    .start += 1
-            }
+            9 => Arc::make_mut(&mut socket(&mut other).holders[0]).uid = Some(1001),
             10 => socket(&mut other).holder_coverage = HolderCoverage::Partial,
             _ => {
                 Arc::make_mut(&mut socket(&mut other).holders[0]).project =
@@ -199,24 +206,25 @@ fn reuseport_sockets_with_the_same_holders_keep_both_identities() {
     assert_eq!(result[0].members.len(), 2);
     assert_eq!(result[0].label(), "Shared listener");
     assert_eq!(result[0].destination(None).unwrap().host, "10.0.0.4");
-    socket(&mut b).holders.pop();
+    socket(&mut b).holders[1] = Arc::new(program(2, "other"));
     assert_eq!(rows(vec![a, b]).len(), 2);
 }
 
 #[test]
-fn unknown_incomplete_and_reused_process_owners_do_not_merge() {
+fn unknown_incomplete_and_different_program_owners_do_not_merge() {
     let a = member(1, "0.0.0.0", vec![]);
     let b = member(2, "::", vec![]);
     assert_eq!(rows(vec![a, b]).len(), 2);
     let a = member(1, "0.0.0.0", vec![holder(7)]);
-    for case in 0..5 {
+    for case in 0..6 {
         let mut b = member(2, "::", vec![holder(7)]);
         match case {
             0 => socket(&mut b).holder_coverage = HolderCoverage::Partial,
-            1 => Arc::make_mut(&mut socket(&mut b).holders[0]).identity.start += 1,
+            1 => socket(&mut b).holders = vec![Arc::new(program(7, "other"))],
             2 => b.scope = None,
             3 => Arc::make_mut(b.scope.as_mut().unwrap()).boot = "reboot".into(),
-            _ => b.stale = true,
+            4 => b.stale = true,
+            _ => Arc::make_mut(&mut socket(&mut b).holders[0]).uid = Some(1001),
         }
         assert_eq!(rows(vec![a.clone(), b]).len(), 2, "case {case}");
     }
@@ -289,11 +297,7 @@ fn a_verified_service_with_matching_partial_holders_keeps_one_row() {
             0 => socket(&mut other).holder_coverage = HolderCoverage::Truncated,
             1 => socket(&mut other).units.clear(),
             2 => socket(&mut other).units[0].name = "other.socket".into(),
-            _ => {
-                Arc::make_mut(&mut socket(&mut other).holders[0])
-                    .identity
-                    .pid += 1
-            }
+            _ => socket(&mut other).holders = vec![Arc::new(program(7, "other"))],
         }
         assert_eq!(rows(vec![a.clone(), other]).len(), 2, "case {case}");
     }
@@ -428,4 +432,289 @@ fn labels_escape_controls_and_search_finds_all_holder_context() {
         Some(project("/only-the-second-process"));
     assert!(a.search_text().contains("only-the-second-process"));
     assert_eq!(a.label(), "Shared listener");
+}
+
+fn docker(pid: u32) -> Holder {
+    Holder {
+        account: Some("root".into()),
+        uid: Some(0),
+        kinds: vec!["Docker"],
+        ..program(pid, "docker-proxy")
+    }
+}
+
+/// A docker-proxy socket of a published port, in the system's docker.service.
+fn proxy(id: u32, address: &str, port: u16, holders: Vec<Holder>) -> Member {
+    let mut value = member(id, address, holders);
+    value.endpoint.port = port;
+    let socket = socket(&mut value);
+    socket.uid = 0;
+    socket.account = Some("root".into());
+    socket.holder_coverage = HolderCoverage::Partial;
+    socket.units = vec![Unit {
+        manager_uid: None,
+        name: "docker.service".into(),
+        socket_cgroup: true,
+    }];
+    value
+}
+
+fn published(id: usize, address: &str, port: u16, container: &str) -> Member {
+    let mut value = member(0, address, vec![]);
+    value.reference.record = Record::Publication(id);
+    value.endpoint.port = port;
+    value.kind = Kind::Publication(Publication {
+        engine: Some("engine".into()),
+        engine_kind: EngineKind::Docker,
+        container: format!("id-{container}"),
+        name: container.into(),
+        image: Some("debian:13".into()),
+        service: None,
+        compose: None,
+        directory: None,
+        project: None,
+        target_port: 22,
+        target_address: None,
+        running: Some(true),
+    });
+    value
+}
+
+#[test]
+fn sibling_processes_of_one_program_share_a_row_with_every_address() {
+    let ipv4 = proxy(1, "0.0.0.0", 2201, vec![docker(10)]);
+    let ipv6 = proxy(2, "::", 2201, vec![docker(11)]);
+    let groups = group(vec![ipv6.clone(), ipv4.clone()]);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].kind, GroupKind::System);
+    assert_eq!(groups[0].rows.len(), 1);
+    let row = &groups[0].rows[0];
+    assert_eq!(row.members, [ipv4, ipv6]);
+    assert_eq!(row.label(), "docker.service");
+    assert_eq!(row.destination(None).unwrap().host, "localhost");
+}
+
+#[test]
+fn holders_without_a_program_name_are_told_apart_by_process() {
+    let unnamed = |pid| Holder {
+        name: None,
+        executable: None,
+        label: None,
+        ..holder(pid)
+    };
+    let a = member(1, "0.0.0.0", vec![unnamed(7)]);
+    let b = member(2, "::", vec![unnamed(8)]);
+    assert_eq!(rows(vec![a.clone(), b]).len(), 2);
+    let b = member(2, "::", vec![unnamed(7)]);
+    assert_eq!(rows(vec![a, b]).len(), 1);
+}
+
+#[test]
+fn a_published_port_and_its_proxy_sockets_are_one_container_row() {
+    for unattributed in [false, true] {
+        let holders = |pid| {
+            if unattributed {
+                vec![]
+            } else {
+                vec![docker(pid)]
+            }
+        };
+        let members = vec![
+            proxy(1, "0.0.0.0", 2201, holders(10)),
+            proxy(2, "::", 2201, holders(11)),
+            published(0, "0.0.0.0", 2201, "fx-minimal"),
+            published(1, "::", 2201, "fx-minimal"),
+        ];
+        let groups = group(members.clone());
+        assert_eq!(groups.len(), 1, "unattributed {unattributed}");
+        assert_eq!(groups[0].kind, GroupKind::Containers);
+        assert_eq!(groups[0].rows.len(), 1);
+        let row = &groups[0].rows[0];
+        assert_eq!(row.members.len(), members.len());
+        assert_eq!(row.label(), "fx-minimal");
+        assert_eq!(row.identifying_members().count(), 2);
+        assert_eq!(row.destination(None).unwrap().host, "localhost");
+    }
+}
+
+#[test]
+fn a_published_port_in_a_compose_project_keeps_its_project_group() {
+    let mut publication = published(0, "0.0.0.0", 5432, "stack-db-1");
+    let Kind::Publication(value) = &mut publication.kind else {
+        unreachable!()
+    };
+    value.compose = Some("stack".into());
+    let groups = group(vec![
+        publication,
+        proxy(1, "0.0.0.0", 5432, vec![docker(10)]),
+    ]);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(
+        groups[0].kind,
+        GroupKind::Compose {
+            name: "stack".into(),
+            directory: None
+        }
+    );
+    assert_eq!(groups[0].rows[0].members.len(), 2);
+}
+
+#[test]
+fn another_program_or_address_on_a_published_port_keeps_its_own_row() {
+    let publication = published(0, "127.0.0.1", 2201, "fx-minimal");
+    let mut sshd = member(1, "127.0.0.1", vec![program(5, "sshd")]);
+    sshd.endpoint.port = 2201;
+    let mut elsewhere = member(2, "192.0.2.2", vec![]);
+    elsewhere.endpoint.port = 2201;
+    let other_port = proxy(3, "127.0.0.1", 2202, vec![docker(10)]);
+    let mut stale = proxy(4, "127.0.0.1", 2201, vec![docker(11)]);
+    stale.stale = true;
+    let grouped = rows(vec![
+        publication.clone(),
+        sshd,
+        elsewhere,
+        other_port,
+        stale,
+    ]);
+    assert_eq!(grouped.len(), 5);
+    assert!(
+        grouped
+            .iter()
+            .any(|row| row.members == [publication.clone()])
+    );
+}
+
+#[test]
+fn each_proxy_joins_the_container_published_on_its_address() {
+    let first = published(0, "127.0.0.1", 2201, "first");
+    let second = published(1, "10.0.0.4", 2201, "second");
+    let grouped = rows(vec![
+        first,
+        second,
+        proxy(1, "127.0.0.1", 2201, vec![docker(10)]),
+        proxy(2, "10.0.0.4", 2201, vec![docker(11)]),
+    ]);
+    assert_eq!(grouped.len(), 2);
+    for row in grouped {
+        let label = row.label();
+        assert_eq!(row.members.len(), 2, "{label}");
+        let addresses: BTreeSet<_> = row.members.iter().map(|m| m.endpoint.address).collect();
+        assert_eq!(addresses.len(), 1, "{label}");
+    }
+}
+
+fn running(member: &mut Member, value: Option<bool>) {
+    let Kind::Publication(publication) = &mut member.kind else {
+        panic!("publication fixture");
+    };
+    publication.running = value;
+}
+
+#[test]
+fn a_stopped_container_never_takes_a_listener_on_its_port() {
+    let hidden = |id| {
+        let mut value = member(id, "0.0.0.0", vec![]);
+        value.endpoint.port = 2201;
+        socket(&mut value).holder_coverage = HolderCoverage::Partial;
+        value
+    };
+    for (state, joins) in [(Some(true), true), (None, true), (Some(false), false)] {
+        let mut publication = published(0, "0.0.0.0", 2201, "fx-minimal");
+        running(&mut publication, state);
+        let grouped = rows(vec![
+            publication,
+            hidden(1),
+            proxy(2, "::", 2201, vec![docker(10)]),
+        ]);
+        assert_eq!(grouped.len(), if joins { 1 } else { 3 }, "{state:?}");
+    }
+}
+
+#[test]
+fn a_socket_a_complete_scan_found_no_holder_for_is_not_a_proxy() {
+    let mut empty = member(1, "0.0.0.0", vec![]);
+    empty.endpoint.port = 2201;
+    let publication = published(0, "0.0.0.0", 2201, "fx-minimal");
+    assert_eq!(rows(vec![publication.clone(), empty.clone()]).len(), 2);
+    socket(&mut empty).holder_coverage = HolderCoverage::Partial;
+    assert_eq!(rows(vec![publication, empty]).len(), 1);
+}
+
+#[test]
+fn only_a_known_proxy_joins_a_publication_in_the_other_family() {
+    let mut hidden = member(1, "::", vec![]);
+    hidden.endpoint.port = 80;
+    socket(&mut hidden).ipv6_only = Some(true);
+    socket(&mut hidden).holder_coverage = HolderCoverage::Partial;
+    let publication = published(0, "0.0.0.0", 80, "web");
+    assert_eq!(rows(vec![publication.clone(), hidden]).len(), 2);
+    let named = proxy(2, "::", 80, vec![docker(10)]);
+    assert_eq!(rows(vec![publication.clone(), named.clone()]).len(), 1);
+    // Two wildcard publications reach the proxy equally: it keeps its own row.
+    let mut other = published(1, "0.0.0.0", 80, "other");
+    let Kind::Publication(value) = &mut other.kind else {
+        unreachable!()
+    };
+    value.engine = Some("another-engine".into());
+    let grouped = rows(vec![publication, other, named.clone()]);
+    assert_eq!(grouped.len(), 3);
+    assert!(grouped.iter().any(|row| row.members == [named.clone()]));
+}
+
+#[test]
+fn every_engine_proxy_joins_its_container() {
+    for name in [
+        "docker-proxy",
+        "rootlesskit",
+        "rootlessport",
+        "pasta",
+        "pasta.avx2",
+        "slirp4netns",
+    ] {
+        let grouped = rows(vec![
+            published(0, "0.0.0.0", 8080, "web"),
+            proxy(1, "::", 8080, vec![program(10, name)]),
+        ]);
+        assert_eq!(grouped.len(), 1, "{name}");
+    }
+    let grouped = rows(vec![
+        published(0, "0.0.0.0", 8080, "web"),
+        proxy(1, "::", 8080, vec![program(10, "nginx")]),
+    ]);
+    assert_eq!(grouped.len(), 2);
+}
+
+#[test]
+fn one_program_name_with_another_executable_or_account_is_another_program() {
+    let with = |pid, path: Option<&str>, uid: Option<u32>| Holder {
+        path: path.map(str::to_owned),
+        uid,
+        ..program(pid, "python")
+    };
+    let pair = |a: Holder, b: Holder| {
+        rows(vec![
+            member(1, "0.0.0.0", vec![a]),
+            member(2, "::", vec![b]),
+        ])
+        .len()
+    };
+    let system = Some("/usr/bin/python3");
+    assert_eq!(
+        pair(with(7, system, Some(1000)), with(8, system, Some(1000))),
+        1
+    );
+    assert_eq!(
+        pair(
+            with(7, system, Some(1000)),
+            with(8, Some("/opt/venv/bin/python"), Some(1000))
+        ),
+        2
+    );
+    assert_eq!(
+        pair(with(7, system, Some(1000)), with(8, system, Some(1001))),
+        2
+    );
+    // Unknown accounts are not the same account.
+    assert_eq!(pair(with(7, system, None), with(8, system, None)), 2);
+    assert_eq!(pair(with(7, system, None), with(7, system, None)), 1);
 }

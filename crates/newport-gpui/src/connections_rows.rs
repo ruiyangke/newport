@@ -245,6 +245,9 @@ impl RenderOnce for RowPresentation {
     }
 }
 
+/// Flex shrink weights are relative, so a large one makes a container row's
+/// target give up all its width before the name gives up any.
+const TARGET_SHRINK: f32 = 1000.;
 /// Width of the table's actions column: toggle, menu and the Always on icon.
 const ACTIONS_COLUMN_WIDTH: f32 = 104.;
 const TABLE_PORT_WIDTH: f32 = 84.;
@@ -266,6 +269,8 @@ pub(super) fn project_name(key: &str) -> &str {
         "Other services"
     } else if key == newport_domain::port_grouping::SYSTEM {
         "System services"
+    } else if key == newport_domain::port_grouping::CONTAINERS {
+        "Containers"
     } else {
         key.strip_prefix("compose:")
             .unwrap_or_else(|| key.rsplit('/').next().unwrap_or(key))
@@ -341,8 +346,8 @@ pub(super) fn editor_draft(
     let existing = tunnels.iter().any(|saved| saved.id == tunnel.id);
     if !existing {
         tunnel.name = name.to_owned();
-        tunnel.project = (!project.is_empty() && project != newport_domain::port_grouping::SYSTEM)
-            .then(|| project.to_owned());
+        tunnel.project =
+            newport_domain::port_grouping::is_project(project).then(|| project.to_owned());
     }
     Ok((tunnel, existing))
 }
@@ -363,6 +368,7 @@ pub(super) struct Row {
     hover: std::rc::Rc<crate::connections_hover::Card>,
     context: String,
     generated_title: bool,
+    target: Option<String>,
     detail: String,
     address: String,
     open: Option<(configuration::Tunnel, Option<u16>)>,
@@ -383,6 +389,7 @@ impl Row {
         entry: Entry,
         runtime: Option<&configuration::Runtime>,
         branches: bool,
+        login: Option<&str>,
     ) -> Self {
         let p = &entry.port;
         let worktree = (!p.reverse()).then(|| p.worktree()).flatten();
@@ -539,6 +546,7 @@ impl Row {
             local_address(&entry)
         };
         let identity = p.key();
+        let target = p.target();
         let transport = connection;
         let process_icon = crate::connections_process_icon::ProcessIcon::for_port(p);
         let mut hover = crate::connections_hover::Card::new(
@@ -549,6 +557,7 @@ impl Row {
                 service.clone()
             },
             process_icon,
+            login,
         );
         if !entry.forwards.is_empty() || entry.is_saved() {
             hover.forward = Some(crate::connections_hover::Forward {
@@ -575,6 +584,7 @@ impl Row {
             process_icon,
             context,
             generated_title,
+            target,
             detail: details.join(" · "),
             address,
             open,
@@ -863,6 +873,10 @@ impl Newport {
             });
         let hover = row.hover.clone();
         let (display_title, display_detail) = row.presentation_text(table);
+        let named = match &row.target {
+            Some(target) => format!("{display_title}, {target}"),
+            None => display_title.clone(),
+        };
         let mut route = Some(self.connection_route(&row, cx));
         let tone = match row.rank {
             0 => theme::error(cx.theme().is_dark()),
@@ -879,7 +893,7 @@ impl Newport {
             .when(table, |v| {
                 v.role(accesskit::Role::Cell)
                     .aria_column_index(2)
-                    .aria_label(display_title.clone())
+                    .aria_label(named.clone())
                     .aria_description(
                         [
                             row.detail.as_str(),
@@ -922,7 +936,7 @@ impl Newport {
                             .max_w_full()
                             .accessibility_label(format!(
                                 "Connection details for port {}: {}",
-                                row.port, display_title
+                                row.port, named
                             ))
                             .child(
                                 div()
@@ -933,14 +947,35 @@ impl Newport {
                                     .child(row.process_icon.render(cx))
                                     .child(
                                         div()
+                                            .debug_selector(|| {
+                                                format!("connection-title-{}", row.key)
+                                            })
                                             .min_w_0()
                                             .text_size(px(crate::ui::FONT_SIZE))
                                             .font_weight(FontWeight::MEDIUM)
                                             .truncate()
                                             .child(display_title.clone()),
                                     )
-                                    .when(row.entry.port.publication().is_some(), |v| {
-                                        v.child(crate::controls::tag("Docker", cx))
+                                    .when_some(row.entry.port.publication(), |v, publication| {
+                                        v.child(crate::controls::tag(
+                                            publication.engine_kind.label(),
+                                            cx,
+                                        ))
+                                    })
+                                    .when_some(row.target.clone(), |v, target| {
+                                        // Narrow rows give up the target before the name.
+                                        v.child(
+                                            div()
+                                                .debug_selector(|| {
+                                                    format!("connection-target-{}", row.key)
+                                                })
+                                                .min_w_0()
+                                                .flex_shrink(TARGET_SHRINK)
+                                                .text_size(px(crate::ui::FONT_SIZE))
+                                                .text_color(cx.theme().muted_foreground)
+                                                .truncate()
+                                                .child(target),
+                                        )
                                     }),
                             ),
                         ),
@@ -1060,10 +1095,7 @@ impl Newport {
             .when_some(position, |v, (index, count)| {
                 v.aria_position_in_set(index).aria_size_of_set(count)
             })
-            .aria_label(format!(
-                "Port {}: {}, {}",
-                row.port, display_title, row.status
-            ))
+            .aria_label(format!("Port {}: {}, {}", row.port, named, row.status))
             .flex()
             .items_center()
             .w_full()
@@ -1469,6 +1501,7 @@ mod tests {
             },
             None,
             false,
+            None,
         )
     }
     #[test]
@@ -1487,12 +1520,12 @@ mod tests {
             }],
         };
         for name in ["Vite", "Vite · feature", "Terminal · 127.0.0.1:5179"] {
-            let row = Row::new("/srv/app", entry(name), None, true);
+            let row = Row::new("/srv/app", entry(name), None, true, None);
             assert_eq!(row.presentation_text(false), ("Vite".into(), "".into()));
             assert_eq!(row.status, "Forwarding off");
             assert_eq!(row.entry.forwards[0].name, name);
         }
-        let row = Row::new("/srv/app", entry("Customer preview"), None, true);
+        let row = Row::new("/srv/app", entry("Customer preview"), None, true, None);
         assert_eq!(
             row.presentation_text(false),
             ("Customer preview".into(), "".into())
@@ -1502,14 +1535,20 @@ mod tests {
             A,
             state(ConnectionStatus::Error, Some("Connection refused")),
         )]);
-        let row = Row::new("/srv/app", entry("Customer preview"), Some(&refused), true);
+        let row = Row::new(
+            "/srv/app",
+            entry("Customer preview"),
+            Some(&refused),
+            true,
+            None,
+        );
         assert_eq!(
             row.presentation_text(false),
             ("Customer preview".into(), "Connection refused".into())
         );
         let mut saved = entry("Customer preview");
         saved.port = Port::saved(saved.forwards[0].clone());
-        let row = Row::new("/srv/app", saved.clone(), None, true);
+        let row = Row::new("/srv/app", saved.clone(), None, true, None);
         assert_eq!(row.presentation_text(false).0, "Customer preview");
         let detail = row.presentation_text(false).1;
         assert!(detail == "Destination not observed", "{detail}");
@@ -1522,13 +1561,13 @@ mod tests {
                 "",
             ),
         ] {
-            let row = Row::new("/srv/app", saved.clone(), Some(&runtime), true);
+            let row = Row::new("/srv/app", saved.clone(), Some(&runtime), true, None);
             let detail = row.presentation_text(false).1;
             assert!(detail.starts_with("Destination not observed"), "{detail}");
             assert!(detail.contains(status), "{detail}");
         }
         let connected = runtime(&[(A, state(ConnectionStatus::Connected, None))]);
-        let row = Row::new("/srv/app", saved, Some(&connected), true);
+        let row = Row::new("/srv/app", saved, Some(&connected), true, None);
         assert_eq!(row.presentation_text(false).1, "Destination not observed");
     }
 
@@ -1580,7 +1619,7 @@ mod tests {
             (UP, state(ConnectionStatus::Connected, None)),
             (FAILED, state(ConnectionStatus::Error, Some("Denied"))),
         ]);
-        let row = Row::new("", entry, Some(&runtime), false);
+        let row = Row::new("", entry, Some(&runtime), false, None);
         assert_eq!(row.status, "Failed");
         assert_eq!(row.detail, "Denied");
         assert_eq!(row.rank, 0);
@@ -1605,7 +1644,7 @@ mod tests {
                 Some("Connection refused"),
             )],
         );
-        let row = Row::new("", entry.clone(), Some(&runtime), false);
+        let row = Row::new("", entry.clone(), Some(&runtime), false, None);
         assert_eq!(row.transport, Some(ConnectionStatus::Connected));
         assert_eq!(row.status, "Unreachable");
         assert!(row.fix.is_none());
@@ -1614,20 +1653,20 @@ mod tests {
             ..state(ConnectionStatus::Reconnecting, None)
         };
         fixture::set(&mut runtime.tunnels, id(UP), retrying(3));
-        let row = Row::new("", entry.clone(), Some(&runtime), false);
+        let row = Row::new("", entry.clone(), Some(&runtime), false, None);
         assert_eq!(row.status, "Retrying…");
         assert_eq!(row.detail, row.status);
         assert!(row.fix.is_none());
         // A high attempt number still reads as retrying.
         fixture::set(&mut runtime.tunnels, id(UP), retrying(12));
-        let row = Row::new("", entry.clone(), Some(&runtime), false);
+        let row = Row::new("", entry.clone(), Some(&runtime), false, None);
         assert_eq!(row.status, "Retrying…");
         fixture::set(
             &mut runtime.tunnels,
             id(UP),
             state(ConnectionStatus::Error, None),
         );
-        let row = Row::new("", entry, Some(&runtime), false);
+        let row = Row::new("", entry, Some(&runtime), false, None);
         assert_eq!(row.detail, "The forward stopped.");
         assert_eq!(row.fix.as_deref(), Some(UP));
     }
@@ -1649,7 +1688,7 @@ mod tests {
             vec![health(8080, DestinationStatus::Unavailable, None)],
         );
         for _ in 0..2 {
-            let row = Row::new("", entry.clone(), Some(&runtime), false);
+            let row = Row::new("", entry.clone(), Some(&runtime), false, None);
             assert_eq!(row.transport, Some(ConnectionStatus::Error));
             assert_eq!(row.status, "Failed");
             assert_eq!(row.fix.as_deref(), Some(FAILED));
@@ -1689,7 +1728,7 @@ mod tests {
             second.id,
             state(ConnectionStatus::Connected, None),
         );
-        let row = Row::new("", entry.clone(), Some(&runtime), false);
+        let row = Row::new("", entry.clone(), Some(&runtime), false, None);
         assert_eq!(row.address, "localhost:10002");
         assert_eq!(row.open, Some((second.clone(), Some(3002))));
         set_health(
@@ -1704,7 +1743,7 @@ mod tests {
                 health(3002, DestinationStatus::Reachable, None),
             ],
         );
-        let row = Row::new("", entry.clone(), Some(&runtime), false);
+        let row = Row::new("", entry.clone(), Some(&runtime), false, None);
         assert_eq!(row.status, "Forwarding");
         assert!(!row.problem);
         for status in [
@@ -1732,7 +1771,7 @@ mod tests {
             port: Port::saved(second.clone()),
             forwards: vec![second.clone()],
         };
-        let row = Row::new("", saved, Some(&runtime), false);
+        let row = Row::new("", saved, Some(&runtime), false, None);
         assert_eq!(row.address, "localhost:10000–10005");
         assert_eq!(row.open, Some((second, None)));
         assert!(
@@ -1758,9 +1797,9 @@ mod tests {
                 ..tunnel(A)
             }],
         };
-        let row = Row::new("/srv/app", entry, None, false);
+        let row = Row::new("/srv/app", entry, None, false, None);
         assert_eq!(row.title, "Customer preview");
-        assert_eq!(row.detail, "Vite · packages/web/ · Node · all interfaces");
+        assert_eq!(row.detail, "Vite · packages/web/ · Node · all addresses");
         let mut first = super::tests::row(100, "/srv/z");
         first.project_name = "Alpha".into();
         let mut second = super::tests::row(3, "/srv/a");
@@ -1812,8 +1851,8 @@ mod tests {
             addresses: vec!["127.0.0.1".into()],
             forwards: vec![],
         };
-        let first = Row::new("/srv", make("/srv/app/"), None, true);
-        let second = Row::new("/srv", make("/srv/app"), None, true);
+        let first = Row::new("/srv", make("/srv/app/"), None, true, None);
+        let second = Row::new("/srv", make("/srv/app"), None, true, None);
         assert_eq!(first.worktree, second.worktree);
         assert_eq!(first.detail, "packages/web/ · Node");
         assert_eq!(first.detail, second.detail);

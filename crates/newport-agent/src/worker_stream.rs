@@ -412,6 +412,7 @@ fn serve(
     stop.check()?;
     use std::os::unix::process::CommandExt;
     let child = Command::new(executable)
+        .arg0(crate::cli::WORKER_NAME)
         .args(["worker", build, runtime])
         .arg(worker_socket)
         .arg(&open.worker_id)

@@ -27,6 +27,10 @@ use std::{
 /// Typing pauses this long before the server sees the new text.
 const SYNC_DELAY: Duration = Duration::from_millis(150);
 
+/// A starting server that hasn't answered `initialize` by then gets a notice,
+/// so a stuck server doesn't look like a slow one for ever.
+const ANSWER_LIMIT: Duration = Duration::from_secs(15);
+
 /// The server for a file, and the language id it opens with.
 pub(super) fn server_for(path: &str) -> Option<(&'static str, &'static str)> {
     let jsx = path.ends_with(".jsx");
@@ -184,6 +188,8 @@ pub(super) fn uri_path(uri: &lsp_types::Uri) -> Option<String> {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Status {
     Starting,
+    /// Still starting after [`ANSWER_LIMIT`]; an answer makes it ready.
+    NotAnswering,
     LoadingEnvironment,
     Indexing(String),
     Ready,
@@ -260,6 +266,7 @@ impl Status {
         Some(match self {
             Self::Ready => return None,
             Self::Starting => "Starting",
+            Self::NotAnswering => "Not answering",
             Self::LoadingEnvironment => "Loading .envrc",
             // The server's own words for its work, such as "Indexing".
             Self::Indexing(title) => title,
@@ -355,6 +362,13 @@ fn notice(server: &str, status: &Status, root: &str) -> Option<(String, Vec<Noti
             format!(".envrc changed. Restart {server} to use the new environment."),
             vec![Restart],
         ),
+        Status::NotAnswering => (
+            format!(
+                "{server} hasn’t answered for {} seconds.",
+                ANSWER_LIMIT.as_secs()
+            ),
+            vec![Restart],
+        ),
         Status::Stopped(Some(reason)) => (format!("{server} stopped: {reason}"), vec![Restart]),
         Status::Stopped(None) => (format!("{server} stopped."), vec![Restart]),
         _ => return None,
@@ -411,6 +425,8 @@ pub(super) struct Server {
     progress: RefCell<HashMap<String, String>>,
     /// The latest diagnostics per path, in the server's encoding.
     diagnostics: RefCell<HashMap<String, Vec<lsp_types::Diagnostic>>>,
+    /// Counts [`ANSWER_LIMIT`] while the server is starting; dropping it stops the count.
+    answer_wait: RefCell<Option<Task<()>>>,
 }
 impl Server {
     fn new(id: &'static str, envrc: bool) -> Self {
@@ -427,6 +443,7 @@ impl Server {
             status: RefCell::new(Status::Starting),
             progress: RefCell::new(HashMap::new()),
             diagnostics: RefCell::new(HashMap::new()),
+            answer_wait: RefCell::new(None),
         }
     }
 
@@ -561,7 +578,7 @@ impl Server {
         let mut status = self.status.borrow_mut();
         if !matches!(
             *status,
-            Status::Starting | Status::Ready | Status::Indexing(_)
+            Status::Starting | Status::NotAnswering | Status::Ready | Status::Indexing(_)
         ) {
             return;
         }
@@ -1236,6 +1253,12 @@ impl CodeWorkspace {
     ) -> Rc<Server> {
         let server = Rc::new(Server::new(id, envrc));
         self.language_servers.insert(id, server.clone());
+        self.watch_language_answer(&server, cx);
+        // Hermetic tests open no stream: the server stays starting.
+        #[cfg(test)]
+        if self.test_rpc.is_some() {
+            return server;
+        }
         let (remote, scope, root) = (
             self.server.clone(),
             self.connection.clone(),
@@ -1290,6 +1313,32 @@ impl CodeWorkspace {
         server
     }
 
+    /// Count [`ANSWER_LIMIT`] while the server is starting, and stop
+    /// counting once it isn't.
+    fn watch_language_answer(&self, server: &Rc<Server>, cx: &mut Context<Self>) {
+        if *server.status.borrow() != Status::Starting {
+            server.answer_wait.borrow_mut().take();
+            return;
+        }
+        if server.answer_wait.borrow().is_some() {
+            return;
+        }
+        let weak = Rc::downgrade(server);
+        let wait = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(ANSWER_LIMIT).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(server) = this.current_language_server(&weak) {
+                    let mut status = server.status.borrow_mut();
+                    if *status == Status::Starting {
+                        *status = Status::NotAnswering;
+                    }
+                }
+                cx.notify();
+            });
+        });
+        *server.answer_wait.borrow_mut() = Some(wait);
+    }
+
     /// The server `weak` points to, while it is still this worktree's.
     fn current_language_server(&self, weak: &Weak<Server>) -> Option<Rc<Server>> {
         let server = weak.upgrade()?;
@@ -1331,6 +1380,8 @@ impl CodeWorkspace {
                 if !status.explains_stop() {
                     *status = Status::Stopped(Some(error));
                 }
+                drop(status);
+                self.watch_language_answer(&server, cx);
                 cx.notify();
                 return;
             }
@@ -1365,6 +1416,7 @@ impl CodeWorkspace {
         connection.notify::<lsp_types::notification::Initialized>(lsp_types::InitializedParams {});
         server.ready.set(true);
         server.settle();
+        self.watch_language_answer(&server, cx);
         for buffer in &self.buffers {
             if let Some(attached) = &buffer.lsp
                 && Rc::ptr_eq(&attached.server, &server)
@@ -1386,7 +1438,9 @@ impl CodeWorkspace {
             return;
         };
         match event {
-            Event::Request(request) => self.language_server_request(server, request, window, cx),
+            Event::Request(request) => {
+                self.language_server_request(server.clone(), request, window, cx)
+            }
             Event::Configuration(config) => {
                 self.configure_language_server(server.clone(), Some(config), cx)
             }
@@ -1473,6 +1527,7 @@ impl CodeWorkspace {
                 }
             }
         }
+        self.watch_language_answer(&server, cx);
         cx.notify();
     }
 
@@ -2021,6 +2076,12 @@ mod tests {
         *server.status.borrow_mut() = Status::EnvironmentChanged;
         server.update_progress(&json!({"token": 1, "value": {"kind": "begin", "title": "x"}}));
         assert_eq!(*server.status.borrow(), Status::EnvironmentChanged);
+        // A late answer from a server that wasn't answering still settles.
+        let late = Server::new("gopls", true);
+        *late.status.borrow_mut() = Status::NotAnswering;
+        late.ready.set(true);
+        late.settle();
+        assert_eq!(*late.status.borrow(), Status::Ready);
     }
 
     #[test]
@@ -2103,6 +2164,7 @@ mod tests {
         );
         assert_eq!(Status::LoadingEnvironment.label(), Some("Loading .envrc"));
         assert_eq!(Status::NotInstalled.label(), Some("Not installed"));
+        assert_eq!(Status::NotAnswering.label(), Some("Not answering"));
         assert_eq!(
             Status::DirenvMissing {
                 path: "/w/.envrc".into()
@@ -2156,6 +2218,13 @@ mod tests {
                 vec![NoticeAction::Restart]
             )
         );
+        assert_eq!(
+            notice("gopls", &Status::NotAnswering, "/srv/app/"),
+            Some((
+                "gopls hasn’t answered for 15 seconds.".into(),
+                vec![NoticeAction::Restart]
+            ))
+        );
         for quiet in [
             Status::Ready,
             Status::Starting,
@@ -2163,6 +2232,108 @@ mod tests {
         ] {
             assert_eq!(say(quiet), None);
         }
+    }
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::{ANSWER_LIMIT, NoticeAction, Server, Status, notice, test_support, worker};
+    use crate::project_editor::{
+        CodeWorkspace,
+        interaction_tests::{draw, fixture, open},
+    };
+    use gpui_kit::{Entity, TestAppContext, VisualTestContext};
+    use newport_client::lsp::Event;
+    use std::{
+        rc::{Rc, Weak},
+        time::Duration,
+    };
+
+    /// Attach the tab's server, which starts and never answers by itself.
+    fn start(view: &Entity<CodeWorkspace>, cx: &mut VisualTestContext) -> Weak<Server> {
+        open(view, cx, "/repo/main.rs");
+        let server = view.update_in(cx, |view, window, cx| {
+            view.attach_language_server("/repo/main.rs", window, cx);
+            Rc::downgrade(&view.language_servers["rust-analyzer"])
+        });
+        draw(cx);
+        server
+    }
+
+    fn status(server: &Weak<Server>) -> Status {
+        server.upgrade().unwrap().status.borrow().clone()
+    }
+
+    fn wait(cx: &mut VisualTestContext, time: Duration) {
+        cx.executor().advance_clock(time);
+        draw(cx);
+    }
+
+    fn shows_notice(cx: &mut VisualTestContext) -> bool {
+        cx.debug_bounds("code-language-notice").is_some()
+    }
+
+    #[gpui_kit::test]
+    fn a_server_that_does_not_answer_says_so_until_it_does(cx: &mut TestAppContext) {
+        let (view, cx, _) = fixture(cx);
+        let server = start(&view, cx);
+        wait(cx, ANSWER_LIMIT - Duration::from_millis(100));
+        assert_eq!(status(&server), Status::Starting);
+        assert!(!shows_notice(cx));
+        wait(cx, Duration::from_millis(100));
+        assert_eq!(status(&server), Status::NotAnswering);
+        assert!(shows_notice(cx));
+        assert_eq!(
+            notice("rust-analyzer", &status(&server), "/repo").map(|(_, actions)| actions),
+            Some(vec![NoticeAction::Restart])
+        );
+        let (connection, _writer, _messages) = test_support::connection();
+        *server.upgrade().unwrap().connection.borrow_mut() = Some(connection);
+        view.update(cx, |view, cx| {
+            view.language_server_initialized(&server, Ok(Default::default()), cx)
+        });
+        draw(cx);
+        assert_eq!(status(&server), Status::Ready);
+        assert!(!shows_notice(cx));
+    }
+
+    #[gpui_kit::test]
+    fn loading_the_environment_is_not_counted_as_not_answering(cx: &mut TestAppContext) {
+        let (view, cx, _) = fixture(cx);
+        let server = start(&view, cx);
+        let environment = |state, cx: &mut VisualTestContext| {
+            view.update_in(cx, |view, window, cx| {
+                view.language_server_event(&server, Event::Environment(state), window, cx)
+            });
+            draw(cx);
+        };
+        let path = || "/repo/.envrc".to_owned();
+        environment(worker::Environment::Loading { path: path() }, cx);
+        wait(cx, ANSWER_LIMIT * 2);
+        assert_eq!(status(&server), Status::LoadingEnvironment);
+        environment(worker::Environment::Loaded { path: path() }, cx);
+        wait(cx, ANSWER_LIMIT - Duration::from_millis(100));
+        assert_eq!(status(&server), Status::Starting);
+        wait(cx, Duration::from_millis(100));
+        assert_eq!(status(&server), Status::NotAnswering);
+    }
+
+    #[gpui_kit::test]
+    fn restart_from_the_notice_starts_a_new_server(cx: &mut TestAppContext) {
+        let (view, cx, _) = fixture(cx);
+        let stuck = start(&view, cx);
+        wait(cx, ANSWER_LIMIT);
+        assert_eq!(status(&stuck), Status::NotAnswering);
+        let restarted = view.update_in(cx, |view, window, cx| {
+            view.language_action("rust-analyzer", NoticeAction::Restart, window, cx);
+            Rc::downgrade(&view.language_servers["rust-analyzer"])
+        });
+        draw(cx);
+        assert!(stuck.upgrade().is_none(), "the stuck server shuts down");
+        assert_eq!(status(&restarted), Status::Starting);
+        assert!(!shows_notice(cx));
+        wait(cx, ANSWER_LIMIT);
+        assert_eq!(status(&restarted), Status::NotAnswering);
     }
 }
 

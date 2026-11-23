@@ -25,6 +25,14 @@ message MetricsSnapshot {
   repeated MetricsNetwork network = 14;
   repeated MetricsProcess processes = 15;
   uint32 process_count = 16;
+  // Processes that match the request's search; every process without one.
+  uint32 process_matches = 17;
+}
+
+message MetricsRequest {
+  // Case-insensitive text found in a process's name, command line, user or
+  // PID. The snapshot's processes are then chosen among the matches.
+  optional string search = 1;
 }
 
 message MetricsCore {
@@ -585,7 +593,7 @@ message Call {
   reserved "ports";
   uint64 id = 1;
   oneof request {
-    newport.wire.Present metrics = 2;
+    MetricsRequest metrics = 2;
     newport.wire.Present stable_display = 3;
     ServicesRequest services = 4;
     ContainersRequest containers = 5;

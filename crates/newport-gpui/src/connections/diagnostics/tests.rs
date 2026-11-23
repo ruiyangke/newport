@@ -148,23 +148,26 @@ fn issue_counts_saturate_and_repeated_messages_do_not_expand_the_view() {
 }
 
 #[test]
-fn successful_stages_stay_out_of_row_limitations_and_refused_elevation_is_explicit() {
-    let mut value = observation([]).data.unwrap().current;
-    assert!(limitations(&value).is_empty());
-    value.coverage.elevation = p::Report::complete();
-    assert!(limitations(&value).is_empty());
-    value.coverage.elevation = p::Report::not_applicable();
-    assert!(limitations(&value).is_empty());
-    value.coverage.elevation = p::Report {
-        outcome: p::Outcome::Unavailable,
-        issues: vec![issue(p::IssueKind::PermissionDenied, 1)],
+fn elevation_states_read_plainly_in_the_scan_details() {
+    let elevation = |report: p::Report| {
+        let mut value = observation([]).data.unwrap();
+        value.current.coverage.elevation = report;
+        let view = View::new(value, false).unwrap();
+        Summary::new(Some(&view))
+            .rows
+            .into_iter()
+            .find(|(label, _)| *label == "Elevation")
+            .map(|(_, text)| text)
+            .unwrap()
     };
+    assert_eq!(elevation(p::Report::complete()), "Active");
+    assert_eq!(elevation(p::Report::not_applicable()), "Not needed");
     assert_eq!(
-        limitations(&value),
-        vec![(
-            "Elevation",
-            "Unavailable · sudo needs a password or isn't allowed".into()
-        )]
+        elevation(p::Report {
+            outcome: p::Outcome::Unavailable,
+            issues: vec![issue(p::IssueKind::PermissionDenied, 1)],
+        }),
+        "Unavailable · sudo needs a password or isn't allowed"
     );
 }
 

@@ -129,7 +129,9 @@ pub fn encode_request(call: &Call) -> Result<Vec<u8>, Error> {
     use pb::call::Request as Message;
     call.validate()?;
     let message = match &call.request {
-        Request::Metrics => Message::Metrics(protobuf::Present {}),
+        Request::Metrics { search } => Message::Metrics(pb::MetricsRequest {
+            search: search.clone(),
+        }),
         Request::StableDisplay => Message::StableDisplay(protobuf::Present {}),
         Request::Services(v) => Message::Services(v.to_wire()),
         Request::Containers(v) => Message::Containers(v.to_wire()),
@@ -160,7 +162,9 @@ pub fn decode_request(body: Bytes) -> Result<Call, Error> {
         pb::client_frame::Message::WorkerControl(_) => return Err(Invalid("worker control").into()),
     };
     let request = match required(value.request)? {
-        Message::Metrics(_) => Request::Metrics,
+        Message::Metrics(value) => Request::Metrics {
+            search: value.search,
+        },
         Message::StableDisplay(_) => Request::StableDisplay,
         Message::Services(v) => Request::Services(super::services::Request::from_wire(v)?),
         Message::Containers(v) => Request::Containers(super::containers::Request::from_wire(v)?),

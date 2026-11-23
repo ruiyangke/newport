@@ -491,6 +491,7 @@ impl From<crate::agent::Failure> for Interruption {
         match failure {
             crate::agent::Failure::Interrupted(_) => Interruption::Interrupted(failure.to_string()),
             crate::agent::Failure::Refused(message) => Interruption::Failed(message),
+            crate::agent::Failure::Clipboard(message) => Interruption::Interrupted(message),
         }
     }
 }
@@ -824,7 +825,7 @@ async fn run_once(
         let traffic = async {
             loop {
                 if *cancel.borrow() { break; }
-                if let Some(exports) = &mut exports { exports.propose(&mut agent).await?; }
+                if let Some(exports) = &mut exports { exports.propose(&mut agent).await.map_err(crate::agent::Failure::Clipboard)?; }
                 tokio::select! {
                     biased;
                     _ = cancel.changed() => break,
@@ -893,7 +894,7 @@ async fn run_once(
                         }
                     }
                     work = async { exports.as_mut().unwrap().next().await }, if exports.is_some() => {
-                        exports.as_mut().unwrap().complete(work, &mut agent).await?;
+                        exports.as_mut().unwrap().complete(work, &mut agent).await.map_err(crate::agent::Failure::Clipboard)?;
                     }
                     result = metadata.next(&owner.permissions), if metadata.pending() => {
                         if let Some((ticket, offer)) = result? {
@@ -1984,6 +1985,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn clipboard_sharing_faults_reconnect_instead_of_stopping_the_integration() {
+        let fault =
+            crate::agent::Failure::Clipboard("Clipboard export chunk offset does not match".into());
+        assert_eq!(
+            Interruption::from(fault),
+            Interruption::Interrupted("Clipboard export chunk offset does not match".into())
+        );
+    }
     #[test]
     fn worker_admission_recovery_distinguishes_interruption_from_invalid_replies() {
         use crate::{agent_runtime::Error, service_channel::AdmissionError};

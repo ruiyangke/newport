@@ -102,6 +102,9 @@ message CollectArgs {
   // Absence uses the source API default.
   optional bool refresh = 2;
   optional newport.desktop.metrics.Section section = 3;
+  // A process search reads the server now, outside the sampled cache and
+  // history.
+  optional string search = 4;
 }
 
 message HistoryArgs {

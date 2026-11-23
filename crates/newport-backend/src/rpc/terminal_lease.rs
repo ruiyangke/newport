@@ -6,11 +6,13 @@ use newport_protocol::{
     common::Present,
     desktop::{self, Failure, Operation, Outcome, Request, TerminalFlow, stream as dto, wire},
 };
-use std::sync::{Mutex, MutexGuard};
+use std::{
+    collections::VecDeque,
+    sync::{Mutex, MutexGuard},
+};
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     sync::{Notify, mpsc},
-    time::Instant,
 };
 
 pub(super) async fn serve<R, W, H>(
@@ -127,11 +129,89 @@ impl Flow {
         Ok(std::mem::take(&mut *pending))
     }
 }
-enum Queued {
-    Data { epoch: u64, data: Vec<u8> },
+/// What the app asked of the shell that the shell hasn't taken yet, in order.
+/// Requests since the last input collapse, each kind keeping its latest, so
+/// the input byte window bounds this: a shell that takes no input for a while,
+/// as while it attaches, holds the app's requests back and never ends the tab.
+#[derive(Default)]
+struct Pending(VecDeque<Next>);
+enum Next {
+    Data(u64, Vec<u8>),
     Resize(u32, u32),
-    End,
     Activate,
+    End,
+}
+impl Pending {
+    fn input(&mut self, epoch: u64, bytes: &[u8]) {
+        if !bytes.is_empty() {
+            self.0.push_back(Next::Data(epoch, bytes.to_vec()));
+        }
+    }
+    fn control(&mut self, request: Next) {
+        let since_input = self
+            .0
+            .iter()
+            .rposition(|next| matches!(next, Next::Data(..)))
+            .map_or(0, |last| last + 1);
+        let kind = std::mem::discriminant(&request);
+        match self
+            .0
+            .range_mut(since_input..)
+            .find(|next| std::mem::discriminant(*next) == kind)
+        {
+            Some(earlier) => *earlier = request,
+            None => self.0.push_back(request),
+        }
+    }
+    fn next(&mut self) -> Option<Next> {
+        self.0.pop_front()
+    }
+}
+
+fn lock(pending: &Mutex<Pending>) -> anyhow::Result<MutexGuard<'_, Pending>> {
+    pending
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Terminal input state poisoned"))
+}
+
+/// Hands the app's requests to the shell as it takes them.
+async fn apply(
+    pending: &Mutex<Pending>,
+    changed: &Notify,
+    flow: &Flow,
+    input: &mpsc::Sender<Input>,
+) -> anyhow::Result<()> {
+    loop {
+        let next = lock(pending)?.next();
+        let Some(next) = next else {
+            changed.notified().await;
+            continue;
+        };
+        match next {
+            Next::Data(epoch, data) => {
+                let length = data.len();
+                if epoch == flow.state()?.epoch()
+                    && let Ok(permit) = input.reserve().await
+                {
+                    // The shell can be replaced while its input queue is
+                    // full. Recheck only after ownership of the slot.
+                    if epoch == flow.state()?.epoch() {
+                        permit.send(Input::Data(data));
+                    }
+                }
+                flow.take(length)?;
+            }
+            Next::Resize(columns, rows) => {
+                let _ = input.send(Input::Resize(columns, rows)).await;
+            }
+            Next::End => {
+                let _ = input.send(Input::End).await;
+            }
+            Next::Activate => {
+                let _ = input.send(Input::Activate).await;
+            }
+        }
+    }
 }
 
 async fn relay<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
@@ -141,15 +221,15 @@ async fn relay<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 ) -> anyhow::Result<()> {
     let Io { input, mut output } = io;
     let flow = Flow::default();
-    // The byte window bounds input, and this independent frame bound prevents
-    // a peer from exhausting memory with zero-byte controls.
-    let (queue, mut queued) = mpsc::channel(256);
+    let pending = Mutex::new(Pending::default());
+    let changed = Notify::new();
+    let pending_state = || lock(&pending);
     let receive = async {
         while let Some(frame) = reader
             .frame(desktop::TERMINAL_CLIENT_LIMITS.message, None)
             .await?
         {
-            let item = match wire::decode_terminal_client(frame.frame.body())? {
+            match wire::decode_terminal_client(frame.frame.body())? {
                 dto::TerminalClient::Ack(value) => {
                     flow.state()?.acknowledge(value.bytes)?;
                     flow.acknowledged.notify_one();
@@ -157,55 +237,22 @@ async fn relay<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 }
                 dto::TerminalClient::Input(value) => {
                     flow.state()?.input(value.epoch, value.data.len())?;
-                    Queued::Data {
-                        epoch: value.epoch,
-                        data: value.data.to_vec(),
-                    }
+                    pending_state()?.input(value.epoch, &value.data);
                 }
                 dto::TerminalClient::Resize(value) => {
                     let columns = value.columns.into();
                     let rows = value.rows.into();
                     crate::terminal::size(columns, rows).map_err(anyhow::Error::msg)?;
-                    Queued::Resize(columns, rows)
+                    pending_state()?.control(Next::Resize(columns, rows));
                 }
-                dto::TerminalClient::End(_) => Queued::End,
-                dto::TerminalClient::Activate(_) => Queued::Activate,
-            };
-            queue
-                .try_send(item)
-                .map_err(|_| anyhow::anyhow!("Terminal control queue is full"))?;
+                dto::TerminalClient::End(_) => pending_state()?.control(Next::End),
+                dto::TerminalClient::Activate(_) => pending_state()?.control(Next::Activate),
+            }
+            changed.notify_one();
         }
         anyhow::Ok(())
     };
-    let apply = async {
-        while let Some(item) = queued.recv().await {
-            match item {
-                Queued::Data { epoch, data } => {
-                    let length = data.len();
-                    if epoch == flow.state()?.epoch()
-                        && let Ok(permit) = input.reserve().await
-                    {
-                        // The shell can be replaced while its input queue is
-                        // full. Recheck only after ownership of the slot.
-                        if epoch == flow.state()?.epoch() {
-                            permit.send(Input::Data(data));
-                        }
-                    }
-                    flow.take(length)?;
-                }
-                Queued::Resize(columns, rows) => {
-                    let _ = input.send(Input::Resize(columns, rows)).await;
-                }
-                Queued::End => {
-                    let _ = input.send(Input::End).await;
-                }
-                Queued::Activate => {
-                    let _ = input.send(Input::Activate).await;
-                }
-            }
-        }
-        std::future::pending::<anyhow::Result<()>>().await
-    };
+    let apply = apply(&pending, &changed, &flow, &input);
     let send = async {
         let mut ended = false;
         let mut held = None;
@@ -282,17 +329,16 @@ fn event_message(event: Event) -> anyhow::Result<dto::TerminalEvent> {
         Event::Data(_) | Event::Restore { .. } => anyhow::bail!("Terminal data is not an event"),
     })
 }
+/// Waits for as long as the app takes to read: an app that stops reading for
+/// a while, as while macOS naps it, pauses the shell's output and keeps the
+/// tab. Output credit bounds what waits, and a closed app fails the write.
 async fn write(
     writer: &mut (impl AsyncWrite + Unpin),
     message: dto::TerminalServer,
 ) -> anyhow::Result<()> {
     let bytes = wire::encode_terminal_server(&message)?;
-    transport::write_until(
-        writer,
-        &bytes,
-        Instant::now() + desktop::RESPONSE_WRITE_TIMEOUT,
-    )
-    .await?;
+    writer.write_all(&bytes).await?;
+    writer.flush().await?;
     Ok(())
 }
 
@@ -351,6 +397,7 @@ mod tests {
         Resize { cols: u16, rows: u16 },
         Ack(u64),
         End,
+        Activate,
     }
     impl ToBackend {
         fn encode(self) -> Vec<u8> {
@@ -365,6 +412,7 @@ mod tests {
                 })),
                 Self::Ack(bytes) => dto::TerminalClient::Ack(Box::new(dto::Ack { bytes })),
                 Self::End => dto::TerminalClient::End(Box::new(Present {})),
+                Self::Activate => dto::TerminalClient::Activate(Box::new(Present {})),
             };
             wire::encode_terminal_client(&message).unwrap()
         }
@@ -461,6 +509,7 @@ mod tests {
                     persist: false,
                     attach: false,
                     colors: None,
+                    directory: None,
                 },
             )))),
         };
@@ -772,6 +821,82 @@ mod tests {
         }
         assert_eq!(taken, 8);
         drop(client);
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resizes_and_activations_while_the_shell_takes_no_input_keep_the_tab() {
+        let (mut client, mut shell, task) = open(1).await;
+        for request in 0..1000u16 {
+            send(
+                &mut client,
+                ToBackend::Resize {
+                    cols: 80 + request % 100,
+                    rows: 24,
+                },
+            )
+            .await;
+            send(&mut client, ToBackend::Activate).await;
+        }
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        assert!(!task.is_finished());
+        // Beyond the requests already handed over, the rest collapsed into
+        // the latest of each kind.
+        let mut delivered = Vec::new();
+        while let Ok(Some(input)) =
+            tokio::time::timeout(Duration::from_secs(1), shell.input.recv()).await
+        {
+            delivered.push(input);
+        }
+        assert!(delivered.len() <= 4, "{} requests", delivered.len());
+        assert!(matches!(
+            delivered
+                .iter()
+                .rev()
+                .find(|input| matches!(input, Input::Resize(..))),
+            Some(Input::Resize(179, 24))
+        ));
+        assert!(
+            delivered
+                .iter()
+                .any(|input| matches!(input, Input::Activate))
+        );
+        drop(client);
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_app_that_stops_reading_its_socket_pauses_output_and_keeps_the_tab() {
+        // Like macOS local sockets, the pipe holds far less than the output
+        // credit, and the app reads nothing while macOS naps it.
+        let (mut client, server) = tokio::io::duplex(16 * 1024);
+        let (io, shell) = terminal(1);
+        let task = tokio::spawn(hold(server, async move { Ok((io, ())) }));
+        assert!(response(&mut client).await.error.is_none());
+        let chunks = 64;
+        let producer = tokio::spawn({
+            let output = shell.output.clone();
+            async move {
+                for _ in 0..chunks {
+                    output.send(Event::Data(vec![b'x'; 4096])).await.unwrap();
+                }
+            }
+        });
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert!(!task.is_finished());
+        let mut received = 0;
+        while received < chunks * 4096 {
+            match next(&mut client).await {
+                Some(ToApp::Output(data)) => received += data.len(),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        producer.await.unwrap();
+        drop(shell);
+        assert_eq!(
+            next(&mut client).await,
+            Some(ToApp::Event(TestEvent::Error("Terminal is closed.".into())))
+        );
         task.await.unwrap().unwrap();
     }
 

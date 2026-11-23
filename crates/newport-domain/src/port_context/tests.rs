@@ -34,7 +34,10 @@ fn facts<'a>(port: &'a Value, arguments: &'a [String]) -> ProcessFacts<'a> {
 
 fn kinds(port: &Value) -> Vec<&'static str> {
     if docker(port) {
-        return container_kinds(text(port, "image"));
+        return container_kinds(
+            text(port, "image"),
+            crate::port_discovery::EngineKind::Docker,
+        );
     }
     facts(port, &arguments(port)).kinds()
 }

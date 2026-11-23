@@ -74,7 +74,8 @@ If Newport says "Saved profiles are from a newer Newport. Update Newport before 
 2. Change **Name (optional)** or the connection fields, then choose **Save server**. To remove the server, choose **Delete server…** and confirm.
 
 - Renaming a server keeps its sessions.
-- Changing the **SSH host**, **SSH port**, **Username**, **SSH key**, sign-in method or **Connect through**, or entering a new password, reconnects the server. It also turns off **Clipboard access** and **Browser links**, asks again before installing the helper, and restarts the server's active forwards.
+- Changing the **SSH key** or sign-in method, or entering a new password, reconnects the server and restarts its active forwards. Its setup, **Clipboard access** and **Browser links** stay as they were.
+- Changing the **SSH host**, **SSH port**, **Username** or **Connect through** also reconnects the server and restarts its active forwards, and may reach a different machine. So it also turns off **Clipboard access** and **Browser links**, and asks again before installing the helper.
 - Deleting a server removes its saved password, its forwards and its recorded history. It doesn't touch the server's files. You can't delete a server that another server uses as its jump host.
 
 See [Security and privacy](security.md) for how saved passwords are protected.

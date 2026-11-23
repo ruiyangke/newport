@@ -1981,7 +1981,7 @@ done"#,
             .unwrap();
         let call = Call {
             id: 1,
-            request: Request::Metrics,
+            request: Request::Metrics { search: None },
         };
         channel
             .write_all(&wire::encode_request(&call).unwrap())

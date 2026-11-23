@@ -60,6 +60,7 @@ fn terminal_open() -> stream::Operation {
         persist: false,
         attach: false,
         colors: None,
+        directory: None,
     }))
 }
 fn opened(peer: &mut Peer) {

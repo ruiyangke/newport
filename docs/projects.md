@@ -109,6 +109,7 @@ The bar at the top shows the project, worktree and branch. Click each to switch 
 | Symptom | Fix |
 | --- | --- |
 | A repository doesn't open | Check its path and that your account can read it. |
+| "… isn’t on the server any more" | The project's folder was moved or deleted on the server. Put it back and choose **Try again**, or add the project again from its new folder. |
 | Clone, fetch or push fails with an authentication error | Set up Git access for the server account. See [Access a private repository](#access-a-private-repository). |
 | "All 20 tabs have unsaved changes or pending work" | Save or close a tab, or let its pending operation finish, then open the file again. |
 | A language server is missing | See [Language tools](language-servers.md#when-a-tool-cannot-finish). |

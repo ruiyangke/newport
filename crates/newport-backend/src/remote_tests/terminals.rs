@@ -22,12 +22,12 @@ fn open(
     attach: bool,
 ) -> Io {
     sessions
-        .open_bound_with_display(
+        .open_bound_shell(
             id,
             server.clone(),
             (100, 30),
             owner.clone(),
-            None,
+            crate::terminal::Shell::default(),
             if attach {
                 Hold::Attach(None)
             } else {

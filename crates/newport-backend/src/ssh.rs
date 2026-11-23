@@ -36,17 +36,37 @@ mod reverse;
 /// `terminal`'s Mac before the shell starts, so the shell's programs'
 /// requests come here. With `display`, the shell names the account's
 /// display as a held shell does, so raw commands open their windows on it.
+/// With `directory`, the shell starts in that folder, or says it can't and
+/// starts in the home folder.
 pub fn terminal_command(
     routing: uuid::Uuid,
     terminal: Option<uuid::Uuid>,
     display: bool,
+    directory: Option<&str>,
 ) -> String {
     terminal_command_named(
         &crate::terminal::holder_channel::COMPUTER,
         routing,
         terminal,
         display,
+        directory,
     )
+}
+
+/// `text` as one sh word that also passes through fish, a login shell this
+/// script may pass through first: fish reads a backslash before a quote or
+/// another backslash inside single quotes, so neither appears.
+fn sh_word(text: &str) -> String {
+    let mut word = String::from("'");
+    for character in text.chars() {
+        match character {
+            '\'' => word.push_str("'\"'\"'"),
+            '\\' => word.push_str("'\"$(printf '\\134')\"'"),
+            other => word.push(other),
+        }
+    }
+    word.push('\'');
+    word
 }
 
 /// As `terminal_command`, for the computer named `computer`.
@@ -55,13 +75,21 @@ fn terminal_command_named(
     routing: uuid::Uuid,
     terminal: Option<uuid::Uuid>,
     display: bool,
+    directory: Option<&str>,
 ) -> String {
     let mut setup = String::new();
+    if let Some(directory) = directory {
+        let notice = newport_protocol::terminal::unavailable_directory(directory);
+        setup.push_str(&format!(
+            "cd -- {} 2>/dev/null || printf '%s\\r\\n' {}; ",
+            sh_word(directory),
+            sh_word(&notice)
+        ));
+    }
     if let Some(terminal) = terminal {
         // The route comes before `env`, which follows it. A failed route
-        // never stops the shell. The name goes as hexadecimal UTF-8: fish,
-        // a login shell this script passes through, reads backslashes inside
-        // single quotes, so no quoting carries every name through both.
+        // never stops the shell. The name goes as hexadecimal UTF-8, which
+        // Needle reads back, so no character of it reaches either shell.
         let name: String = computer.bytes().map(|b| format!("{b:02x}")).collect();
         setup.push_str(&format!(
             "export NEWPORT_TERMINAL='{terminal}'; \
@@ -209,7 +237,7 @@ mod terminal_gui_tests {
         let computer = "Ann's \\'Mac\\ \"$(touch HACKED)\" `id` $HOME é 工作室\\";
         // sshd runs it through the account's login shell, whichever it is.
         let run = |login: &str, display: bool| {
-            let command = terminal_command_named(computer, routing, Some(terminal), display);
+            let command = terminal_command_named(computer, routing, Some(terminal), display, None);
             std::process::Command::new(login)
                 .args(["-c", &command])
                 .current_dir(home.path())
@@ -274,6 +302,80 @@ mod terminal_gui_tests {
         );
     }
 
+    #[test]
+    fn a_terminal_starts_in_its_folder_or_says_why_it_starts_at_home_under_any_login_shell() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let shell = home.path().join("login-shell");
+        std::fs::write(&shell, "#!/bin/sh\npwd -P\n").unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Every character a shell could read, as a folder may be named.
+        let folder = home
+            .path()
+            .join("it's \\'a\\ \"$(touch HACKED)\" `id` $HOME é 项目\\");
+        std::fs::create_dir(&folder).unwrap();
+        let file = home.path().join("a file");
+        std::fs::write(&file, "").unwrap();
+        let missing = home.path().join("gone");
+        let run = |login: &str, directory: &std::path::Path| {
+            let directory = directory.to_str().unwrap();
+            let command = terminal_command_named(
+                "Studio",
+                uuid::Uuid::new_v4(),
+                None,
+                false,
+                Some(directory),
+            );
+            std::process::Command::new(login)
+                .args(["-c", &command])
+                .current_dir(home.path())
+                .env("HOME", home.path())
+                .env("SHELL", &shell)
+                .output()
+                .unwrap()
+        };
+        let real = |path: &std::path::Path| path.canonicalize().unwrap().display().to_string();
+        for login in tests::login_shells() {
+            let result = run(login, &folder);
+            assert!(result.status.success(), "{login}: {result:?}");
+            assert_eq!(
+                String::from_utf8(result.stdout).unwrap(),
+                format!("{}\n", real(&folder)),
+                "{login}"
+            );
+            for unusable in [&missing, &file] {
+                let result = run(login, unusable);
+                assert!(result.stderr.is_empty(), "{login}: {result:?}");
+                assert_eq!(
+                    String::from_utf8(result.stdout).unwrap(),
+                    format!(
+                        "{}\r\n{}\n",
+                        newport_protocol::terminal::unavailable_directory(
+                            unusable.to_str().unwrap()
+                        ),
+                        real(home.path())
+                    ),
+                    "{login}"
+                );
+            }
+            assert!(!home.path().join("HACKED").exists(), "{login}");
+        }
+    }
+
+    #[test]
+    fn a_folder_word_has_no_backslash_fish_would_read_inside_single_quotes() {
+        let word = sh_word("/a'b\\'c\\\\d\\");
+        let bytes = word.as_bytes();
+        for (index, byte) in bytes.iter().enumerate() {
+            if *byte == b'\\' {
+                assert!(
+                    !matches!(bytes.get(index + 1), Some(b'\\' | b'\'')),
+                    "{word}"
+                );
+            }
+        }
+    }
+
     /// Without the account's display, the shell runs under the terminal's
     /// clipboard display, in Needle's process, so job control, signals and
     /// the exit status stay the shell's. Without Needle it runs as it is.
@@ -302,7 +404,8 @@ mod terminal_gui_tests {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
         let terminal = uuid::Uuid::new_v4();
-        let command = terminal_command_named("Studio", uuid::Uuid::new_v4(), Some(terminal), false);
+        let command =
+            terminal_command_named("Studio", uuid::Uuid::new_v4(), Some(terminal), false, None);
         let run = |login: &str| {
             std::process::Command::new(login)
                 .args(["-c", &command])

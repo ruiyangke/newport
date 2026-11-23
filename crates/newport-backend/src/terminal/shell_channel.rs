@@ -85,7 +85,12 @@ pub(crate) async fn run(
                 }
                 Err(error) => return Err(error.into()),
             };
-            let command = crate::ssh::terminal_command(routing, Some(terminal), display);
+            let command = crate::ssh::terminal_command(
+                routing,
+                Some(terminal),
+                display,
+                shell.directory.as_deref(),
+            );
             let result = start(
                 channel,
                 Io {

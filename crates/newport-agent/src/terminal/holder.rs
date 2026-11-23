@@ -170,11 +170,13 @@ fn receive(fd: &OwnedFd, deadline: Instant) -> Option<libc::c_int> {
 }
 
 /// Opens the PTY and starts the terminal's reaper, which starts `sh -c
-/// command` as the PTY's session leader, with `changes` made to its
-/// environment. Returns once the reaper has said the shell's pid.
+/// command` as the PTY's session leader, in `directory` when it can, with
+/// `changes` made to its environment. Returns once the reaper has said the
+/// shell's pid.
 fn spawn(
     id: &str,
     command: &str,
+    directory: Option<&str>,
     (columns, rows): (u16, u16),
     changes: &[Change],
 ) -> io::Result<Shell> {
@@ -186,6 +188,9 @@ fn spawn(
         CString::new("terminal").unwrap(),
         CString::new("reaper").unwrap(),
         CString::new(id).map_err(|_| io::Error::other("Invalid terminal id."))?,
+        // Empty for none: a folder to start in is always absolute.
+        CString::new(directory.unwrap_or_default())
+            .map_err(|_| io::Error::other("Invalid terminal folder."))?,
         CString::new(command).map_err(|_| io::Error::other("Invalid shell command."))?,
     ];
     let mut argv: Vec<*const libc::c_char> = arguments.iter().map(|a| a.as_ptr()).collect();
@@ -344,6 +349,8 @@ pub(crate) struct Start {
     pub creator: Computer,
     /// The account's stable display will show on the creating computer.
     pub stable_display: bool,
+    /// The folder the shell starts in, when it can.
+    pub directory: Option<String>,
 }
 
 struct Queued {
@@ -671,7 +678,13 @@ fn serve(id: &str, size: (u16, u16)) -> io::Result<()> {
             (Some(clipboard), environment)
         }
     };
-    let shell = spawn(id, &start.command, size, &environment)?;
+    let shell = spawn(
+        id,
+        &start.command,
+        start.directory.as_deref(),
+        size,
+        &environment,
+    )?;
     if let Some(clipboard) = &clipboard {
         clipboard.shown_on(&shell.master);
     }

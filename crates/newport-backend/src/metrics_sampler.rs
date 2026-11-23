@@ -200,6 +200,32 @@ pub async fn read(state: &Shared, db: &MetricsDb, id: Uuid, force: bool) -> Resu
     result
 }
 
+/// A process search reads the server now. Its processes answer only that
+/// search, so the reading is neither cached for Overview nor recorded.
+pub async fn search(state: &Shared, id: Uuid, search: String) -> Result<Value, String> {
+    search_with(state, id, search, |owner, search| async move {
+        cockpit::search(&owner, search).await
+    })
+    .await
+}
+async fn search_with<F>(
+    state: &Shared,
+    id: Uuid,
+    search: String,
+    read: impl FnOnce(Arc<ServerSession>, String) -> F,
+) -> Result<Value, String>
+where
+    F: std::future::Future<Output = Result<Value, String>>,
+{
+    let (_, owner) = state.current(id)?;
+    let mut data = read(owner.clone(), search).await?;
+    if owner.is_revoked() {
+        return Err(CHANGED.into());
+    }
+    data["sampledAt"] = metrics_db::now_ms().into();
+    Ok(data)
+}
+
 pub fn clear_cache(state: &Shared) {
     for owner in state.sessions.all() {
         owner.metrics.clear();

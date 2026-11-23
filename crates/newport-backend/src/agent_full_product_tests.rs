@@ -167,7 +167,7 @@ touch "$legacy/.validated-v1"
     use newport_protocol::monitor::{self, Call, Reply, Request};
     let call = Call {
         id: 1,
-        request: Request::Metrics,
+        request: Request::Metrics { search: None },
     };
     monitor
         .write_all(&monitor::wire::encode_request(&call).unwrap())

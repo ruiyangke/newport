@@ -497,6 +497,7 @@ fn stalled_project_filesystem_does_not_hold_the_monitor_or_start_replacement_hel
         },
         target_port: 80,
         target_address: None,
+        engine_kind: newport_protocol::monitor::ports::discovery::EngineKind::Docker,
         compose: Some(Compose {
             directory: Some(directory.clone()),
             ..Default::default()

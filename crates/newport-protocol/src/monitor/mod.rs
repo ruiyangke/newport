@@ -38,7 +38,7 @@ pub const SERVER_LIMITS: common::Limits = common::Limits {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
-    Metrics,
+    Metrics { search: Option<String> },
     StableDisplay,
     Services(services::Request),
     Containers(containers::Request),
@@ -50,6 +50,7 @@ pub enum Request {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InvalidRequest {
     Correlation,
+    Metrics(Invalid),
     Services(services::InvalidRequest),
     Containers(containers::InvalidRequest),
     Compose(compose::InvalidRequest),
@@ -59,6 +60,7 @@ impl fmt::Display for InvalidRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Correlation => f.write_str("Monitor requests need a nonzero identifier."),
+            Self::Metrics(e) => e.fmt(f),
             Self::Services(e) => e.fmt(f),
             Self::Containers(e) => e.fmt(f),
             Self::Compose(e) => e.fmt(f),
@@ -70,11 +72,16 @@ impl std::error::Error for InvalidRequest {}
 impl Request {
     pub fn validate(&self) -> Result<(), InvalidRequest> {
         match self {
+            Self::Metrics { search } => {
+                if let Some(search) = search {
+                    metrics::validate_search(search).map_err(InvalidRequest::Metrics)?;
+                }
+            }
             Self::Services(v) => v.validate().map_err(InvalidRequest::Services)?,
             Self::Containers(v) => v.validate().map_err(InvalidRequest::Containers)?,
             Self::Compose(v) => v.validate().map_err(InvalidRequest::Compose)?,
             Self::FileWatch(v) => v.validate().map_err(InvalidRequest::FileWatch)?,
-            Self::Metrics | Self::StableDisplay | Self::Ports(_) => {}
+            Self::StableDisplay | Self::Ports(_) => {}
         }
         Ok(())
     }
@@ -122,7 +129,14 @@ impl Response {
 impl Reply {
     pub fn validate_for(&self, request: &Request) -> Result<(), Invalid> {
         match (self, request) {
-            (Self::Metrics(v), Request::Metrics) => v.validate(),
+            (Self::Metrics(v), Request::Metrics { search }) => {
+                v.validate()?;
+                // Every process a search returns is one of its matches.
+                if search.is_some() && v.processes.len() > v.process_matches as usize {
+                    return Err(Invalid("process matches"));
+                }
+                Ok(())
+            }
             (Self::StableDisplay(v), Request::StableDisplay) => v.validate(),
             (Self::Services(v), Request::Services(r)) => v.validate_for(r),
             (Self::Containers(v), Request::Containers(r)) => v.validate_for(r),

@@ -152,8 +152,24 @@ impl Drop for Reader {
         self.control.cancel();
     }
 }
+/// Small writes wait here until a flush or a full chunk, so messages written
+/// together go out in one SSH packet rather than one each.
 pub struct Writer {
     control: Control,
+    buffer: Vec<u8>,
+}
+impl Writer {
+    fn send(&mut self) -> io::Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let data = std::mem::take(&mut self.buffer);
+        self.control
+            .0
+            .input
+            .send_blocking(Input::Data(data))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Graphical input closed"))
+    }
 }
 impl Write for Writer {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
@@ -161,18 +177,24 @@ impl Write for Writer {
             return Ok(0);
         }
         self.control.check()?;
-        let length = buffer.len().min(CHUNK);
-        self.control
-            .0
-            .input
-            .send_blocking(Input::Data(buffer[..length].to_vec()))
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Graphical input closed"))?;
+        if self.control.0.input.is_closed() {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Graphical input closed",
+            ));
+        }
+        let length = buffer.len().min(CHUNK - self.buffer.len());
+        self.buffer.extend_from_slice(&buffer[..length]);
+        if self.buffer.len() == CHUNK {
+            self.send()?;
+        }
         Ok(length)
     }
     /// A barrier for bytes accepted by the SSH sending pipeline, not a remote
     /// application acknowledgment. Cancellation also unblocks this barrier.
     fn flush(&mut self) -> io::Result<()> {
         self.control.check()?;
+        self.send()?;
         let (reply, done) = async_channel::bounded(1);
         self.control
             .0
@@ -185,6 +207,7 @@ impl Write for Writer {
 }
 impl Drop for Writer {
     fn drop(&mut self) {
+        let _ = self.send();
         self.control.0.input.close();
     }
 }
@@ -226,6 +249,7 @@ impl Channel {
             }),
             writer: Some(Writer {
                 control: control.clone(),
+                buffer: Vec::new(),
             }),
             control,
         }

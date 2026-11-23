@@ -75,6 +75,7 @@ fn snapshot(value: &Value) -> Result<sample::Snapshot, Failure> {
         network: p::list(p::field(value, "network")?, network)?,
         processes: p::list(p::field(value, "processes")?, process)?,
         process_count: small(p::field(value, "processCount")?)?,
+        process_matches: small(p::field(value, "processMatches")?)?,
     })
 }
 fn reading(value: &Value) -> Result<dto::Reading, Failure> {
@@ -191,6 +192,7 @@ pub async fn dispatch(
                 match args.section {
                     dto::Section::Overview => crate::cockpit::Section::Overview,
                 },
+                args.search.clone(),
             )
             .await
             .map_err(operation)?,

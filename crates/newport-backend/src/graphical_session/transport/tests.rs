@@ -342,3 +342,40 @@ fn runtime_shutdown_before_the_relay_is_polled_releases_blocking_halves() {
     assert!(report.failure().unwrap().contains("before cleanup"));
     assert_eq!(control.finish().unwrap(), report);
 }
+
+#[tokio::test]
+async fn writes_queued_behind_a_full_window_share_one_packet() {
+    bounded(async {
+        let mut fixture = Fixture::new(CHUNK as u32).await;
+        let (channel, mut remote) = fixture.open().await;
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let remote_task = tokio::spawn(async move {
+            let _ = released.await;
+            let mut sizes = Vec::new();
+            let mut total = 0;
+            while total < CHUNK + 70 {
+                if let Some(ChannelMsg::Data { data }) = remote.wait().await {
+                    total += data.len();
+                    sizes.push(data.len());
+                }
+            }
+            sizes
+        });
+        let (_reader, mut writer, _control) = channel.into_parts();
+        let write = tokio::task::spawn_blocking(move || {
+            // The first chunk fills the window, so the rest wait behind it.
+            writer.write_all(&[1; CHUNK]).unwrap();
+            for _ in 0..7 {
+                writer.write_all(&[2; 10]).unwrap();
+            }
+            writer.flush().unwrap();
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        release.send(()).unwrap();
+        write.await.unwrap();
+        let sizes = remote_task.await.unwrap();
+        assert_eq!(sizes.iter().sum::<usize>(), CHUNK + 70);
+        assert_eq!(sizes.last(), Some(&70), "{sizes:?}");
+    })
+    .await;
+}

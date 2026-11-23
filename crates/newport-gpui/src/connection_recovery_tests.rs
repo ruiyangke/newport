@@ -472,3 +472,89 @@ fn ordinary_snapshot_and_configuration_outage_do_not_reset_repository(cx: &mut T
         }
     });
 }
+
+#[gpui_kit::test]
+fn a_cold_launch_reopens_the_project_it_was_left_on(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        crate::theme::install(false, cx);
+    });
+    // The project still saved, gone, and reached through a profile that
+    // first failed to load.
+    for (removed, profile_error) in [(false, false), (true, false), (false, true)] {
+        let (owner, cx) = cx.add_window_view(crate::project_library_state::typed_test_owner);
+        owner.update(cx, |this, cx| {
+            let (work, requests) = std::sync::mpsc::sync_channel(32);
+            let (replies, incoming) = std::sync::mpsc::channel();
+            this.work = work.into();
+            this.replies = incoming;
+            this.page = Page::Projects;
+            let project = bookmark(1, TYPED_SERVER, "Project", "/repo");
+            let worktree = newport_protocol::git::Path::new(b"/linked");
+            // What the last run saved: the project and its worktree.
+            this.selection = Some(project.clone());
+            this.git.opening_path = Some(worktree.clone());
+            this.git.tab = 1;
+            this.restore_git = this.git_destination();
+            assert!(this.restore_git.is_some());
+            // A cold launch: nothing selected, no snapshot or reads yet.
+            this.selection = None;
+            this.git = Default::default();
+            let snapshot = this.snapshot.take().unwrap();
+            this.resources = Default::default();
+            if profile_error {
+                let mut unavailable = snapshot.clone();
+                unavailable.load_error = Some("Vault temporarily unavailable".into());
+                unavailable.config.servers.clear();
+                let read = this.resources.begin("snapshot").unwrap();
+                replies
+                    .send(fixture::completion(read, unavailable))
+                    .unwrap();
+                this.tick(cx);
+                assert!(this.restore_git.is_some());
+            }
+            let snapshot_read = this.resources.begin("snapshot").unwrap();
+            replies
+                .send(fixture::completion(snapshot_read, snapshot))
+                .unwrap();
+            this.tick(cx);
+            assert!(
+                this.restore_git.is_some(),
+                "the first valid snapshot keeps the destination"
+            );
+            let list = requests
+                .try_iter()
+                .find(|request| kind(request) == Some(Kind::PreferencesProjectsList))
+                .expect("the project list is read");
+            replies
+                .send(projects_completion(
+                    "projects",
+                    list.generation,
+                    if removed {
+                        Vec::new()
+                    } else {
+                        vec![project.clone()]
+                    },
+                ))
+                .unwrap();
+            this.tick(cx);
+            if removed {
+                assert!(this.selection.is_none());
+                assert!(this.restore_git.is_none());
+                return;
+            }
+            assert_eq!(this.selection, Some(project));
+            assert_eq!(this.git.tab, 1);
+            assert!(
+                requests.try_iter().any(|request| {
+                    kind(&request) == Some(Kind::GitRequest)
+                        && git_request(&request)
+                            == &newport_protocol::git::Request::Open {
+                                path: worktree.clone(),
+                            }
+                }),
+                "the worktree opens again"
+            );
+        });
+    }
+}

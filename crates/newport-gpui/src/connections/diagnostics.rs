@@ -24,7 +24,7 @@ const CAUSES: [(p::IssueKind, &str); 8] = [
     (p::IssueKind::Unavailable, "source unavailable"),
 ];
 
-pub(crate) fn report(value: &p::Report) -> String {
+fn report(value: &p::Report) -> String {
     let status = match value.outcome {
         p::Outcome::Complete => "Complete",
         p::Outcome::Partial => "Limited",
@@ -127,25 +127,9 @@ fn rows(snapshot: &p::Snapshot) -> [(Stage, String); 8] {
     })
 }
 
-pub(crate) fn limited(value: &p::Report) -> bool {
+fn limited(value: &p::Report) -> bool {
     matches!(value.outcome, p::Outcome::Partial | p::Outcome::Unavailable)
         || !value.issues.is_empty()
-}
-
-pub(crate) fn limitations(snapshot: &p::Snapshot) -> Vec<(&'static str, String)> {
-    rows(snapshot)
-        .into_iter()
-        .zip(reports(snapshot))
-        .filter(|((stage, _), (_, value))| {
-            limited(value)
-                || match stage {
-                    Stage::Ipv4 => snapshot.diagnostics.ipv4_source == Some(p::SocketSource::Proc),
-                    Stage::Ipv6 => snapshot.diagnostics.ipv6_source == Some(p::SocketSource::Proc),
-                    _ => false,
-                }
-        })
-        .map(|((stage, text), _)| (stage.label(), text))
-        .collect()
 }
 
 #[derive(Debug)]

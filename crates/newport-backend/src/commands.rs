@@ -54,9 +54,13 @@ pub async fn cockpit_collect(
     refresh: Option<bool>,
     id: Uuid,
     section: crate::cockpit::Section,
+    search: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    match section {
-        crate::cockpit::Section::Overview => {
+    match (section, search) {
+        (crate::cockpit::Section::Overview, Some(search)) => {
+            crate::metrics_sampler::search(state, id, search).await
+        }
+        (crate::cockpit::Section::Overview, None) => {
             crate::metrics_sampler::read(state, db, id, refresh.unwrap_or(false)).await
         }
     }

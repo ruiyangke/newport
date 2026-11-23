@@ -44,6 +44,7 @@ fn listener(port: u16, pid: u32, address: &str, project: &str) -> d::Member {
                 identity: d::Process { pid, start: 100 },
                 name: Some("worker".into()),
                 executable: None,
+                path: None,
                 label: Some("worker".into()),
                 account: None,
                 uid: Some(1000),
@@ -83,6 +84,7 @@ fn published(port: u16, name: &str, address: &str, root: &str, compose: Option<&
     }
     member.kind = d::Kind::Publication(d::Publication {
         engine: Some("engine".into()),
+        engine_kind: d::EngineKind::Docker,
         container: format!("container:{name}"),
         name: name.into(),
         image: None,
@@ -495,7 +497,7 @@ fn project_identity_prefers_repository_root_then_compose_directory_and_name() {
     publication(&mut member).directory = None;
     assert_eq!(project_key(&observed(member.clone())), "compose:database");
     publication(&mut member).compose = None;
-    assert_eq!(project_key(&observed(member)), OTHER);
+    assert_eq!(project_key(&observed(member)), CONTAINERS);
     assert_eq!(
         project_key(&observed(listener(1, 1, "127.0.0.1", "/"))),
         "/"
@@ -595,10 +597,12 @@ fn known_root_slash_absorbs_absolute_paths_but_not_other_or_compose_names() {
 
 #[test]
 fn dual_stack_preserves_all_addresses_and_owner_isolation_without_choosing_a_destination() {
+    let mut other = listener(3000, 8, "::1", "");
+    owner(&mut other).name = Some("other".into());
     let ports = vec![
         listener(3000, 7, "::", ""),
         listener(3000, 7, "192.0.2.2", ""),
-        listener(3000, 8, "::1", ""),
+        other,
         listener(3000, 7, "0.0.0.0", ""),
         listener(3000, 7, "127.0.0.1", ""),
     ];
@@ -624,33 +628,141 @@ fn dual_stack_preserves_all_addresses_and_owner_isolation_without_choosing_a_des
     assert_eq!(entries[1].forwards.len(), 1);
 }
 
+/// A docker-proxy socket, run by root in docker.service, for a published port.
+fn proxy(port: u16, pid: u32, address: &str) -> d::Member {
+    let mut member = listener(port, pid, address, "");
+    let holder = owner(&mut member);
+    holder.name = Some("docker-proxy".into());
+    holder.label = Some("docker-proxy".into());
+    holder.account = Some("root".into());
+    holder.uid = Some(0);
+    let socket = socket(&mut member);
+    socket.uid = 0;
+    socket.holder_coverage = d::HolderCoverage::Partial;
+    socket.units.push(d::Unit {
+        manager_uid: None,
+        name: "docker.service".into(),
+        socket_cgroup: true,
+    });
+    member
+}
+
 #[test]
-fn publications_group_by_container_and_unknown_socket_holders_stay_separate() {
-    let mut a = listener(3001, 1, "::", "");
+fn a_published_port_is_one_container_entry_and_other_programs_stay_separate() {
+    let mut sshd = listener(3001, 5, "192.0.2.2", "");
+    owner(&mut sshd).name = Some("sshd".into());
+    let mut a = listener(3002, 1, "::", "");
     socket(&mut a).holders.clear();
-    let mut b = listener(3001, 2, "0.0.0.0", "");
+    let mut b = listener(3002, 2, "0.0.0.0", "");
     socket(&mut b).holders.clear();
     let ports = vec![
         published(3000, "api", "::", "", None),
+        proxy(3000, 10, "0.0.0.0"),
         published(3000, "api", "0.0.0.0", "", None),
-        published(3000, "web", "0.0.0.0", "", None),
+        proxy(3000, 11, "::"),
+        published(3001, "web", "0.0.0.0", "", None),
+        sshd,
         a,
         b,
     ];
-    let groups = group(ports, &[], S, &[]);
-    assert_eq!(groups[0].entries.len(), 4);
-    let api = groups[0]
-        .entries
-        .iter()
-        .find(|entry| entry.port.label() == "api")
-        .unwrap();
-    assert_eq!(api.addresses.len(), 2);
+    let projects = group(ports, &[], S, &[]);
+    assert_eq!(
+        projects
+            .iter()
+            .map(|p| (p.name.as_str(), p.source, p.entries.len()))
+            .collect::<Vec<_>>(),
+        [
+            ("Containers", Source::Containers, 2),
+            ("Other services", Source::Other, 3)
+        ]
+    );
+    assert_eq!(projects[0].key, CONTAINERS);
+    assert!(!is_project(CONTAINERS));
+    let api = &projects[0].entries[0];
+    assert_eq!(api.port.label(), "api");
+    assert_eq!(api.addresses, ["0.0.0.0", "::"]);
+    assert_eq!(api.port.publication().unwrap().target_port, 3000);
+    assert_eq!(api.port.row().unwrap().members.len(), 4);
+    assert_eq!(api.port.target().as_deref(), Some("to container port 3000"));
+    assert_eq!(api.port.detail(None), "IPv4 and IPv6");
+    assert_eq!(api.port.destination(None).unwrap().host, "localhost");
     assert!(
-        groups[0]
+        projects[1]
             .entries
             .iter()
-            .filter(|entry| entry.port.label() != "api")
-            .all(|entry| entry.addresses.len() == 1)
+            .all(|entry| entry.addresses.len() == 1 && entry.port.publication().is_none())
+    );
+}
+
+#[test]
+fn one_program_on_both_families_is_one_entry_described_by_the_program() {
+    let mut ipv6 = listener(3000, 8, "::", "");
+    socket(&mut ipv6).ipv6_only = Some(true);
+    let projects = group(vec![listener(3000, 7, "0.0.0.0", ""), ipv6], &[], S, &[]);
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].entries.len(), 1);
+    let entry = &projects[0].entries[0];
+    assert_eq!(entry.addresses, ["0.0.0.0", "::"]);
+    assert_eq!(entry.port.label(), "worker");
+    assert_eq!(entry.port.detail(None), "IPv4 and IPv6");
+    assert_eq!(entry.port.target(), None);
+    assert_eq!(entry.port.destination(None).unwrap().host, "localhost");
+}
+
+#[test]
+fn a_compose_container_keeps_its_project_and_a_filed_forward_moves_a_plain_one() {
+    let projects = group(
+        vec![
+            published(5432, "db", "0.0.0.0", "", Some("stack")),
+            proxy(5432, 10, "0.0.0.0"),
+            published(6379, "cache", "0.0.0.0", "", None),
+            proxy(6379, 11, "0.0.0.0"),
+        ],
+        &[forward("cache", 6379, "/srv/repo")],
+        S,
+        &[known("Repo", "/srv/repo")],
+    );
+    assert_eq!(
+        projects
+            .iter()
+            .map(|p| (p.name.as_str(), p.entries.len()))
+            .collect::<Vec<_>>(),
+        [("Repo", 1), ("stack", 1)]
+    );
+    assert!(
+        projects
+            .iter()
+            .all(|p| p.entries[0].port.row().unwrap().members.len() == 2)
+    );
+}
+
+#[test]
+fn catch_all_groups_follow_projects_as_system_containers_then_other() {
+    let mut service = listener(22, 1, "0.0.0.0", "");
+    socket(&mut service).units.push(d::Unit {
+        manager_uid: None,
+        name: "ssh.service".into(),
+        socket_cgroup: true,
+    });
+    let projects = group(
+        vec![
+            listener(9100, 2, "0.0.0.0", ""),
+            published(2201, "fx-minimal", "0.0.0.0", "", None),
+            service,
+            listener(3000, 3, "127.0.0.1", "/srv/app"),
+        ],
+        &[],
+        S,
+        &[],
+    );
+    assert_eq!(
+        projects.iter().map(|p| p.source).collect::<Vec<_>>(),
+        [
+            Source::Marker,
+            Source::System,
+            Source::Containers,
+            Source::Other
+        ]
     );
 }
 
@@ -797,4 +909,60 @@ fn a_dual_stack_listener_on_any_ipv6_address_is_reached_through_ipv4_loopback() 
     socket(&mut only_ipv6).ipv6_only = Some(true);
     assert!(saved(only_ipv6));
     assert!(saved(listener(3000, 1, "::1", "")));
+}
+
+#[test]
+fn wildcard_rows_name_only_the_families_they_are_known_to_accept() {
+    let mode = |address: &str, ipv6_only: Option<bool>| {
+        let mut member = listener(3000, 7, address, "");
+        socket(&mut member).ipv6_only = ipv6_only;
+        member
+    };
+    let detail = |members: Vec<d::Member>| observed_row(members).detail(None);
+    assert_eq!(detail(vec![mode("::", Some(false))]), "IPv4 and IPv6");
+    assert_eq!(detail(vec![mode("::", None)]), "all addresses");
+    assert_eq!(detail(vec![mode("::", Some(true))]), "IPv6");
+    assert_eq!(detail(vec![mode("0.0.0.0", None)]), "IPv4");
+    assert_eq!(
+        detail(vec![mode("0.0.0.0", None), mode("::", Some(true))]),
+        "IPv4 and IPv6"
+    );
+    assert_eq!(
+        detail(vec![mode("0.0.0.0", None), mode("::1", None)]),
+        "IPv4 and ::1"
+    );
+    assert_eq!(detail(vec![mode("127.0.0.1", None)]), "");
+}
+
+fn observed_row(members: Vec<d::Member>) -> Port {
+    Port::Observed(d::Row { members })
+}
+
+#[test]
+fn a_container_row_keeps_its_key_when_a_proxy_joins_or_leaves() {
+    let publications = vec![
+        published(2201, "fx-minimal", "0.0.0.0", "", None),
+        published(2201, "fx-minimal", "::", "", None),
+    ];
+    let key = |members: Vec<d::Member>| {
+        group(members, &[], S, &[])
+            .into_iter()
+            .find(|project| project.key == CONTAINERS)
+            .map(|project| project.entries[0].port.key())
+            .unwrap()
+    };
+    let alone = key(publications.clone());
+    let mut members = publications;
+    members.push(proxy(2201, 10, "0.0.0.0"));
+    members.push(proxy(2201, 11, "::"));
+    assert_eq!(key(members), alone);
+}
+
+#[test]
+fn a_podman_container_is_labelled_podman() {
+    let mut member = published(8080, "web", "0.0.0.0", "", None);
+    publication(&mut member).engine_kind = d::EngineKind::Podman;
+    let port = observed(member);
+    assert_eq!(port.kinds(), ["Podman"]);
+    assert_eq!(port.publication().unwrap().engine_kind.label(), "Podman");
 }

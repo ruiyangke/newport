@@ -75,6 +75,20 @@ impl Reader {
         }
         self.next(limit, Wait::Idle(frame_timeout))
     }
+    /// The caller stopped reading for a while by its own choice, as a reader
+    /// that waits for its consumer does. Bytes it already holds count as just
+    /// arrived, and a partial frame's deadline starts again: only time spent
+    /// waiting on the peer counts against it.
+    pub fn resume(&mut self) {
+        let now = Instant::now();
+        if self.buffer.offset < self.buffer.bytes.len() {
+            self.buffer.arrived = Some(now);
+        }
+        if self.buffer.frame_started.is_some() {
+            self.buffer.frame_started = Some(now);
+        }
+        self.buffer.frame_deadline = None;
+    }
     fn next(&mut self, limit: usize, wait: Wait) -> io::Result<Option<EncodedFrame>> {
         if self.buffer.retired {
             return Err(retired());
@@ -222,12 +236,17 @@ impl Wait {
 pub struct Writer {
     stream: Stream,
     retired: bool,
+    /// The descriptor is already nonblocking: one system call, not one a frame.
+    #[cfg(unix)]
+    nonblocking: bool,
 }
 impl Writer {
     pub fn new(stream: Stream) -> Self {
         Self {
             stream,
             retired: false,
+            #[cfg(unix)]
+            nonblocking: false,
         }
     }
     pub fn try_clone_stream(&self) -> io::Result<Stream> {
@@ -246,7 +265,10 @@ impl Writer {
             // Darwin's send-buffer wait does not honor MSG_DONTWAIT. Keep the
             // shared descriptor nonblocking; framed readers already poll it.
             #[cfg(unix)]
-            self.stream.set_nonblocking(true)?;
+            if !self.nonblocking {
+                self.stream.set_nonblocking(true)?;
+                self.nonblocking = true;
+            }
             while !frame.is_empty() {
                 remaining(deadline)?;
                 let result = write_until(&mut self.stream, frame, deadline);

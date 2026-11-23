@@ -30,7 +30,7 @@ fn ready(session: &Session) -> Result<(), String> {
 #[ignore = "child process helper for the explicitly opted-in lifecycle test"]
 fn terminal_lease_child() -> Result<(), String> {
     let server = std::env::var("NEWPORT_TEST_LEASE_SERVER").map_err(|e| e.to_string())?;
-    let session = Session::open(&server, 80, 24)?;
+    let session = Session::open(&server, 80, 24, None)?;
     ready(&session)?;
     println!("LEASE_READY {}", session.id());
     std::io::stdout().flush().unwrap();
@@ -69,7 +69,7 @@ fn crashed_native_clients_release_ptys_without_closing_other_sessions() -> Resul
     }
     let server = matching[0].id.to_string();
     let server = server.as_str();
-    let survivor = Session::open(server, 80, 24)?;
+    let survivor = Session::open(server, 80, 24, None)?;
     ready(&survivor)?;
     // Exceeds the backend's eight-session cap without touching existing PTYs.
     for round in 0..12 {
@@ -117,6 +117,7 @@ fn crashed_native_clients_release_ptys_without_closing_other_sessions() -> Resul
                         persist: false,
                         attach: false,
                         colors: None,
+                        directory: None,
                     })),
                     Duration::from_secs(10),
                 )

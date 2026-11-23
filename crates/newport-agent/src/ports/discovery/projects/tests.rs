@@ -259,6 +259,7 @@ fn compose_workdir_enrichment_is_independent_of_host_socket_ownership() {
         },
         target_port: 80,
         target_address: None,
+        engine_kind: newport_protocol::monitor::ports::discovery::EngineKind::Docker,
         compose: Some(Compose {
             directory: Some("/srv/project".into()),
             ..Compose::default()

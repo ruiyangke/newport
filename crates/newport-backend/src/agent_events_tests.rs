@@ -308,14 +308,10 @@ async fn unnegotiated_events_and_excess_deferred_requests_fail_closed() {
     send.send(encoded(ExportEvent::Offer { offer: None }))
         .await
         .unwrap();
-    assert!(
-        events
-            .receive()
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("Unnegotiated")
-    );
+    assert!(matches!(
+        events.receive().await.unwrap_err(),
+        super::super::Failure::Clipboard(message) if message.contains("Unnegotiated")
+    ));
     assert!(events.request_guard().is_err());
     let (send, input) = mpsc::channel(8);
     let mut events = Events::new(input);

@@ -192,7 +192,7 @@ schema!(PUBLICATION {
     3 => (1, false, Kind::Text(MAX_FIELD)), 4 => (1, false, Kind::Text(MAX_FIELD)),
     5 => (1, false, Kind::Integer32), 6 => (1, false, Kind::Message(ENDPOINT)),
     7 => (1, false, Kind::Integer32), 8 => (1, false, Kind::Text(16)),
-    9 => (1, false, Kind::Message(COMPOSE)),
+    9 => (1, false, Kind::Message(COMPOSE)), 10 => (1, false, Kind::Integer32),
 });
 schema!(ISSUE {
     1 => (1, false, Kind::Integer32), 2 => (1, false, Kind::Scalar),

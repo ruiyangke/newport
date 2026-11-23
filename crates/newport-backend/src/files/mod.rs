@@ -86,6 +86,49 @@ fn path_valid(path: &str) -> Result<()> {
 fn status(error: &Error, code: StatusCode) -> bool {
     matches!(error, Error::Status(s) if s.status_code == code)
 }
+fn missing(error: &anyhow::Error) -> bool {
+    matches!(error.downcast_ref::<Error>(), Some(error) if status(error, StatusCode::NoSuchFile))
+}
+/// The text of one error. An SFTP status reads as one message: its own
+/// Display puts the code's name before the server's message, which usually
+/// repeats it.
+pub(crate) fn message(error: &(dyn std::error::Error + 'static)) -> String {
+    match error.downcast_ref::<Error>() {
+        Some(Error::Status(status)) => match status.error_message.trim() {
+            "" => status.status_code.to_string(),
+            message => message.to_owned(),
+        },
+        _ => error.to_string(),
+    }
+}
+/// [`message`] for each cause, joined as `{:#}` joins them.
+pub(crate) fn chain_message(error: &anyhow::Error) -> String {
+    error.chain().map(message).collect::<Vec<_>>().join(": ")
+}
+/// A read in a project whose folder is gone fails on whichever path it asked
+/// for; this names the folder instead.
+fn gone(root: &str) -> anyhow::Error {
+    anyhow::anyhow!("{root} isn’t on the server any more.")
+}
+/// `error`, or [`gone`] when the project folder is no longer on the server.
+/// The check is bounded: a session that closed or stalls keeps `error`.
+pub(crate) async fn project_failure(
+    owner: &crate::server_session::ServerSession,
+    root: &str,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    if owner.is_revoked() {
+        return error;
+    }
+    let root_missing = async {
+        let session = owner.files.remote(owner).sftp.shared().await.ok()?;
+        Some(matches!(canonical(&session, root).await, Err(root_error) if missing(&root_error)))
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(5), root_missing).await {
+        Ok(Some(true)) => gone(root),
+        _ => error,
+    }
+}
 async fn canonical(session: &Session, path: &str) -> Result<String> {
     path_valid(path)?;
     session
@@ -340,17 +383,21 @@ pub(crate) async fn files_list_query(
                         let remote = owner.files.remote(&owner);
                         let session = remote.sftp.shared().await.map_err(|e| e.to_string())?;
                         cleanup.retry_upload_cleanup(remote);
-                        list(&session, &path).await.map(std::sync::Arc::new).map_err(|e| e.to_string())
+                        list(&session, &path).await.map(std::sync::Arc::new).map_err(|e| chain_message(&e))
                     } => result,
                 }
             }
         }).map_err(anyhow::Error::msg)?;
         if owner.is_revoked() { query.close(); }
         let result = if force { query.refresh().await } else { query.read().await };
-        result.map(|listing| {
-            if let Some(root)=project_root.as_deref() { owner.files.documents.prefetch(&owner,root,&listing); }
-            (*listing).clone()
-        }).map_err(anyhow::Error::msg)
+        match (result, project_root.as_deref()) {
+            (Ok(listing), root) => {
+                if let Some(root) = root { owner.files.documents.prefetch(&owner, root, &listing); }
+                Ok((*listing).clone())
+            }
+            (Err(error), Some(root)) => Err(project_failure(&owner, root, anyhow::Error::msg(error)).await),
+            (Err(error), None) => Err(anyhow::Error::msg(error)),
+        }
     }).await
 }
 pub async fn files_preview(
@@ -507,10 +554,71 @@ mod tests {
         .await
         .unwrap();
         assert!(query.snapshot().revision > revision);
+        let gone = format!("/gone-{}", Uuid::new_v4());
+        assert_eq!(
+            files_list_query(
+                &state,
+                &operations,
+                server.id,
+                Uuid::new_v4(),
+                gone.clone(),
+                None,
+                true,
+                Some(gone.clone()),
+            )
+            .await
+            .unwrap_err(),
+            format!("{gone} isn’t on the server any more.")
+        );
+        let missing = format!("/missing-{}", Uuid::new_v4());
+        assert_eq!(
+            files_list(
+                &state,
+                &operations,
+                server.id,
+                Uuid::new_v4(),
+                missing,
+                None
+            )
+            .await
+            .unwrap_err(),
+            "No such file"
+        );
         assert!(owner.agent_runtime.snapshot().instances.is_empty());
         assert!(owner.lifecycle.progress.snapshot().is_none());
         crate::manager::shutdown(&state).await;
         assert!(query.snapshot().data.is_none());
+    }
+
+    #[test]
+    fn an_sftp_status_reads_as_one_message() {
+        let status = |status_code, error_message: &str| {
+            anyhow::Error::from(Error::Status(russh_sftp::protocol::Status {
+                id: 1,
+                status_code,
+                error_message: error_message.into(),
+                language_tag: "en-US".into(),
+            }))
+        };
+        let missing = status(StatusCode::NoSuchFile, "No such file");
+        assert_eq!(message(&*missing), "No such file");
+        assert_eq!(chain_message(&missing), "No such file");
+        assert_eq!(
+            chain_message(&status(StatusCode::PermissionDenied, "Permission denied")),
+            "Permission denied"
+        );
+        assert_eq!(chain_message(&status(StatusCode::Failure, "")), "Failure");
+        assert_eq!(
+            chain_message(
+                &status(StatusCode::Failure, "Disk quota exceeded")
+                    .context("Could not finish upload")
+            ),
+            "Could not finish upload: Disk quota exceeded"
+        );
+        assert_eq!(
+            gone("/home/newport/goapp").to_string(),
+            "/home/newport/goapp isn’t on the server any more."
+        );
     }
 
     #[test]

@@ -172,6 +172,7 @@ fn terminal() -> Operation {
             persist: false,
             attach: false,
             colors: None,
+            directory: None,
         },
     ))))
 }

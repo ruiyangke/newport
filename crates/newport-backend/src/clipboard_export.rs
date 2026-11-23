@@ -462,13 +462,15 @@ impl Receiver {
                 }
             }
             Event::Data { id, offset, chunk } => {
-                if self.retiring.contains_key(&id) {
-                    return Ok(());
-                }
-                let pending = self
-                    .pending
-                    .get_mut(&id)
-                    .ok_or("Unknown or already completed clipboard export read")?;
+                let Some(pending) = self.pending.get_mut(&id) else {
+                    // The runtime answers a read it had not yet received when
+                    // it withdrew the offer or copy, refusing it here. That
+                    // reply, like one to a cancelled read, has no reader left.
+                    if id <= self.last_id {
+                        return Ok(());
+                    }
+                    return Err("Unknown clipboard export read".into());
+                };
                 if offset != pending.data.bytes.len() {
                     return Err("Clipboard export chunk offset does not match".into());
                 }

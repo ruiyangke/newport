@@ -222,9 +222,12 @@ fn curated_details(exe: &str, argv: &[&str], directory: Option<&str>) -> Vec<Det
     details
 }
 
-pub fn container_kinds(image: Option<&str>) -> Vec<&'static str> {
+pub fn container_kinds(
+    image: Option<&str>,
+    engine: crate::port_discovery::EngineKind,
+) -> Vec<&'static str> {
     let mut result: Vec<_> = image.and_then(image_service).into_iter().collect();
-    result.push("Docker");
+    result.push(engine.label());
     result
 }
 

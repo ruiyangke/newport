@@ -4,7 +4,7 @@
 //! terminal into the tab and carries on, with no new shell.
 use super::{
     Colors, Event, Input, Shell,
-    display::{Access, Viewing, view},
+    display::{Viewing, view},
     shell_channel::{discard_input, reconnecting, retry_on_return},
 };
 use crate::{agent::Service, agent_runtime::Error, model::Server, server_session::ServerSession};
@@ -37,8 +37,13 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const INPUT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The largest output event, so one burst never holds the app's stream.
 const OUTPUT_CHUNK: usize = 32 * 1024;
-/// How long a restored tab waits before asking a failing Needle again.
+/// How long a tab first waits before asking a failing Needle again.
 const RETRY_DELAY: Duration = Duration::from_secs(2);
+/// An attach that ends sooner than this, its shell still running, is the
+/// holder turning this Mac away rather than a connection that was in use.
+const SHORT_ATTACH: Duration = Duration::from_secs(1);
+/// The longest wait between a held shell's attach attempts.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const STALE_SESSION: &str = "Server session changed. Reconnect before retrying.";
 
 /// This computer's name, which other Macs show for its tabs. A Mac's id
@@ -295,12 +300,14 @@ fn shows_stable_display(hello: &Hello) -> bool {
         .is_ok()
 }
 
-/// The worker's `start` for a terminal.
+/// The worker's `start` for a terminal, whose new shell starts in
+/// `directory` when it names one.
 fn start_request(
     terminal: Uuid,
     (columns, rows): (u32, u32),
     creator: Uuid,
     stable_display: bool,
+    directory: Option<String>,
 ) -> Result<Request, Error> {
     let invalid = |_| Error::Unavailable("Invalid terminal size.".into());
     Ok(Request::Start {
@@ -313,6 +320,7 @@ fn start_request(
             name: COMPUTER.clone(),
         },
         stable_display,
+        directory,
     })
 }
 
@@ -324,9 +332,9 @@ async fn start(
     server: &Server,
     terminal: Uuid,
     size: (u32, u32),
-    access: Option<&Access>,
+    shell: &Shell,
 ) -> Result<Holder, Error> {
-    let named = access.is_some();
+    let named = shell.display.is_some();
     let creator = owner.integration_session_id();
     match request_with(owner, server, |hello| {
         start_request(
@@ -334,6 +342,7 @@ async fn start(
             size,
             creator,
             named && shows_stable_display(hello),
+            shell.directory.clone(),
         )
     })
     .await?
@@ -399,6 +408,7 @@ pub(crate) async fn run(
             return Ok(Some(Fallback { shell, input, size }));
         }
         let found = if attach {
+            let mut retry = Attempts::new();
             loop {
                 match find(&owner, server, terminal).await {
                     Found::Running(holder) => break Some(holder),
@@ -406,7 +416,14 @@ pub(crate) async fn run(
                         output.send(Event::Ended).await?;
                         return Ok(None);
                     }
-                    Found::Failed(error) => return Err(error.into()),
+                    Found::Failed(error) if lasting(&error) => return Err(error.into()),
+                    Found::Failed(error) => {
+                        output.send(retry.event(&error)).await?;
+                        tokio::select! {
+                            () = retry.pause() => {}
+                            () = discard_input(&mut input, &mut size) => return Ok(None),
+                        }
+                    }
                     Found::Stopped => {
                         output.send(waiting(&link)).await?;
                         tokio::select! {
@@ -421,7 +438,7 @@ pub(crate) async fn run(
         };
         let holder = match found {
             Some(holder) => holder,
-            None => match start(&owner, server, terminal, size, access.as_ref()).await {
+            None => match start(&owner, server, terminal, size, &shell).await {
                 Ok(holder) => holder,
                 // Needle launched nothing: an ordinary shell can't duplicate a
                 // held one, and the tab says it won't keep running.
@@ -474,9 +491,11 @@ struct Attachment<'a> {
     mac: Uuid,
 }
 
-/// Attaches to the holder, and again after each lost connection, until the
-/// shell exits, or the tab closes or detaches. Only the first attach of a tab
-/// someone `opened` says so: reattaching makes no Mac the active one.
+/// Attaches to the holder, and again after each lost connection or failed
+/// attach, until the shell exits or ends, or the tab closes or detaches. A
+/// failure here never gives up on a shell the server still holds; only one
+/// that retrying can't help does. Only the first attach of a tab someone
+/// `opened` says so: reattaching makes no Mac the active one.
 #[allow(clippy::too_many_arguments)]
 async fn follow(
     owner: &Arc<ServerSession>,
@@ -490,13 +509,72 @@ async fn follow(
     output: &mpsc::Sender<Event>,
 ) -> Result<()> {
     let holder = attachment.holder;
+    let mut retry = Attempts::new();
     loop {
         let channel = tokio::select! {
             result = connect(owner, server, link, holder) => result,
             _ = discard_input(input, size) => return Ok(()),
         };
-        let channel = match channel {
-            Ok(channel) => channel,
+        let failure = match channel {
+            Ok(channel) => {
+                let fate = channel.fate();
+                let stream = channel.into_stream();
+                let started = tokio::time::Instant::now();
+                let attached =
+                    attach_once(stream, attachment, opened, viewing, size, input, output).await;
+                opened = false;
+                let lasted = started.elapsed();
+                // Only attaches that keep ending at once wait ever longer.
+                if lasted >= SHORT_ATTACH {
+                    retry = Attempts::new();
+                }
+                match attached {
+                    Ok(Attached::Exited(exit)) => {
+                        output.send(Event::Exit(exit)).await?;
+                        return Ok(());
+                    }
+                    Ok(Attached::Closed) => return Ok(()),
+                    Err(error)
+                        if error.downcast_ref::<Error>().is_none()
+                            && error.downcast_ref::<GreetingFailure>().is_none()
+                            && matches!(
+                                error.downcast_ref::<FrameError>(),
+                                Some(FrameError::Truncated)
+                            )
+                            && crate::remote::lost(&fate).await.is_some() =>
+                    {
+                        match disconnected(owner, server, link, holder, &fate, output).await? {
+                            Next::Ended => return Ok(()),
+                            Next::Again if lasted < SHORT_ATTACH => {
+                                // The holder keeps turning this Mac away:
+                                // each try waits longer, as failures do.
+                                tokio::select! {
+                                    () = retry.pause() => None,
+                                    _ = discard_input(input, size) => return Ok(()),
+                                }
+                            }
+                            Next::Again => None,
+                            Next::Failed(error) => Some(error),
+                        }
+                    }
+                    Ok(Attached::Disconnected) => {
+                        match disconnected(owner, server, link, holder, &fate, output).await? {
+                            Next::Ended => return Ok(()),
+                            Next::Again if lasted < SHORT_ATTACH => {
+                                // The holder keeps turning this Mac away:
+                                // each try waits longer, as failures do.
+                                tokio::select! {
+                                    () = retry.pause() => None,
+                                    _ = discard_input(input, size) => return Ok(()),
+                                }
+                            }
+                            Next::Again => None,
+                            Next::Failed(error) => Some(error),
+                        }
+                    }
+                    Err(error) => Some(error),
+                }
+            }
             Err(Connect::Link(error)) if error.retry() == Retry::Backoff => continue,
             Err(Connect::Link(error)) if error.retry() == Retry::OnRetry => {
                 output.send(reconnecting(link, &error)).await?;
@@ -506,46 +584,106 @@ async fn follow(
                 }
                 continue;
             }
-            Err(Connect::Link(error)) => return Err(error.into()),
-            Err(Connect::Runtime(error)) => return Err(error.into()),
+            Err(Connect::Link(error)) => Some(error.into()),
+            Err(Connect::Runtime(error)) => Some(error.into()),
         };
-        let fate = channel.fate();
-        let stream = channel.into_stream();
-        let attached =
-            match attach_once(stream, attachment, opened, viewing, size, input, output).await {
-                Ok(attached) => attached,
-                Err(error)
-                    if error.downcast_ref::<Error>().is_none()
-                        && error.downcast_ref::<GreetingFailure>().is_none()
-                        && matches!(
-                            error.downcast_ref::<FrameError>(),
-                            Some(FrameError::Truncated)
-                        )
-                        && crate::remote::lost(&fate).await.is_some() =>
-                {
-                    Attached::Disconnected
-                }
-                Err(error) => return Err(error),
-            };
-        opened = false;
-        match attached {
-            Attached::Exited(exit) => {
-                output.send(Event::Exit(exit)).await?;
-                return Ok(());
-            }
-            Attached::Closed => return Ok(()),
-            Attached::Disconnected => match crate::remote::lost(&fate).await {
-                Some(lost) => output.send(reconnecting(link, &lost)).await?,
-                // The connection is fine; the holder closed the channel.
-                None => {
-                    let alive = list(owner, server).await?.iter().any(|h| h.id == holder.id);
-                    if !alive {
-                        output.send(Event::Ended).await?;
-                        return Ok(());
-                    }
-                }
-            },
+        let Some(failure) = failure else { continue };
+        if gives_up(&failure) {
+            return Err(failure);
         }
+        output.send(retry.event(&failure)).await?;
+        let gone = tokio::select! {
+            gone = async {
+                let gone = list(owner, server)
+                    .await
+                    .is_ok_and(|holders| !holders.iter().any(|h| h.id == holder.id));
+                if !gone {
+                    retry.pause().await;
+                }
+                gone
+            } => gone,
+            () = discard_input(input, size) => return Ok(()),
+        };
+        if gone {
+            output.send(Event::Ended).await?;
+            return Ok(());
+        }
+    }
+}
+
+/// What follows an attach whose channel ended.
+enum Next {
+    /// Attach again: the link is reconnecting, or the holder still runs.
+    Again,
+    /// The server no longer holds the shell; the tab has been told.
+    Ended,
+    /// Needle couldn't say whether it still holds the shell.
+    Failed(anyhow::Error),
+}
+
+/// After an attach's channel ended: what the tab shows while the link
+/// reconnects, or the end when the server no longer holds the shell.
+async fn disconnected(
+    owner: &Arc<ServerSession>,
+    server: &Server,
+    link: &Link,
+    holder: &Holder,
+    fate: &newport_ssh::Fate,
+    output: &mpsc::Sender<Event>,
+) -> Result<Next> {
+    if let Some(lost) = crate::remote::lost(fate).await {
+        output.send(reconnecting(link, &lost)).await?;
+        return Ok(Next::Again);
+    }
+    // The connection is fine; the holder closed the channel.
+    match list(owner, server).await {
+        Ok(holders) if holders.iter().any(|h| h.id == holder.id) => Ok(Next::Again),
+        Ok(_) => {
+            output.send(Event::Ended).await?;
+            Ok(Next::Ended)
+        }
+        Err(error) => Ok(Next::Failed(error.into())),
+    }
+}
+
+/// Whether retrying can't help: the server session changed, or the holder
+/// refused for good, as one of an incompatible build does.
+fn lasting(error: &Error) -> bool {
+    match error {
+        Error::Stale => true,
+        Error::Remote(error) => error.retry == newport_protocol::common::Retry::No,
+        _ => false,
+    }
+}
+
+/// Whether an attached tab stops on this failure instead of trying again.
+fn gives_up(failure: &anyhow::Error) -> bool {
+    failure.downcast_ref::<Error>().is_some_and(lasting)
+}
+
+/// The pause before a held shell's next attach attempt, growing with each
+/// failure, and the attempt the tab shows.
+struct Attempts {
+    attempt: u32,
+    delay: Duration,
+}
+impl Attempts {
+    fn new() -> Self {
+        Self {
+            attempt: 0,
+            delay: RETRY_DELAY,
+        }
+    }
+    fn event(&mut self, failure: &dyn std::fmt::Display) -> Event {
+        self.attempt = self.attempt.saturating_add(1);
+        Event::Reconnecting {
+            attempt: self.attempt,
+            message: failure.to_string(),
+        }
+    }
+    async fn pause(&mut self) {
+        tokio::time::sleep(self.delay).await;
+        self.delay = (self.delay * 2).min(MAX_RETRY_DELAY);
     }
 }
 
@@ -658,7 +796,7 @@ fn inflate(compressed: &[u8]) -> Result<Vec<u8>> {
 struct GreetingFailure(anyhow::Error);
 impl std::fmt::Display for GreetingFailure {
     fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        output.write_str("The terminal did not complete its greeting. Attachment was not retried. If it predates the update, close the tab to end its shell, then open a new one.")
+        output.write_str("The terminal did not complete its greeting. If it predates the update, close the tab to end its shell, then open a new one.")
     }
 }
 impl std::error::Error for GreetingFailure {
@@ -809,9 +947,16 @@ async fn attach_once(
     output.send(Event::Ready).await?;
     let mut input_open = true;
     let mut full_pending = true;
+    // What the holder sent that the tab hasn't taken yet: one message's worth
+    // at most, as the holder is read again only once it has gone. Waiting for
+    // the tab here never holds up the person's input to the shell.
+    let mut queued = std::collections::VecDeque::new();
     loop {
         tokio::select! {
-            read = reader.next() => {
+            permit = output.reserve(), if !queued.is_empty() => {
+                permit?.send(queued.pop_front().expect("queued output"));
+            }
+            read = reader.next(), if queued.is_empty() => {
                 let body = match read {
                     Ok(Some(body)) => body,
                     Ok(None) | Err(FrameError::Io(_)) => return Ok(Attached::Disconnected),
@@ -820,17 +965,15 @@ async fn attach_once(
                 match protocol::wire::decode_server(body)? {
                     ServerMessage::Screen(state) => {
                         full_pending = true;
-                        output.send(Event::Restore { state: state.to_vec(), prompted }).await?;
+                        queued.push_back(Event::Restore { state: state.to_vec(), prompted });
                     }
                     ServerMessage::Full(compressed) if full_pending => {
                         full_pending = false;
-                        output.send(Event::Restore { state: inflate(&compressed)?, prompted }).await?;
+                        queued.push_back(Event::Restore { state: inflate(&compressed)?, prompted });
                     }
                     ServerMessage::Output(bytes) => {
                         full_pending = false;
-                        for bytes in bytes.chunks(OUTPUT_CHUNK) {
-                            output.send(Event::Data(bytes.to_vec())).await?;
-                        }
+                        queued.extend(bytes.chunks(OUTPUT_CHUNK).map(|bytes| Event::Data(bytes.to_vec())));
                     }
                     ServerMessage::Exit(exit) => {
                         let (_, trailing) = reader.into_parts();
@@ -840,17 +983,17 @@ async fn attach_once(
                     ServerMessage::Active(active) => {
                         full_pending = false;
                         if !active { viewing.inactive(); }
-                        output.send(Event::Active(active)).await?;
+                        queued.push_back(Event::Active(active));
                     }
                     // Before the output drawn at it, and any screen sent with it.
                     ServerMessage::Size { columns, rows } => {
-                        output.send(Event::Size { columns, rows }).await?;
+                        queued.push_back(Event::Size { columns, rows });
                     }
                     ServerMessage::Failed(error) => return Err(Error::Remote(error).into()),
                     _ => bail!("The terminal sent an unexpected frame."),
                 }
             }
-            () = viewing.lost() => output.send(Event::DisplayLost).await?,
+            () = viewing.lost() => queued.push_back(Event::DisplayLost),
             command = input.recv(), if input_open => {
                 let command = match command {
                     Some(Input::Data(bytes)) => {
@@ -1308,7 +1451,7 @@ mod tests {
     #[tokio::test]
     async fn dispatched_mutation_write_flush_and_decode_failures_are_uncertain() {
         for request in [
-            start_request(Uuid::new_v4(), (80, 24), Uuid::new_v4(), false).unwrap(),
+            start_request(Uuid::new_v4(), (80, 24), Uuid::new_v4(), false, None).unwrap(),
             Request::Rename {
                 id: holder_id(Uuid::new_v4()),
                 name: "build".into(),
@@ -1388,7 +1531,7 @@ mod tests {
         use newport_protocol::{common::Retry, runtime::Capability};
         let mut runtime = hello(&[1], &[1]);
         let id = holder_id(Uuid::new_v4());
-        let start = start_request(Uuid::new_v4(), (80, 24), Uuid::new_v4(), false).unwrap();
+        let start = start_request(Uuid::new_v4(), (80, 24), Uuid::new_v4(), false, None).unwrap();
         for request in [
             start,
             Request::Rename {
@@ -1443,11 +1586,11 @@ mod tests {
         assert!(!shows_stable_display(&hello(&[], &[1])));
         let terminal = Uuid::new_v4();
         let creator = Uuid::new_v4();
-        let expected = start_request(terminal, (80, 24), creator, true).unwrap();
+        let expected = start_request(terminal, (80, 24), creator, true, None).unwrap();
         assert!(
             matches!(expected, Request::Start { stable_display: true, creator: computer, .. } if computer.id == creator.to_string())
         );
-        let plain = start_request(terminal, (80, 24), creator, false).unwrap();
+        let plain = start_request(terminal, (80, 24), creator, false, None).unwrap();
         assert!(matches!(
             plain,
             Request::Start {
@@ -1455,7 +1598,30 @@ mod tests {
                 ..
             }
         ));
-        assert!(start_request(terminal, (u32::MAX, 24), creator, false).is_err());
+        assert!(start_request(terminal, (u32::MAX, 24), creator, false, None).is_err());
+    }
+
+    #[test]
+    fn a_new_held_shell_is_asked_to_start_in_the_tabs_folder() {
+        let terminal = Uuid::new_v4();
+        let creator = Uuid::new_v4();
+        let folder = "/srv/it's a project".to_owned();
+        let request = start_request(terminal, (80, 24), creator, false, Some(folder.clone()));
+        let request = request.unwrap();
+        assert!(matches!(
+            &request,
+            Request::Start { directory: Some(directory), .. } if *directory == folder
+        ));
+        let sent = wire::encode_request(&request).unwrap();
+        assert_eq!(wire::read_request(&mut sent.as_slice()).unwrap(), request);
+        let plain = start_request(terminal, (80, 24), creator, false, None).unwrap();
+        assert!(matches!(
+            plain,
+            Request::Start {
+                directory: None,
+                ..
+            }
+        ));
     }
 
     async fn next(output: &mut mpsc::Receiver<Event>) -> Event {
@@ -1511,6 +1677,40 @@ mod tests {
         ));
         write_server(server, ServerMessage::Attached { prompted: true }).await;
         write_server(server, ServerMessage::Screen(Vec::new().into())).await;
+    }
+
+    #[tokio::test]
+    async fn input_reaches_the_shell_while_the_tab_takes_no_output() {
+        let holder = Holder {
+            id: holder_id(Uuid::new_v4()),
+            socket: "/unused".into(),
+        };
+        let (client, server) = tokio::io::duplex(1 << 16);
+        let mut server = FrameReader::new(server, protocol::CLIENT_LIMITS);
+        let (input_tx, mut input) = mpsc::channel(8);
+        // Room for the screen and Ready only: the tab takes nothing more.
+        let (output, _events) = mpsc::channel(2);
+        let mut viewing = Viewing::new(None);
+        let mut size = (80, 24);
+        let attachment = Attachment {
+            holder: &holder,
+            colors: None,
+            mac: Uuid::new_v4(),
+        };
+        let holder_side = async {
+            greet(&mut server, &holder.id).await;
+            for _ in 0..8 {
+                write_server(&mut server, ServerMessage::Output(vec![b'y'; 1024].into())).await;
+            }
+            input_tx.send(Input::Data(b"\x03".to_vec())).await.unwrap();
+            sent(&mut server, ClientMessage::Input(b"\x03".to_vec().into())).await;
+        };
+        tokio::select! {
+            result = attach_once(client, attachment, true, &mut viewing, &mut size, &mut input, &output) => {
+                panic!("the attachment ended: {:?}", result.err());
+            }
+            () = holder_side => {}
+        }
     }
 
     #[tokio::test]
@@ -2001,6 +2201,56 @@ mod tests {
                 .downcast_ref::<Error>()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn an_attached_tab_stops_only_for_a_changed_session_or_a_final_refusal() {
+        let remote = |retry| {
+            Error::Remote(newport_protocol::common::Error {
+                code: "holder_failed".into(),
+                message: "The holder refused.".into(),
+                retry,
+            })
+        };
+        let stops = |error: anyhow::Error| gives_up(&error);
+        assert!(stops(Error::Stale.into()));
+        assert!(stops(Error::Remote(protocol::reopen_required()).into()));
+        assert!(stops(remote(newport_protocol::common::Retry::No).into()));
+        assert!(stops(greeting_failure(FrameError::Malformed.into())));
+        for error in [
+            Error::Interrupted("Selected runtime disconnected".into()),
+            Error::Unavailable("The terminal worker sent no list.".into()),
+            Error::NotInstalled,
+            remote(newport_protocol::common::Retry::Unknown),
+            remote(newport_protocol::common::Retry::Yes),
+        ] {
+            assert!(!stops(error.into()));
+        }
+        assert!(!stops(newport_ssh::Error::Closed.into()));
+        assert!(!stops(greeting_failure(
+            std::io::Error::from(std::io::ErrorKind::TimedOut).into()
+        )));
+        assert!(!stops(
+            anyhow::Error::from(remote(newport_protocol::common::Retry::Unknown))
+                .context("The terminal attachment timed out.")
+        ));
+        assert!(!stops(FrameError::Truncated.into()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reattach_pauses_grow_to_a_cap_and_number_each_attempt() {
+        let mut attempts = Attempts::new();
+        let mut waited = Vec::new();
+        for _ in 0..6 {
+            let Event::Reconnecting { attempt, message } = attempts.event(&"lost") else {
+                panic!("a retry shows as reconnecting");
+            };
+            assert_eq!(message, "lost");
+            let started = tokio::time::Instant::now();
+            attempts.pause().await;
+            waited.push((attempt, started.elapsed().as_secs()));
+        }
+        assert_eq!(waited, [(1, 2), (2, 4), (3, 8), (4, 16), (5, 30), (6, 30)]);
     }
 
     #[test]

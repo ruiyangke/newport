@@ -23,3 +23,12 @@ async fn overview(server: &std::sync::Arc<ServerSession>) -> Result<Value, Strin
     let reading = monitor::snapshot(server).await?;
     serde_json::to_value(monitoring::parse_overview(reading)?).map_err(|e| e.to_string())
 }
+
+/// An Overview reading whose processes match `search`.
+pub async fn search(
+    server: &std::sync::Arc<ServerSession>,
+    search: String,
+) -> Result<Value, String> {
+    let reading = monitor::search(server, search).await?;
+    serde_json::to_value(monitoring::parse_overview(reading)?).map_err(|e| e.to_string())
+}

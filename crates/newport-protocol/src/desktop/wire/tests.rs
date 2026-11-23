@@ -343,6 +343,45 @@ fn worker_stream_arguments_keep_their_semantic_limits_on_encode_and_decode() {
     }
 }
 #[test]
+fn a_terminal_opens_in_an_absolute_folder_checked_in_both_wire_directions() {
+    let open = |directory: Option<&str>| {
+        request(Operation::Stream(Box::new(s::Operation::TerminalOpen(
+            Box::new(s::TerminalOpenArgs {
+                server: uuid::Uuid::from_u128(1),
+                session: uuid::Uuid::from_u128(2),
+                columns: 80,
+                rows: 24,
+                persist: false,
+                attach: false,
+                colors: None,
+                directory: directory.map(str::to_owned),
+            }),
+        ))))
+    };
+    for directory in [None, Some("/srv/it's a \"project\" 项目")] {
+        let decoded = decode_client(body(encode_client(&open(directory)).unwrap()), false).unwrap();
+        let ClientMessage::Request(decoded) = decoded else {
+            panic!("expected request")
+        };
+        let Operation::Stream(decoded) = decoded.operation else {
+            panic!("expected stream")
+        };
+        let s::Operation::TerminalOpen(decoded) = *decoded else {
+            panic!("expected terminal open")
+        };
+        assert_eq!(decoded.directory.as_deref(), directory);
+    }
+    let oversized = format!("/{}", "x".repeat(crate::terminal::MAX_DIRECTORY));
+    for directory in ["srv/app", "/srv/app\0", "/srv/app\r", oversized.as_str()] {
+        let invalid = open(Some(directory));
+        assert!(encode_client(&invalid).is_err(), "encode {directory:?}");
+        assert!(
+            decode_client(proto_body(&invalid), false).is_err(),
+            "decode {directory:?}"
+        );
+    }
+}
+#[test]
 fn lsp_open_checks_remote_paths_and_plain_identifiers_in_both_wire_directions() {
     use crate::desktop::configuration::{AuthMethod, ConnectionScope, ConnectionSettings};
     let lsp = |root: &str, name: &str| {

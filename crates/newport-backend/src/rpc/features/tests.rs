@@ -334,6 +334,7 @@ async fn native_feature_routes_preserve_validation_before_any_remote_action() {
                         persist: false,
                         attach: false,
                         colors: None,
+                        directory: None,
                     },
                 )),
                 Duration::from_secs(3),

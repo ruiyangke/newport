@@ -16,6 +16,13 @@ use std::collections::{HashMap, HashSet};
 
 pub const OTHER: &str = "";
 pub const SYSTEM: &str = "system-services:";
+pub const CONTAINERS: &str = "containers:";
+
+/// Whether a group key names a project that forwards can be filed under,
+/// rather than one of the catch-all groups.
+pub fn is_project(key: &str) -> bool {
+    key != OTHER && key != SYSTEM && key != CONTAINERS
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
@@ -81,7 +88,20 @@ pub enum Source {
     Vcs,
     Marker,
     System,
+    Containers,
     Other,
+}
+
+impl Source {
+    /// Projects come first, then the catch-all groups in this order.
+    fn rank(self) -> u8 {
+        match self {
+            Self::System => 1,
+            Self::Containers => 2,
+            Self::Other => 3,
+            Self::Saved | Self::Compose | Self::Vcs | Self::Marker => 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -249,6 +269,7 @@ pub fn project_key(port: &Port) -> String {
         {
             return format!("compose:{project}");
         }
+        return CONTAINERS.to_owned();
     }
     if port.system() {
         SYSTEM.to_owned()
@@ -281,6 +302,8 @@ fn describe(key: &str, port: Option<&Port>, known: &[&Bookmark]) -> Project {
         ("Other services".to_owned(), None, Source::Other, None)
     } else if key == SYSTEM {
         ("System services".to_owned(), None, Source::System, None)
+    } else if key == CONTAINERS {
+        ("Containers".to_owned(), None, Source::Containers, None)
     } else if let Some(name) = key.strip_prefix("compose:") {
         (
             name.to_owned(),
@@ -391,7 +414,9 @@ fn group_inner(
             }
         }
         let own = fold(&project_key(&port));
-        let key = if own == OTHER {
+        // A forward filed under a project takes a listener with no project
+        // of its own there.
+        let key = if own == OTHER || own == CONTAINERS {
             forwards
                 .iter()
                 .map(|t| t.project.as_deref().unwrap_or(""))
@@ -473,8 +498,9 @@ fn group_inner(
         });
     }
     projects.sort_by(|a, b| {
-        (a.source == Source::Other, a.source == Source::System)
-            .cmp(&(b.source == Source::Other, b.source == Source::System))
+        a.source
+            .rank()
+            .cmp(&b.source.rank())
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
             .then_with(|| a.name.cmp(&b.name))
             .then_with(|| a.key.cmp(&b.key))

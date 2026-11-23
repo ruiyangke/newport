@@ -216,10 +216,10 @@ impl Newport {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let project = if project == newport_domain::port_grouping::SYSTEM {
-            ""
-        } else {
+        let project = if newport_domain::port_grouping::is_project(project) {
             project
+        } else {
+            ""
         };
         let mut plan = if let [entry] = entries.as_slice() {
             forwarding_batch::plan_single(server, project, entry, &allocated, &active)?
@@ -284,8 +284,7 @@ impl Newport {
         entries: &[Entry],
         cx: &mut Context<Self>,
     ) -> Option<HeadingAction> {
-        let worth = !scope.project.is_empty()
-            && scope.project != newport_domain::port_grouping::SYSTEM
+        let worth = newport_domain::port_grouping::is_project(&scope.project)
             && entries
                 .iter()
                 .filter(|e| !e.is_saved() || !e.port.reverse())
@@ -347,8 +346,7 @@ impl Newport {
         entries: &[Entry],
         cx: &mut Context<Self>,
     ) -> Option<HeadingAction> {
-        if project.is_empty()
-            || project == newport_domain::port_grouping::SYSTEM
+        if !newport_domain::port_grouping::is_project(project)
             || !self
                 .plan_port_batch(project, entries)
                 .is_ok_and(|p| !p.stop.is_empty())

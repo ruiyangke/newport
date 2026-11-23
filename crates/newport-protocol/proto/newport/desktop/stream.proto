@@ -14,6 +14,9 @@ message TerminalOpenArgs {
   // Absence uses the source API default.
   optional bool attach = 6;
   optional bytes colors = 7;
+  // The absolute folder a new shell starts in. Attaching keeps the held
+  // shell's own.
+  optional string directory = 8;
 }
 
 message CommandOpenArgs {

@@ -132,7 +132,7 @@ impl Documents {
                 biased;
                 _=cancelled.changed()=>Err("Server session closed.".into()),
                 result=tokio::time::timeout(Duration::from_secs(60),load_document(owner,root,path))=>
-                    result.map_err(|_|"File read timed out.".to_owned())?.map_err(|e|e.to_string()),
+                    result.map_err(|_|"File read timed out.".to_owned())?.map_err(|e|super::chain_message(&e)),
             }
         }).await
     }
@@ -255,7 +255,7 @@ impl Documents {
                 let read = owner.files.documents.fetch(key, || async {
                     super::editor::prefetch_document(&owner, &root, &path, PREFETCH_LIMIT as usize)
                         .await
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| super::chain_message(&e))
                 });
                 let mut cancelled = owner.cancellation();
                 tokio::select! {

@@ -21,6 +21,8 @@ Install the language server on the server, for the account Newport signs in with
 
 Open a file in one of these languages. Newport starts the server, and the file header shows its name with a dot: green when ready, and a word such as **Starting** or **Indexing** while it works.
 
+If the server hasn't answered after 15 seconds, the header says **Not answering** and a notice offers **Restart**. A large project can take longer to load: if you wait, the server becomes ready when it answers.
+
 If the server isn't installed, a notice says so. Choose **Install in terminal**: a terminal tab opens in the editor with the install command typed in but not run, such as `rustup component add rust-analyzer`. Check it, press **Return**, and when it finishes choose **Try again**.
 
 ### If the project uses direnv
@@ -91,6 +93,7 @@ After you change settings, choose **Code** > **Restart language server**. If a s
 | The header says **Not installed** | Choose **Install in terminal**, or install the server yourself, then **Try again**. |
 | The header says **Not started** | Follow the notice: allow `.envrc`, or fix it if it failed to load, then choose **Try again**. Or choose **Start without .envrc**. |
 | The header says **Stopped** | Read the reason in the notice and choose **Restart**. |
+| The header says **Not answering** | Wait for a large project to load, or choose **Restart**. |
 | **Code** is unavailable | Wait until the server is ready. |
 | "The language server took too long" | Wait for indexing to finish, then try again. |
 | "The files changed" and no edits were applied | Run the tool again. |

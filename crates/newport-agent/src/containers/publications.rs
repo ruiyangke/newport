@@ -3,8 +3,8 @@ use crate::docker::{Endpoint as Engine, Query, QueryError};
 use newport_protocol::monitor::ports::{
     MAX_FIELD, MAX_LISTENERS,
     discovery::{
-        Compose, ContainerState, Endpoint, Issue, IssueKind, MAX_DIAGNOSTIC, MAX_ISSUES, Outcome,
-        Publication, Report,
+        Compose, ContainerState, Endpoint, EngineKind, Issue, IssueKind, MAX_DIAGNOSTIC,
+        MAX_ISSUES, Outcome, Publication, Report,
     },
 };
 use serde::Deserialize;
@@ -190,7 +190,12 @@ impl Container {
 fn inventory(engine: &Engine, query: &Query<'_>) -> Result<Publications, QueryError> {
     if engine.is_podman() {
         // Podman's compatibility API generates a fresh /info ID per request.
-        let mut result = convert(None, engine.get("/containers/json", query)?, query);
+        let mut result = convert(
+            None,
+            EngineKind::Podman,
+            engine.get("/containers/json", query)?,
+            query,
+        );
         issue(
             &mut result.report,
             IssueKind::Unsupported,
@@ -215,7 +220,7 @@ fn inventory(engine: &Engine, query: &Query<'_>) -> Result<Publications, QueryEr
                     "Docker engine changed during publication discovery",
                 )));
             }
-            convert(Some(&info.id), rows, query)
+            convert(Some(&info.id), EngineKind::Docker, rows, query)
         }
         Err(error) => Publications {
             engine: Some(info.id),
@@ -225,7 +230,12 @@ fn inventory(engine: &Engine, query: &Query<'_>) -> Result<Publications, QueryEr
     Ok(values)
 }
 
-fn convert(engine: Option<&str>, rows: Vec<Value>, query: &Query<'_>) -> Publications {
+fn convert(
+    engine: Option<&str>,
+    kind: EngineKind,
+    rows: Vec<Value>,
+    query: &Query<'_>,
+) -> Publications {
     let mut result = Publications::empty(Report::complete(), true);
     result.engine = engine.map(str::to_owned);
     if rows.len() > MAX_CONTAINERS {
@@ -255,7 +265,7 @@ fn convert(engine: Option<&str>, rows: Vec<Value>, query: &Query<'_>) -> Publica
                 continue;
             }
         };
-        if !collected.container(engine, &container, query) {
+        if !collected.container(engine, kind, &container, query) {
             break;
         }
     }
@@ -296,6 +306,7 @@ impl Collected {
     fn container(
         &mut self,
         engine: Option<&str>,
+        kind: EngineKind,
         container: &Container,
         query: &Query<'_>,
     ) -> bool {
@@ -323,6 +334,7 @@ impl Collected {
                 target_port,
                 target_address: None,
                 compose: compose.clone(),
+                engine_kind: kind,
             };
             if !self.append(value) {
                 return false;

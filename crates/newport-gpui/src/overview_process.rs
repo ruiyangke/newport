@@ -1,8 +1,11 @@
 //! Searchable, sortable monitoring rows; process data remains read-only.
 use super::*;
 use gpui_kit::component::input::InputEvent;
-use newport_protocol::monitor::metrics::{Process, Snapshot};
+use newport_protocol::monitor::metrics::{MAX_SEARCH, Process, Snapshot};
 const PAGE_SIZE: usize = 20;
+/// How long typing pauses before Needle is asked to search every process.
+pub(super) const SEARCH_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
+pub(super) const SEARCH_KEY: &str = "process-search";
 const ROW_HEIGHT: f32 = crate::ui::TWO_LINE_ROW_HEIGHT;
 const SORT_NAMES: [&str; 6] = ["CPU", "Memory", "Process", "PID", "User", "Time"];
 fn page_range(count: usize, requested: usize) -> std::ops::Range<usize> {
@@ -15,17 +18,88 @@ pub(super) struct State {
     page: usize,
     subscription: Option<Subscription>,
     ordered: std::cell::RefCell<ProcessCache>,
+    /// The search Needle is asked for once typing pauses.
+    search: Option<String>,
+    /// The search the read in flight asks for.
+    sent: Option<String>,
+    found: Option<Found>,
+    /// Why Needle couldn't answer the current search.
+    failed: Option<String>,
+    pause: Option<Task<()>>,
+}
+impl State {
+    /// Forgets a search in flight, whose reply cleared reads will refuse.
+    pub(super) fn abandon_search(&mut self) {
+        self.sent = None;
+        self.pause = None;
+    }
+}
+#[cfg(test)]
+impl State {
+    pub(super) fn input(&self) -> Option<&Entity<InputState>> {
+        self.input.as_ref()
+    }
+    /// How many processes match, by Needle's answer to the current search.
+    pub(super) fn matches(&self) -> Option<u32> {
+        self.found
+            .as_ref()
+            .filter(|found| Some(&found.search) == self.search.as_ref())
+            .map(|found| found.matches)
+    }
+    pub(super) fn in_flight(&self) -> bool {
+        self.sent.is_some() || self.pause.is_some()
+    }
+    pub(super) fn failed(&self) -> Option<&str> {
+        self.failed.as_deref()
+    }
+}
+/// Needle's answer to one search.
+struct Found {
+    search: String,
+    processes: Vec<Process>,
+    matches: u32,
+    revision: u64,
+}
+/// What Needle is asked to find: the typed text without surrounding space,
+/// within the protocol's limit. Needle ignores case, so one search stands for
+/// every spelling.
+fn search_text(value: &str) -> Option<String> {
+    let value = value.trim().to_lowercase().replace('\0', "");
+    if value.is_empty() {
+        return None;
+    }
+    let mut end = value.len().min(MAX_SEARCH);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(value[..end].to_owned())
+}
+/// The list's footer: the rows this page shows, and how many processes match.
+fn footer(
+    range: &std::ops::Range<usize>,
+    count: usize,
+    filtering: bool,
+    matches: Option<u32>,
+) -> String {
+    let rows = format!("{}–{} of {count}", range.start + 1, range.end);
+    match matches {
+        _ if !filtering => format!("{rows} collected"),
+        Some(matches) if matches as usize > count => format!("{rows} shown · {matches} matching"),
+        _ => format!("{rows} matching"),
+    }
 }
 #[derive(Default)]
 struct ProcessCache {
-    key: Option<(u64, String, usize, bool)>,
+    key: Option<((u64, u64), String, usize, bool)>,
     rows: std::rc::Rc<Vec<Process>>,
 }
 impl ProcessCache {
+    /// `sources` in order of preference: a process in several keeps its
+    /// first row.
     fn get(
         &mut self,
-        revision: u64,
-        source: &[Process],
+        revision: (u64, u64),
+        sources: &[&[Process]],
         query: &str,
         sort: usize,
         ascending: bool,
@@ -37,7 +111,14 @@ impl ProcessCache {
             ascending,
         );
         if self.key.as_ref() != Some(&key) {
-            self.rows = std::rc::Rc::new(ordered(source.to_vec(), &key.1, key.2, ascending));
+            let mut seen = std::collections::HashSet::new();
+            let rows = sources
+                .iter()
+                .flat_map(|source| source.iter())
+                .filter(|row| seen.insert(row.pid))
+                .cloned()
+                .collect();
+            self.rows = std::rc::Rc::new(ordered(rows, &key.1, key.2, ascending));
             self.key = Some(key);
         }
         self.rows.clone()
@@ -314,11 +395,100 @@ impl Newport {
                     .process_filter = input.read(cx).value().to_string();
                 if let Some(state) = this.overview_state.processes.get_mut(&server) {
                     state.page = 0;
+                    let executor = cx.background_executor().clone();
+                    let server = server.clone();
+                    state.pause = Some(cx.spawn(async move |this, cx| {
+                        executor.timer(SEARCH_PAUSE).await;
+                        let _ = this.update(cx, |this, cx| {
+                            if this.server == server {
+                                this.search_overview_processes();
+                                cx.notify();
+                            }
+                        });
+                    }));
                 }
                 cx.notify();
             }));
             state.input = Some(input);
         }
+    }
+    /// Asks Needle for the processes that match the typed search. A read
+    /// already in flight asks again when it settles.
+    pub(super) fn search_overview_processes(&mut self) {
+        if self.page != Page::Overview {
+            return;
+        }
+        let search = search_text(&self.overview_state.prefs(&self.server).process_filter);
+        let Some(state) = self.overview_state.processes.get_mut(&self.server) else {
+            return;
+        };
+        state.pause = None;
+        state.search = search.clone();
+        let Some(search) = search else {
+            state.found = None;
+            state.failed = None;
+            return;
+        };
+        let Some(generation) = self.resources.begin(SEARCH_KEY) else {
+            return;
+        };
+        state.sent = Some(search.clone());
+        state.failed = None;
+        let operation = desktop_server(&self.server).map(|server| {
+            desktop::Operation::Metrics(Box::new(desktop::metrics::Operation::Collect(Box::new(
+                desktop::metrics::CollectArgs {
+                    server,
+                    refresh: false,
+                    section: desktop::metrics::Section::Overview,
+                    search: Some(search),
+                },
+            ))))
+        });
+        self.dispatch_typed(SEARCH_KEY, operation, Some(generation));
+    }
+    /// Settles a process search. A reply to a search the user has since
+    /// changed is dropped, and the current search is asked for instead.
+    pub(super) fn complete_process_search(
+        &mut self,
+        generation: u64,
+        result: Result<desktop::Reply, newport_client::request_error::RequestError>,
+    ) -> bool {
+        let reading = result.and_then(|reply| match reply {
+            desktop::Reply::Metrics(reply) => match *reply {
+                desktop::metrics::Reply::Collect(reading) => Ok(*reading),
+                _ => Err("The backend answered a process search with another reply.".into()),
+            },
+            _ => Err("The backend answered a process search with another reply.".into()),
+        });
+        let accepted = self.resources.complete_detailed(
+            SEARCH_KEY,
+            generation,
+            reading.as_ref().map(|_| ()).map_err(Clone::clone),
+        );
+        if !accepted {
+            return false;
+        }
+        let Some(state) = self.overview_state.processes.get_mut(&self.server) else {
+            return true;
+        };
+        let sent = state.sent.take();
+        if sent != state.search {
+            self.search_overview_processes();
+            return true;
+        }
+        match (sent, reading) {
+            (Some(search), Ok(reading)) => {
+                state.found = Some(Found {
+                    search,
+                    processes: reading.sample.processes,
+                    matches: reading.sample.process_matches,
+                    revision: generation,
+                });
+            }
+            (Some(_), Err(error)) => state.failed = Some(error.message),
+            (None, _) => {}
+        }
+        true
     }
     pub(super) fn overview_processes(
         &self,
@@ -335,18 +505,35 @@ impl Newport {
         let preferences = self.overview_state.prefs(&self.server);
         let source = data.map_or(&[][..], |data| &data.processes);
         let total = source.len();
-        let filtering = !input.read(cx).value().trim().is_empty();
+        let typed = input.read(cx).value();
+        let filtering = !typed.trim().is_empty();
+        let found = state.found.as_ref().filter(|_| filtering);
+        // Needle's answer to what is typed now, rather than to an earlier search.
+        let answered = found.filter(|found| Some(&found.search) == search_text(&typed).as_ref());
+        let searching =
+            filtering && answered.is_none() && (state.pause.is_some() || state.sent.is_some());
+        let failed = state
+            .failed
+            .clone()
+            .filter(|_| filtering && answered.is_none() && !searching);
         let revision = self
             .resources
             .get("overview")
             .map_or(0, |resource| resource.data_revision);
+        // Until Needle answers, what both readings hold is narrowed here.
+        let sources: Vec<&[Process]> = match (answered, found) {
+            (Some(answered), _) => vec![&answered.processes],
+            (None, Some(found)) => vec![&found.processes, source],
+            (None, None) => vec![source],
+        };
         let processes = state.ordered.borrow_mut().get(
-            revision,
-            source,
-            input.read(cx).value().as_str(),
+            (revision, found.map_or(0, |found| found.revision)),
+            &sources,
+            typed.as_str(),
             preferences.sort,
             preferences.ascending,
         );
+        let matches = answered.map(|found| found.matches);
         let state = preferences;
         let count = processes.len();
         let range = page_range(count, requested_page);
@@ -416,7 +603,17 @@ impl Newport {
                             }))
                     }),
             )
-            .child(label(if filtering {
+            .child(label(if let Some(matches) = matches {
+                if matches as usize > count {
+                    format!("{matches} of {process_count} processes match · the busiest and largest {count} are shown")
+                } else {
+                    format!("{matches} of {process_count} processes match")
+                }
+            } else if searching {
+                format!("Searching all {process_count} processes")
+            } else if let Some(error) = &failed {
+                format!("Couldn't search every process: {error} Showing the collected processes that match.")
+            } else if filtering {
                 format!("Showing {count} of {total} collected processes")
             } else {
                 format!("The busiest and largest {total} of {process_count} · CPU over the last second, as a share of one core")
@@ -452,7 +649,9 @@ impl Newport {
                     })),
             )
             .when(count == 0, |v| {
-                v.child(empty::compact(if total == 0 {
+                v.child(empty::compact(if searching {
+                    "Searching all processes…"
+                } else if total == 0 && !filtering {
                     "No processes reported."
                 } else {
                     "No processes match your search."
@@ -461,7 +660,7 @@ impl Newport {
             .child(process_rows(processes, range.clone(), wide, memory_total))
             .when(count > 0, |view| view.child(
                 div().flex().flex_wrap().items_center().justify_between().gap_2().py_2()
-                    .child(label(format!("{}–{} of {count}{}", range.start + 1, range.end, if filtering { " matching" } else { " collected" })).text_size(px(crate::ui::FONT_SIZE)))
+                    .child(label(footer(&range, count, filtering, matches)).text_size(px(crate::ui::FONT_SIZE)))
                     .when(count > PAGE_SIZE, |view| view.child(
                         crate::controls::pagination("process-pages").current_page(page + 1).total_pages(count.div_ceil(PAGE_SIZE))
                             .on_click(cx.listener(|this, page: &usize, _, cx| {
@@ -475,7 +674,7 @@ impl Newport {
 }
 #[cfg(test)]
 mod tests {
-    use super::{ProcessCache, elapsed, ordered, page_range};
+    use super::{ProcessCache, elapsed, footer, ordered, page_range, search_text};
     use crate::theme;
     use gpui_kit::{
         self as gpui, Context, IntoElement, Render, ScrollHandle, TestAppContext, Window, div,
@@ -643,10 +842,10 @@ mod tests {
             start.elapsed().as_secs_f64() * 1000. / 60.
         );
         let mut cache = ProcessCache::default();
-        black_box(cache.get(1, &rows, "", 0, false));
+        black_box(cache.get((1, 0), &[&rows], "", 0, false));
         let start = Instant::now();
         for _ in 0..60 {
-            black_box(cache.get(1, black_box(&rows), "", 0, false));
+            black_box(cache.get((1, 0), black_box(&[&rows]), "", 0, false));
         }
         eprintln!(
             "5000 processes, cached preparation: {:.3} ms/redraw",
@@ -657,23 +856,54 @@ mod tests {
     fn process_cache_reuses_redraws_and_invalidates_on_data_filter_and_sort() {
         let source = vec![process(1, "node", 1.), process(2, "worker", 9.)];
         let mut cache = ProcessCache::default();
-        let first = cache.get(1, &source, "", 0, false);
+        let first = cache.get((1, 0), &[&source], "", 0, false);
         assert_eq!(first[0].pid, 2);
         assert!(std::rc::Rc::ptr_eq(
             &first,
-            &cache.get(1, &source, "", 0, false)
+            &cache.get((1, 0), &[&source], "", 0, false)
         ));
-        let filtered = cache.get(1, &source, " NODE ", 0, false);
+        let filtered = cache.get((1, 0), &[&source], " NODE ", 0, false);
         assert_eq!(filtered.len(), 1);
         assert!(std::rc::Rc::ptr_eq(
             &filtered,
-            &cache.get(1, &source, "node", 0, false)
+            &cache.get((1, 0), &[&source], "node", 0, false)
         ));
-        assert_eq!(cache.get(1, &source, "", 0, true)[0].pid, 1);
-        assert_eq!(cache.get(1, &source, "", 3, false)[0].pid, 2);
+        assert_eq!(cache.get((1, 0), &[&source], "", 0, true)[0].pid, 1);
+        assert_eq!(cache.get((1, 0), &[&source], "", 3, false)[0].pid, 2);
         let updated = vec![process(3, "", 20.)];
-        assert_eq!(cache.get(2, &updated, "", 0, false)[0].pid, 3);
-        assert!(cache.get(0, &[], "", 0, false).is_empty());
+        assert_eq!(cache.get((2, 0), &[&updated], "", 0, false)[0].pid, 3);
+        assert!(cache.get((0, 0), &[], "", 0, false).is_empty());
+    }
+    #[test]
+    fn a_search_is_the_trimmed_text_within_the_protocol_limit() {
+        use newport_protocol::monitor::metrics::MAX_SEARCH;
+        assert_eq!(search_text("  Nginx "), Some("nginx".into()));
+        assert_eq!(search_text(" \t "), None);
+        assert_eq!(search_text("a\0b"), Some("ab".into()));
+        let long = search_text(&"é".repeat(MAX_SEARCH)).unwrap();
+        assert!(long.len() <= MAX_SEARCH && long.chars().all(|c| c == 'é'));
+    }
+    #[test]
+    fn the_footer_says_how_many_processes_match() {
+        assert_eq!(footer(&(0..20), 51, false, None), "1–20 of 51 collected");
+        assert_eq!(footer(&(0..2), 2, true, None), "1–2 of 2 matching");
+        assert_eq!(footer(&(0..2), 2, true, Some(2)), "1–2 of 2 matching");
+        assert_eq!(
+            footer(&(20..40), 100, true, Some(340)),
+            "21–40 of 100 shown · 340 matching"
+        );
+    }
+    #[test]
+    fn a_process_in_both_readings_keeps_the_searchs_row() {
+        let found = vec![Process {
+            user: "postgres".into(),
+            ..process(7, "postgres", 1.)
+        }];
+        let collected = vec![process(7, "postgres", 0.), process(8, "postgres", 2.)];
+        let mut cache = ProcessCache::default();
+        let rows = cache.get((1, 1), &[&found, &collected], "post", 3, true);
+        assert_eq!(pids(&rows), [7, 8]);
+        assert_eq!(rows[0].user, "postgres");
     }
     #[test]
     fn pagination_handles_empty_exact_and_shrinking_results() {

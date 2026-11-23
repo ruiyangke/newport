@@ -55,6 +55,7 @@ fn sample() -> Snapshot {
         },
         target_port: 80,
         target_address: Some("172.16.0.2".parse().unwrap()),
+        engine_kind: EngineKind::Podman,
         compose: Some(Compose {
             project: Some("test".into()),
             service: Some("web".into()),
@@ -186,6 +187,24 @@ fn unknown_enums_and_narrowing_ports_fail_checked_conversion() {
     value = sample().to_wire();
     value.sockets[0].endpoint.as_mut().unwrap().address = Bytes::from_static(&[1, 2, 3]);
     assert!(decode(value.encode_to_vec().into()).is_err());
+    for engine_kind in [0, 3] {
+        value = sample().to_wire();
+        value.publications[0].engine_kind = engine_kind;
+        assert!(
+            decode(value.encode_to_vec().into()).is_err(),
+            "{engine_kind}"
+        );
+    }
+}
+
+#[test]
+fn each_engine_kind_round_trips() {
+    for kind in [EngineKind::Docker, EngineKind::Podman] {
+        let mut expected = sample();
+        expected.publications[0].engine_kind = kind;
+        let frame = encode(&expected).unwrap();
+        assert_eq!(read(&mut frame.as_slice()).unwrap(), expected);
+    }
 }
 
 #[test]

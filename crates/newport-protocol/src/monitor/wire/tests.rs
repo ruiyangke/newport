@@ -91,7 +91,7 @@ fn roundtrip(request: Request, reply: Reply) {
 #[test]
 fn operations_preserve_their_arguments_and_results() {
     roundtrip(
-        Request::Metrics,
+        Request::Metrics { search: None },
         Reply::Metrics(mt::Snapshot {
             cores: 2,
             load: [1.0, 2.0, 3.0],
@@ -413,7 +413,7 @@ fn operations_preserve_their_arguments_and_results() {
         Reply::Compose(co::Reply::Cancelled(co::Done { ok: true })),
     );
     roundtrip(
-        Request::Metrics,
+        Request::Metrics { search: None },
         Reply::Failed(common::Error {
             code: "not_ready".into(),
             message: "Try again".into(),
@@ -440,7 +440,7 @@ fn malformed_shapes_fail_before_record_allocation() {
     ));
     let targets = [field(1, b"web"), field(2, b"app")].concat();
     assert!(decode_request(service(4, &field(3, &targets)).into()).is_err());
-    let request = body_from_request(&Request::Metrics);
+    let request = body_from_request(&Request::Metrics { search: None });
     assert!(decode_request([request.as_ref(), request.as_ref()].concat().into()).is_err());
     let duplicate = [field(1, b"app"), field(1, b"other")].concat();
     assert!(decode_request(service(5, &field(1, &duplicate)).into()).is_err());
@@ -464,8 +464,12 @@ fn controls_wrong_results_and_oversized_frames_are_rejected() {
     ] {
         let data = body(control, &SERVER_LIMITS);
         assert!(decode_request(data.clone()).is_err());
-        assert!(decode_reply(data.clone(), &Request::Metrics).is_err());
-        let mixed = [data.as_ref(), body_from_request(&Request::Metrics).as_ref()].concat();
+        assert!(decode_reply(data.clone(), &Request::Metrics { search: None }).is_err());
+        let mixed = [
+            data.as_ref(),
+            body_from_request(&Request::Metrics { search: None }).as_ref(),
+        ]
+        .concat();
         assert!(decode_request(mixed.into()).is_err());
     }
     let reply = Reply::Compose(co::Reply::Cancelled(co::Done { ok: true }));
@@ -491,7 +495,10 @@ fn packed_and_unpacked_history_share_one_count_budget() {
     core.extend(field(3, &0f64.to_le_bytes()));
     let snapshot = field(8, &core);
     assert!(matches!(
-        decode_reply(service(1, &snapshot).into(), &Request::Metrics),
+        decode_reply(
+            service(1, &snapshot).into(),
+            &Request::Metrics { search: None }
+        ),
         Err(Error::Invalid(Invalid("encoded collection count")))
     ));
 }
@@ -568,7 +575,7 @@ fn numbered_calls_reject_missing_stale_and_duplicate_identifiers() {
     assert!(
         super::encode_request(&Call {
             id: 0,
-            request: Request::Metrics
+            request: Request::Metrics { search: None }
         })
         .is_err()
     );
@@ -581,7 +588,7 @@ fn future_metadata_is_skipped_within_the_same_frame_budget() {
     let payload = [vec![0x08, 7], field(2, &[]), field(90, b"future")].concat();
     assert_eq!(
         decode_request(field(1, &payload).into()).unwrap(),
-        Request::Metrics
+        Request::Metrics { search: None }
     );
     let state = field(90, b"future");
     assert_eq!(
@@ -590,4 +597,69 @@ fn future_metadata_is_skipped_within_the_same_frame_budget() {
     );
     let unknown = [vec![0x08, 7], field(90, b"unsupported")].concat();
     assert!(decode_request(field(1, &unknown).into()).is_err());
+}
+#[test]
+fn a_process_search_round_trips_and_invalid_searches_are_rejected() {
+    let snapshot = mt::Snapshot {
+        cores: 1,
+        process_count: 9,
+        process_matches: 2,
+        ..Default::default()
+    };
+    for search in ["Nginx: worker".to_owned(), "é".repeat(mt::MAX_SEARCH / 2)] {
+        roundtrip(
+            Request::Metrics {
+                search: Some(search),
+            },
+            Reply::Metrics(snapshot.clone()),
+        );
+    }
+    assert_eq!(
+        decode_request(service(1, &[]).into()).unwrap(),
+        Request::Metrics { search: None }
+    );
+    for search in [String::new(), "a\0b".into(), "x".repeat(mt::MAX_SEARCH + 1)] {
+        let request = Request::Metrics {
+            search: Some(search.clone()),
+        };
+        assert!(encode_request(&request).is_err(), "{search:?}");
+        let frame = service(1, &field(1, search.as_bytes()));
+        assert!(decode_request(frame.into()).is_err(), "{search:?}");
+    }
+    let searched = Request::Metrics {
+        search: Some("nginx".into()),
+    };
+    let fewer_matches_than_rows = mt::Snapshot {
+        processes: vec![
+            mt::Process {
+                pid: 1,
+                ..Default::default()
+            },
+            mt::Process {
+                pid: 2,
+                ..Default::default()
+            },
+        ],
+        process_count: 9,
+        process_matches: 1,
+        ..snapshot.clone()
+    };
+    assert!(encode_reply(&Reply::Metrics(fewer_matches_than_rows.clone()), &searched).is_err());
+    // Without a search, the matches are every process and aren't compared.
+    encode_reply(
+        &Reply::Metrics(fewer_matches_than_rows),
+        &Request::Metrics { search: None },
+    )
+    .unwrap();
+    let more_matches_than_processes = mt::Snapshot {
+        process_count: 1,
+        ..snapshot
+    };
+    assert!(
+        encode_reply(
+            &Reply::Metrics(more_matches_than_processes),
+            &Request::Metrics { search: None }
+        )
+        .is_err()
+    );
 }

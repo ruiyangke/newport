@@ -50,9 +50,9 @@ impl Port {
         match self {
             Self::Saved { worktree, .. } => worktree.clone(),
             Self::Observed(row) => {
-                let first = row.members.first()?.project()?.checkout.as_ref()?;
-                row.members
-                    .iter()
+                let mut members = row.identifying_members();
+                let first = members.clone().next()?.project()?.checkout.as_ref()?;
+                members
                     .all(|member| {
                         member
                             .project()
@@ -68,19 +68,25 @@ impl Port {
         }
     }
     pub fn project(&self) -> Option<&d::Project> {
-        let row = self.row()?;
-        let first = row.members.first()?.project()?;
-        row.members
-            .iter()
+        let mut members = self.row()?.identifying_members();
+        let first = members.clone().next()?.project()?;
+        members
             .all(|member| member.project() == Some(first))
             .then_some(first)
     }
+    /// The container a row publishes. Host sockets in the row are its proxies.
     pub fn publication(&self) -> Option<&d::Publication> {
-        let row = self.row()?;
-        let d::Kind::Publication(first) = &row.members.first()?.kind else {
-            return None;
-        };
-        row.members.iter().all(|member| matches!(&member.kind, d::Kind::Publication(value) if value.engine == first.engine && value.container == first.container)).then_some(first)
+        let mut publications = self
+            .row()?
+            .identifying_members()
+            .filter_map(|member| match &member.kind {
+                d::Kind::Publication(value) => Some(value),
+                d::Kind::Socket(_) => None,
+            });
+        let first = publications.next()?;
+        publications
+            .all(|value| value.engine == first.engine && value.container == first.container)
+            .then_some(first)
     }
     pub fn system(&self) -> bool {
         self.row().is_some_and(|row| {
@@ -132,7 +138,10 @@ impl Port {
     }
     pub fn kinds(&self) -> Vec<&'static str> {
         if let Some(publication) = self.publication() {
-            return port_context::container_kinds(publication.image.as_deref());
+            return port_context::container_kinds(
+                publication.image.as_deref(),
+                publication.engine_kind,
+            );
         }
         let mut kinds = Vec::new();
         for holder in self
@@ -153,6 +162,12 @@ impl Port {
         }
         kinds
     }
+    /// Where a container's published port goes, which names the row along
+    /// with its container; [`Self::detail`] leaves it out.
+    pub fn target(&self) -> Option<String> {
+        self.publication()
+            .map(|publication| format!("to container port {}", publication.target_port))
+    }
     pub fn detail(&self, base: Option<&str>) -> String {
         let Some(row) = self.row() else {
             return String::new();
@@ -161,14 +176,16 @@ impl Port {
             return "Last observed".into();
         }
         if let Some(publication) = self.publication() {
-            return if publication.running == Some(false) {
-                "Published by Docker · Container stopped"
-            } else {
-                "Published by Docker"
+            let mut parts = Vec::new();
+            if publication.running == Some(false) {
+                parts.push("Container stopped".into());
             }
-            .into();
+            parts.extend(families(row));
+            return parts.join(" · ");
         }
-        let holders: BTreeSet<_> = row
+        // Processes of one program, such as an IPv4 and an IPv6 listener,
+        // describe that program rather than a count.
+        let programs: BTreeSet<_> = row
             .members
             .iter()
             .filter_map(|member| match &member.kind {
@@ -176,10 +193,15 @@ impl Port {
                 _ => None,
             })
             .flat_map(|socket| &socket.holders)
-            .map(|holder| holder.identity)
+            .map(
+                |holder| match holder.name.as_ref().or(holder.executable.as_ref()) {
+                    Some(name) => (Some(name), holder.uid, None),
+                    None => (None, holder.uid, Some(holder.identity)),
+                },
+            )
             .collect();
-        if holders.len() > 1 {
-            return format!("{} processes", holders.len());
+        if programs.len() > 1 {
+            return format!("{} programs", programs.len());
         }
         let mut parts = Vec::new();
         for holder in row
@@ -213,13 +235,7 @@ impl Port {
                 parts.push(kind.into());
             }
         }
-        if row
-            .members
-            .iter()
-            .any(|member| member.endpoint.address.is_unspecified())
-        {
-            parts.push("all interfaces".into());
-        }
+        parts.extend(families(row));
         d::display(&parts.join(" · "))
     }
     pub fn search_text(&self) -> String {
@@ -246,9 +262,10 @@ impl Port {
     pub fn key(&self) -> String {
         match self {
             Self::Saved { definition, .. } => definition.id.to_string(),
+            // A container's row keeps its key while proxy sockets join or
+            // leave it between scans.
             Self::Observed(row) => row
-                .members
-                .iter()
+                .identifying_members()
                 .map(|member| match &member.kind {
                     d::Kind::Socket(socket) => format!(
                         "{:?}:{:?}:{}:{:?}:{}",
@@ -281,4 +298,48 @@ impl Port {
                 .join("|"),
         }
     }
+}
+
+/// Where a row that listens on a wildcard address accepts connections: a
+/// family it covers entirely, or its specific addresses in that family.
+fn families(row: &d::Row) -> Option<String> {
+    use std::net::IpAddr;
+    let addresses: BTreeSet<_> = row.members.iter().map(|m| m.endpoint.address).collect();
+    if !addresses.iter().any(IpAddr::is_unspecified) {
+        return None;
+    }
+    let ipv4_any = row.members.iter().any(|member| {
+        matches!(member.endpoint.address, IpAddr::V4(ip) if ip.is_unspecified())
+            || matches!(&member.kind, d::Kind::Socket(socket)
+                if socket.ipv6_only == Some(false) && member.endpoint.address.is_unspecified())
+    });
+    let ipv6_any = addresses
+        .iter()
+        .any(|address| address.is_ipv6() && address.is_unspecified());
+    let ipv4: Vec<_> = addresses
+        .iter()
+        .filter(|address| address.is_ipv4())
+        .collect();
+    // A `::` socket of unknown mode may or may not also accept IPv4.
+    if ipv6_any && !ipv4_any && ipv4.is_empty() {
+        let only = row.members.iter().all(|member| {
+            matches!(&member.kind, d::Kind::Socket(socket) if socket.ipv6_only == Some(true))
+                || !member.endpoint.address.is_unspecified()
+        });
+        return Some(if only { "IPv6" } else { "all addresses" }.into());
+    }
+    let describe = |any: bool, ipv6: bool| {
+        if any {
+            vec![if ipv6 { "IPv6" } else { "IPv4" }.to_owned()]
+        } else {
+            addresses
+                .iter()
+                .filter(|address| address.is_ipv6() == ipv6)
+                .map(ToString::to_string)
+                .collect()
+        }
+    };
+    let mut parts = describe(ipv4_any, false);
+    parts.extend(describe(ipv6_any, true));
+    Some(parts.join(" and "))
 }

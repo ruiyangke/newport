@@ -35,6 +35,7 @@ fn start() -> Request {
         command: "private shell command".into(),
         creator: computer(),
         stable_display: true,
+        directory: Some("/home/ann/it's a \"project\" 项目".into()),
     }
 }
 
@@ -104,6 +105,7 @@ fn request_sizes_and_identities_are_checked_on_both_sides() {
         command: _,
         creator,
         stable_display,
+        directory,
     } = start()
     else {
         unreachable!()
@@ -116,12 +118,13 @@ fn request_sizes_and_identities_are_checked_on_both_sides() {
         command: command.clone(),
         creator: creator.clone(),
         stable_display,
+        directory: directory.clone(),
     };
     assert_eq!(
         read_request(&mut encode_request(&value).unwrap().as_slice()).unwrap(),
         value
     );
-    command.push('x');
+    command = "x".repeat(MAX_COMMAND + 1);
     value = Request::Start {
         id: id.clone(),
         columns,
@@ -129,6 +132,7 @@ fn request_sizes_and_identities_are_checked_on_both_sides() {
         command,
         creator,
         stable_display,
+        directory,
     };
     assert!(encode_request(&value).is_err());
     id.push('/');
@@ -142,6 +146,7 @@ fn request_sizes_and_identities_are_checked_on_both_sides() {
                 command: "sh".into(),
                 creator: Some(computer_to_wire(&computer())),
                 stable_display: false,
+                directory: None,
             })),
         };
         assert!(decode_request(message.encode_to_vec().into()).is_err());
@@ -150,6 +155,72 @@ fn request_sizes_and_identities_are_checked_on_both_sides() {
     invalid.exited = Some(Exit::Signal(0));
     assert!(encode_reply(&Reply::Listed(vec![invalid])).is_err());
     assert!(encode_reply(&Reply::Listed(vec![holder(), holder()])).is_err());
+}
+
+#[test]
+fn a_start_directory_is_absolute_bounded_text_without_controls_on_both_sides() {
+    let with = |directory: Option<String>| {
+        let Request::Start {
+            id,
+            columns,
+            rows,
+            command,
+            creator,
+            stable_display,
+            ..
+        } = start()
+        else {
+            unreachable!()
+        };
+        Request::Start {
+            id,
+            columns,
+            rows,
+            command,
+            creator,
+            stable_display,
+            directory,
+        }
+    };
+    for valid in [
+        None,
+        Some("/".into()),
+        Some(format!("/{}", "é".repeat(2047))),
+    ] {
+        let request = with(valid);
+        assert_eq!(
+            read_request(&mut encode_request(&request).unwrap().as_slice()).unwrap(),
+            request
+        );
+    }
+    for invalid in [
+        String::new(),
+        "relative/project".into(),
+        "~/project".into(),
+        "/srv/a\0b".into(),
+        "/srv/a\nb".into(),
+        "/srv/a\u{1b}[31m".into(),
+        "/srv/a\u{85}b".into(),
+        format!("/{}", "x".repeat(MAX_DIRECTORY)),
+    ] {
+        let request = with(Some(invalid.clone()));
+        assert!(encode_request(&request).is_err(), "encode {invalid:?}");
+        let message = pb::ClientFrame {
+            message: Some(pb::client_frame::Message::Start(pb::Start {
+                id: holder().id,
+                columns: 80,
+                rows: 24,
+                command: "sh".into(),
+                creator: Some(computer_to_wire(&computer())),
+                stable_display: false,
+                directory: Some(invalid.clone()),
+            })),
+        };
+        assert!(
+            decode_request(message.encode_to_vec().into()).is_err(),
+            "decode {invalid:?}"
+        );
+    }
 }
 
 #[test]

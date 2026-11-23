@@ -28,13 +28,19 @@ Two buttons in the toolbar switch the view:
 
 **Show** narrows the list to **All**, **Saved** forwards, including those switched off, or **Needs attention**. Type in **Find a connection** to search the list, and choose **Refresh** to read the server's ports again.
 
-Services that don't belong to a project appear under **System services**. A port Newport can't link to a process appears under **Other services** as **TCP listener**; it may still be in use. Ports that Docker or Podman publish are labeled separately.
+Each program has one row per port, even when it listens on both IPv4 and IPv6. Services that don't belong to a project appear under **System services**. A port that a Docker or Podman container publishes is one row under **Containers**, named after the container, or under its Compose project. The row says which port in the container it goes to, such as **to container port 22**. A port Newport can't link to a program appears under **Other services** as **TCP listener**; it may still be in use. The count under the list counts these rows.
 
 A row that says **Last observed** comes from an earlier scan. **Destination not observed** on a saved forward means the current scan didn't see its port; the forward still works and can be edited.
 
 ## See what a port runs
 
-Choose a connection's name, or hold the pointer over its row, to see the addresses it listens on, the account and processes that own it, and its service. With the keyboard, Tab to the name, press Enter or Space to open the details, and Escape to close them.
+Choose a connection's name, or hold the pointer over its row, to see what it runs:
+
+- **Listening**: every address the row listens on.
+- **Program** and **Service**: the program that holds the port, the account that runs it, and its systemd service.
+- **Container** and **Forwarded by**: for a container's published port, the container, the port inside it, and the program that forwards to it, such as `docker-proxy`.
+
+When Newport can't see which program holds a port, **Program** says why, for example that the program runs as `root` and your account can't see other accounts' programs. With the keyboard, Tab to the name, press Enter or Space to open the details, and Escape to close them.
 
 A service listening on several addresses shows as one row:
 
@@ -44,7 +50,7 @@ A service listening on several addresses shows as one row:
 
 ## Discovery details
 
-Choose **Discovery details** in the toolbar to see which parts of the last scan completed and what limited it, such as permissions or scan limits. When Newport can't tell which process owns a port, the port stays outside project groups and the reason shows here. A **Failed scan** can't confirm that a saved forward is unused.
+Choose **Discovery details** in the toolbar to see which parts of the last scan completed and what limited it, such as permissions or scan limits. When Newport can't tell which program owns a port, the port stays outside project groups, and what limited the scan shows here. A **Failed scan** can't confirm that a saved forward is unused.
 
 ## Forward a whole project
 

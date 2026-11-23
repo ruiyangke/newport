@@ -122,6 +122,33 @@ async fn acknowledged_copy_and_held_bytes_survive_focus_changes() {
 }
 
 #[tokio::test]
+async fn refusal_of_a_copy_read_sent_before_revocation_keeps_the_connection() {
+    let mut receiver = setup();
+    let copy = committed(&mut receiver).await;
+    let (raced, _) = receiver.read_copy(&copy, "text/plain").unwrap();
+    let raced_id = raced.id();
+    accept(
+        &mut receiver,
+        Event::CopyRevoked {
+            id: copy.id().into(),
+        },
+    )
+    .unwrap();
+    assert!(raced.receive().await.is_err());
+    accept(
+        &mut receiver,
+        Event::Data {
+            id: raced_id,
+            offset: 0,
+            chunk: None,
+        },
+    )
+    .unwrap();
+    assert!(receiver.connection().is_some());
+    assert!(receiver.lease().is_some());
+}
+
+#[tokio::test]
 async fn revocation_fences_held_bytes_and_pending_reads_before_new_source() {
     let mut receiver = setup();
     let copy = committed(&mut receiver).await;

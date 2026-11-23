@@ -731,7 +731,9 @@ impl Workspace {
         root: String,
         cx: &mut Context<Self>,
     ) -> Result<Self, String> {
-        CommandDraft::project_directory(&root)?;
+        if !newport_protocol::terminal::valid_directory(&root) {
+            return Err("The project folder can't be opened in a terminal.".into());
+        }
         let mut workspace = Self::empty(server, connection, root.clone(), cx);
         workspace.project_root = Some(root);
         workspace.add(cx);
@@ -844,20 +846,22 @@ impl Workspace {
     }
 
     fn add(&mut self, cx: &mut Context<Self>) {
-        let draft = self.project_root.as_ref().map(|root| {
-            CommandDraft::project_directory(root).expect("validated project directory")
-        });
-        self.add_tab(draft, cx);
+        self.add_tab(None, cx);
     }
 
-    /// A new tab, with `draft` delivered once its shell is ready.
+    /// A new tab, with `draft` delivered once its shell is ready. A
+    /// project's tabs start their shells in its folder.
     fn add_tab(&mut self, draft: Option<CommandDraft>, cx: &mut Context<Self>) {
         if self.tabs.len() >= MAX_TERMINALS {
             return;
         }
         let view = cx.new(|cx| TerminalView::new(self.server.clone(), cx));
         let holdable = self.holdable;
-        view.update(cx, |view, _| view.set_holdable(holdable));
+        let directory = self.project_root.clone();
+        view.update(cx, |view, _| {
+            view.set_holdable(holdable);
+            view.set_directory(directory);
+        });
         if let Some(draft) = draft {
             // A fresh view always takes its one draft.
             assert!(view.update(cx, |view, _| view.prepare_command(draft)));
@@ -936,8 +940,6 @@ impl Workspace {
         Ok(())
     }
 
-    /// The handover replaces a project terminal's change of directory, so a
-    /// command that needs the project folder changes into it itself.
     fn add_command(&mut self, draft: CommandDraft, title: &str, cx: &mut Context<Self>) {
         self.add_tab(Some(draft), cx);
         self.opened(cx);
@@ -2793,6 +2795,51 @@ mod tests {
             assert_eq!(workspace.active, 1);
             assert_eq!(workspace.tabs[1].custom.as_deref(), Some("Allow .envrc"));
             assert!(!workspace.tabs[1].view.read(cx).status.started);
+            assert_eq!(
+                workspace.tabs[1].view.read(cx).directory(),
+                Some("/repo/worktree")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_project_tab_starts_its_shell_in_the_folder_and_types_nothing(cx: &mut TestAppContext) {
+        init(cx);
+        cx.update(|cx| {
+            let project = cx.new(|cx| {
+                Workspace::for_project(
+                    "fixture".into(),
+                    Some(crate::snapshot_fixture::scope("scope")),
+                    "/repo/it's a worktree".into(),
+                    cx,
+                )
+                .unwrap()
+            });
+            project.update(cx, |workspace, cx| workspace.add(cx));
+            let views: Vec<_> = project
+                .read(cx)
+                .tabs
+                .iter()
+                .map(|t| t.view.clone())
+                .collect();
+            assert_eq!(views.len(), 2);
+            for view in views {
+                view.update(cx, |view, _| {
+                    assert_eq!(view.directory(), Some("/repo/it's a worktree"));
+                    // No change of folder waits to be typed at its prompt:
+                    // the fresh tab can still take a handover.
+                    assert!(view.prepare_command(CommandDraft::new("true".into()).unwrap()));
+                });
+            }
+            let server = cx.new(|cx| {
+                Workspace::new(
+                    "fixture".into(),
+                    Some(crate::snapshot_fixture::scope("fixture")),
+                    "fixture@unconnected.invalid".into(),
+                    cx,
+                )
+            });
+            assert_eq!(server.read(cx).tabs[0].view.read(cx).directory(), None);
         });
     }
 

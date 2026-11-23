@@ -418,11 +418,13 @@ fn respond(request: Request) -> io::Result<Reply> {
             command,
             creator,
             stable_display,
+            directory,
         } => {
             let start_file = holder::Start {
                 command,
                 creator,
                 stable_display,
+                directory,
             };
             let socket = start(&valid_id(&id)?, columns, rows, &start_file)?;
             Ok(Reply::Started { socket })

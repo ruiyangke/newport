@@ -1263,6 +1263,10 @@ impl crate::desktop::metrics::CacheInfo {
 
 impl crate::desktop::metrics::CollectArgs {
     pub fn validate(&self) -> Result<(), Invalid> {
+        if let Some(search) = &self.search {
+            crate::monitor::metrics::validate_search(search)
+                .map_err(|crate::monitor::Invalid(field)| Invalid(field))?;
+        }
         Ok(())
     }
 }
@@ -2139,6 +2143,13 @@ impl crate::desktop::stream::TerminalOpenArgs {
     pub fn validate(&self) -> Result<(), Invalid> {
         if self.columns == 0 || self.rows == 0 {
             return Err(Invalid("terminal size"));
+        }
+        if self
+            .directory
+            .as_deref()
+            .is_some_and(|directory| !crate::terminal::valid_directory(directory))
+        {
+            return Err(Invalid("terminal directory"));
         }
         Ok(())
     }

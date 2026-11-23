@@ -1,6 +1,5 @@
 //! Compact, read-only connection context. Constructed with the cached row.
 use super::*;
-use crate::connections::diagnostics;
 use crate::{connections_grouped::Entry, connections_process_icon::ProcessIcon};
 use newport_domain::port_discovery::{self as d, Kind};
 
@@ -15,18 +14,23 @@ pub(super) struct Forward {
 pub(super) struct Card {
     title: String,
     icon: ProcessIcon,
-    docker: bool,
+    /// The container engine, for a container's published port.
+    engine: Option<d::EngineKind>,
     facts: Vec<(&'static str, String)>,
     pub forward: Option<Forward>,
     pub notice: Option<String>,
 }
 
 impl Card {
-    pub fn new(entry: &Entry, title: String, icon: ProcessIcon) -> Self {
+    /// `login` is the account Needle runs as on the server, when known.
+    pub fn new(entry: &Entry, title: String, icon: ProcessIcon, login: Option<&str>) -> Self {
         let mut card = Self {
             title,
             icon,
-            docker: entry.port.publication().is_some(),
+            engine: entry
+                .port
+                .publication()
+                .map(|publication| publication.engine_kind),
             facts: Vec::new(),
             forward: None,
             notice: None,
@@ -34,84 +38,64 @@ impl Card {
         let Some(row) = entry.port.row() else {
             return card;
         };
-        let mut processes = std::collections::BTreeSet::new();
         for member in &row.members {
-            let address = match member.endpoint.interface {
-                Some(interface) => format!("{}%{interface}", member.endpoint.address),
-                None => member.endpoint.address.to_string(),
-            };
-            // A socket on `::` that isn't IPv6-only listens on every address.
-            let address = if member.dual_stack() {
-                format!("*:{} (IPv4 and IPv6)", member.endpoint.port)
-            } else if address.contains(':') {
-                format!("[{address}]:{}", member.endpoint.port)
-            } else {
-                format!("{address}:{}", member.endpoint.port)
-            };
-            match &member.kind {
-                Kind::Socket(socket) => {
-                    card.add("Listening", address);
-                    card.add(
-                        "Socket account",
-                        match &socket.account {
-                            Some(account) => format!("{account} (UID {})", socket.uid),
-                            None => format!("UID {}", socket.uid),
-                        },
-                    );
-                    if socket.holders.is_empty() {
-                        card.add("Processes", "No process holder observed".into());
-                    }
-                    if socket.holder_coverage != d::HolderCoverage::Complete {
-                        card.add("Visibility", "Process information is incomplete".into());
-                    }
-                    for holder in &socket.holders {
-                        if !processes.insert((member.scope.clone(), holder.identity)) {
-                            continue;
-                        }
-                        let mut identity = format!("PID {}", holder.identity.pid);
-                        if let Some(name) = holder.name.as_ref().or(holder.executable.as_ref()) {
-                            identity.push_str(&format!(" · {name}"));
-                        }
-                        if let Some(account) = &holder.account {
-                            identity.push_str(&format!(" · {account}"));
-                        }
-                        if let Some(uid) = holder.uid {
-                            identity.push_str(&format!(" · UID {uid}"));
-                        }
-                        card.add("Process", identity);
-                        for detail in &holder.details {
-                            card.add(detail.label, detail.value.clone());
-                        }
-                    }
-                    for unit in &socket.units {
-                        card.add(
-                            if unit.socket_cgroup {
-                                "Socket unit"
-                            } else {
-                                "Process unit"
-                            },
-                            unit.name.clone(),
-                        );
-                    }
+            card.add("Listening", listening(member));
+        }
+        for member in &row.members {
+            if let Kind::Publication(publication) = &member.kind {
+                let mut container = format!(
+                    "{} ({}), port {}",
+                    publication.name,
+                    publication.engine_kind.label(),
+                    publication.target_port
+                );
+                if publication.running == Some(false) {
+                    container.push_str(", stopped");
                 }
-                Kind::Publication(publication) => {
-                    card.add("Published", address);
-                    card.add("Container", publication.name.clone());
-                    if let Some(image) = &publication.image {
-                        card.add("Image", image.clone());
-                    }
-                    if let Some(service) = &publication.service {
-                        card.add("Service", service.clone());
-                    }
-                    card.add("Target port", publication.target_port.to_string());
-                    if publication.running == Some(false) {
-                        card.add("Container", "Stopped".into());
-                    }
+                card.add("Container", container);
+                if let Some(image) = &publication.image {
+                    card.add("Image", image.clone());
+                }
+                if let Some(service) = &publication.service {
+                    card.add("Compose service", service.clone());
                 }
             }
-            if member.stale {
-                card.add("Discovery", "Last observed; refresh to verify".into());
+        }
+        let sockets = row.members.iter().filter_map(|member| match &member.kind {
+            Kind::Socket(socket) => Some(socket),
+            Kind::Publication(_) => None,
+        });
+        if card.engine.is_some() {
+            // Host sockets in a container's row belong to the engine's proxy;
+            // the container already says what the row runs.
+            for holder in sockets.flat_map(|socket| &socket.holders) {
+                card.add("Forwarded by", program(holder));
             }
+        } else {
+            for socket in sockets.clone() {
+                if socket.holders.is_empty() {
+                    card.add("Program", unknown(socket, login));
+                }
+                for holder in &socket.holders {
+                    card.add("Program", program(holder));
+                }
+            }
+            for detail in sockets
+                .clone()
+                .flat_map(|socket| &socket.holders)
+                .flat_map(|holder| &holder.details)
+            {
+                card.add(detail.label, detail.value.clone());
+            }
+            for unit in sockets
+                .flat_map(|socket| &socket.units)
+                .filter(|unit| unit.dedicated())
+            {
+                card.add("Service", unit.name.clone());
+            }
+        }
+        if row.stale() {
+            card.add("Discovery", "Last observed; refresh to verify".into());
         }
         card
     }
@@ -127,6 +111,9 @@ impl Card {
         let Some(row) = entry.port.row() else {
             return;
         };
+        if self.engine.is_some() {
+            return;
+        }
         for member in &row.members {
             let Some(snapshot) = view.snapshot(member.reference) else {
                 continue;
@@ -143,44 +130,24 @@ impl Card {
                         }
                     }
                 }
-                for process in snapshot
+                for details in snapshot
                     .processes
                     .iter()
                     .filter(|process| socket.holders.contains(&process.id))
+                    .filter_map(|process| process.details.as_ref())
                 {
-                    if let Some(details) = &process.details {
-                        if let Some(path) = &details.directory
+                    for (label, path) in [
+                        ("Directory", &details.directory),
+                        ("Executable", &details.executable),
+                    ] {
+                        if let Some(path) = path
                             && path.deleted
                         {
-                            self.add(
-                                "Directory",
-                                format!("PID {}: {} (deleted)", process.identity.pid, path.value),
-                            );
+                            self.add(label, format!("{} (deleted)", path.value));
                         }
-                        if let Some(path) = &details.executable
-                            && path.deleted
-                        {
-                            self.add(
-                                "Executable",
-                                format!("PID {}: {} (deleted)", process.identity.pid, path.value),
-                            );
-                        }
-                    }
-                    if diagnostics::limited(&process.metadata) {
-                        self.add(
-                            "Process details",
-                            format!(
-                                "PID {} · {}",
-                                process.identity.pid,
-                                diagnostics::report(&process.metadata)
-                            ),
-                        );
                     }
                 }
             }
-        }
-        for (label, value) in diagnostics::limitations(&view.evidence().current) {
-            self.add(label, value);
         }
     }
 
@@ -275,7 +242,7 @@ impl Card {
                             .whitespace_normal()
                             .child(self.title.clone()),
                     )
-                    .when(self.docker, |v| {
+                    .when_some(self.engine, |v, engine| {
                         v.child(
                             div()
                                 .flex_shrink_0()
@@ -285,7 +252,7 @@ impl Card {
                                 .bg(cx.theme().muted)
                                 .text_color(cx.theme().muted_foreground)
                                 .text_size(px(crate::ui::FONT_SIZE))
-                                .child("Docker"),
+                                .child(engine.label()),
                         )
                     }),
             )
@@ -297,7 +264,10 @@ impl Card {
                             .enumerate()
                             .map(|(index, (label, value))| {
                                 let last = index + 1 == self.facts.len();
-                                fact(("connection-fact", index), label, value, cx)
+                                // Several values of one label, such as every
+                                // listening address, share its first line's label.
+                                let continued = index > 0 && self.facts[index - 1].0 == *label;
+                                fact(("connection-fact", index), label, value, continued, cx)
                                     .test_support()
                                     .debug_selector(move || {
                                         if last {
@@ -321,11 +291,17 @@ impl Card {
                         .flex_col()
                         .gap(px(6.))
                         .when_some(forward.name, |v, name| {
-                            v.child(fact("forward-name", "Saved as", &name, cx))
+                            v.child(fact("forward-name", "Saved as", &name, false, cx))
                         })
-                        .child(fact("forward-status", "Status", &forward.status, cx))
+                        .child(fact("forward-status", "Status", &forward.status, false, cx))
                         .when(!forward.address.is_empty(), |v| {
-                            v.child(fact("forward-address", "Address", &forward.address, cx))
+                            v.child(fact(
+                                "forward-address",
+                                "Address",
+                                &forward.address,
+                                false,
+                                cx,
+                            ))
                         }),
                 )
             })
@@ -342,10 +318,64 @@ impl Card {
     }
 }
 
+fn listening(member: &d::Member) -> String {
+    let endpoint = member.endpoint;
+    let address = match endpoint.interface {
+        Some(interface) => format!("{}%{interface}", endpoint.address),
+        None => endpoint.address.to_string(),
+    };
+    // A socket on `::` known not to be IPv6-only listens on every address.
+    if matches!(&member.kind, Kind::Socket(socket) if socket.ipv6_only == Some(false))
+        && endpoint.address.is_unspecified()
+        && endpoint.address.is_ipv6()
+    {
+        format!("*:{} (IPv4 and IPv6)", endpoint.port)
+    } else if address.contains(':') {
+        format!("[{address}]:{}", endpoint.port)
+    } else {
+        format!("{address}:{}", endpoint.port)
+    }
+}
+
+/// A holder's program and the account that runs it.
+fn program(holder: &d::Holder) -> String {
+    let name = holder
+        .name
+        .as_ref()
+        .or(holder.executable.as_ref())
+        .cloned()
+        .unwrap_or_else(|| format!("PID {}", holder.identity.pid));
+    match (&holder.account, holder.uid) {
+        (Some(account), _) => format!("{name}, run by {account}"),
+        (None, Some(uid)) => format!("{name}, run by UID {uid}"),
+        (None, None) => name,
+    }
+}
+
+/// Why the program behind a socket is unknown, in the row's own terms.
+fn unknown(socket: &d::Socket, login: Option<&str>) -> String {
+    let owner = socket
+        .account
+        .clone()
+        .unwrap_or_else(|| format!("UID {}", socket.uid));
+    match login {
+        Some(login) if socket.account.as_deref() == Some(login) => {
+            "Unknown: Newport couldn't see which program holds it.".into()
+        }
+        Some(login) => {
+            format!("Unknown: it runs as {owner}, and {login} can't see other accounts' programs.")
+        }
+        None => format!(
+            "Unknown: it runs as {owner}, and your account can't see other accounts' programs."
+        ),
+    }
+}
+
 fn fact(
     id: impl Into<gpui_kit::ElementId>,
     label: &str,
     value: &str,
+    continued: bool,
     cx: &App,
 ) -> gpui_kit::Stateful<Div> {
     div()
@@ -362,7 +392,7 @@ fn fact(
                 .w(px(76.))
                 .flex_shrink_0()
                 .text_color(cx.theme().muted_foreground)
-                .child(label.to_owned()),
+                .when(!continued, |v| v.child(label.to_owned())),
         )
         .child(
             div()
@@ -463,6 +493,7 @@ mod tests {
                     let mut holder = first.clone();
                     holder.id = id;
                     holder.identity.pid = id;
+                    holder.name = Some(format!("node-{id}"));
                     current.processes.push(holder);
                     current.sockets[0].holders.push(id);
                 }
@@ -517,7 +548,7 @@ mod tests {
                     node.role() == Some(Role::Label)
                         && node
                             .label()
-                            .is_some_and(|label| label.starts_with("Process: PID 19"))
+                            .is_some_and(|label| label.starts_with("Program: node-19"))
                 }));
             });
             visual.simulate_keystrokes("home");
@@ -533,37 +564,167 @@ mod tests {
     use crate::connections::fixtures::{Listener, publication};
     use newport_domain::{port_discovery as d, port_grouping::Port};
 
+    /// The engine's proxy sockets for a published port, as Needle reports them
+    /// to an account that can't see root's processes.
+    fn proxies(port: u16) -> Vec<d::Member> {
+        ["0.0.0.0", "::"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, address)| {
+                let mut member = Listener::new(port)
+                    .address(address)
+                    .pid(100 + u32::try_from(index).unwrap())
+                    .process("docker-proxy", "docker-proxy", &[], None)
+                    .member();
+                member.reference.record = d::Record::Socket(10 + u32::try_from(index).unwrap());
+                let d::Kind::Socket(socket) = &mut member.kind else {
+                    unreachable!()
+                };
+                socket.ipv6_only = Some(true);
+                socket.uid = 0;
+                socket.account = Some("root".into());
+                socket.holder_coverage = d::HolderCoverage::Partial;
+                socket.units.push(d::Unit {
+                    manager_uid: None,
+                    name: "docker.service".into(),
+                    socket_cgroup: true,
+                });
+                let holder = std::sync::Arc::make_mut(&mut socket.holders[0]);
+                holder.account = Some("root".into());
+                holder.uid = Some(0);
+                member
+            })
+            .collect()
+    }
+
+    fn facts_of(card: &Card, label: &str) -> Vec<String> {
+        card.facts
+            .iter()
+            .filter(|(name, _)| *name == label)
+            .map(|(_, value)| value.clone())
+            .collect()
+    }
+
+    /// Labels that described scan-wide coverage on every row.
+    const SCAN_LABELS: [&str; 5] = [
+        "Socket account",
+        "Visibility",
+        "Processes",
+        "Process details",
+        "Elevation",
+    ];
+
     #[test]
-    fn connections_hover_uses_container_identity_and_omits_host_proxy_details() {
-        let mut port = publication(4222, "stack-nats-1", "nats:latest");
+    fn a_published_port_card_names_the_container_and_its_proxy() {
+        let mut port = publication(2201, "fx-minimal", "debian:13");
         let Port::Observed(row) = &mut port else {
             unreachable!()
         };
+        let d::Kind::Publication(value) = &mut row.members[0].kind else {
+            unreachable!()
+        };
+        value.target_port = 22;
         row.members[0].endpoint.address = "0.0.0.0".parse().unwrap();
         let mut ipv6 = row.members[0].clone();
         ipv6.endpoint.address = "::".parse().unwrap();
+        ipv6.reference.record = d::Record::Publication(1);
         row.members.push(ipv6);
+        let members = row.members.iter().cloned().chain(proxies(2201)).collect();
+        let entry = newport_domain::port_grouping::group(members, &[], uuid::Uuid::nil(), &[])
+            .into_iter()
+            .flat_map(|project| project.entries)
+            .collect::<Vec<_>>();
+        assert_eq!(entry.len(), 1, "one row for the container's port");
+        let card = Card::new(&entry[0], "fx-minimal".into(), ProcessIcon::Process, None);
+        assert_eq!(card.engine, Some(d::EngineKind::Docker));
+        assert_eq!(facts_of(&card, "Listening"), ["0.0.0.0:2201", "[::]:2201"]);
+        assert_eq!(
+            facts_of(&card, "Container"),
+            ["fx-minimal (Docker), port 22"]
+        );
+        assert_eq!(facts_of(&card, "Image"), ["debian:13"]);
+        assert_eq!(
+            facts_of(&card, "Forwarded by"),
+            ["docker-proxy, run by root"]
+        );
+        for label in SCAN_LABELS.into_iter().chain(["Program", "Service"]) {
+            assert!(facts_of(&card, label).is_empty(), "{label}");
+        }
+        assert!(card.notice.is_none());
+    }
+
+    #[test]
+    fn a_podman_container_card_names_podman() {
+        let mut port = publication(8080, "web", "nginx:latest");
+        let Port::Observed(row) = &mut port else {
+            unreachable!()
+        };
+        let d::Kind::Publication(value) = &mut row.members[0].kind else {
+            unreachable!()
+        };
+        value.engine_kind = d::EngineKind::Podman;
+        value.target_port = 80;
         let entry = Entry {
             addresses: port.addresses(),
             port,
             forwards: vec![],
         };
-        let card = Card::new(&entry, "NATS".into(), ProcessIcon::Process);
-        for fact in [
-            ("Container", "stack-nats-1"),
-            ("Image", "nats:latest"),
-            ("Published", "0.0.0.0:4222"),
-            ("Published", "[::]:4222"),
-        ] {
-            assert!(card.facts.contains(&(fact.0, fact.1.into())));
-        }
-        assert!(
-            !card
-                .facts
-                .iter()
-                .any(|(label, _)| matches!(*label, "Listening" | "Process"))
+        let card = Card::new(&entry, "web".into(), ProcessIcon::Process, None);
+        assert_eq!(card.engine, Some(d::EngineKind::Podman));
+        assert_eq!(facts_of(&card, "Container"), ["web (Podman), port 80"]);
+    }
+
+    #[test]
+    fn a_listener_with_an_unseen_program_says_why_in_plain_words() {
+        use newport_protocol::monitor::ports::discovery as p;
+        let unseen = |login: Option<&str>, account: &str| {
+            let mut evidence =
+                crate::connections::fixtures::observation([Listener::new(9100).address("0.0.0.0")])
+                    .data
+                    .unwrap();
+            let snapshot = &mut evidence.current;
+            snapshot.processes.clear();
+            snapshot.sockets[0].holders.clear();
+            snapshot.sockets[0].holder_state = p::HolderState::Unresolved;
+            snapshot.sockets[0].uid = 0;
+            snapshot.sockets[0].account = Some(account.into());
+            snapshot.coverage.processes = p::Report {
+                outcome: p::Outcome::Partial,
+                issues: vec![p::Issue {
+                    kind: p::IssueKind::PermissionDenied,
+                    count: 268,
+                    message: String::new(),
+                }],
+            };
+            let view = newport_client::discovery::View::new(evidence, false).unwrap();
+            let port = Port::Observed(d::Row {
+                members: view.members().to_vec(),
+            });
+            let entry = Entry {
+                addresses: port.addresses(),
+                port,
+                forwards: vec![],
+            };
+            let mut card = Card::new(&entry, "Port 9100".into(), ProcessIcon::Process, login);
+            card.enrich(&entry, &view);
+            assert_eq!(facts_of(&card, "Listening"), ["0.0.0.0:9100"]);
+            for label in SCAN_LABELS {
+                assert!(facts_of(&card, label).is_empty(), "{label}");
+            }
+            facts_of(&card, "Program")
+        };
+        assert_eq!(
+            unseen(Some("newport"), "root"),
+            ["Unknown: it runs as root, and newport can't see other accounts' programs."]
         );
-        assert!(card.notice.is_none());
+        assert_eq!(
+            unseen(None, "root"),
+            ["Unknown: it runs as root, and your account can't see other accounts' programs."]
+        );
+        assert_eq!(
+            unseen(Some("newport"), "newport"),
+            ["Unknown: Newport couldn't see which program holds it."]
+        );
     }
 
     #[test]
@@ -584,13 +745,10 @@ mod tests {
             unreachable!()
         };
         std::sync::Arc::make_mut(&mut socket.holders[0]).account = Some("postgres".into());
-        let card = Card::new(&entry, "Postgres".into(), ProcessIcon::Process);
+        let card = Card::new(&entry, "Postgres".into(), ProcessIcon::Process, None);
         assert!(card.facts.contains(&("Data directory", "/srv/data".into())));
-        assert!(
-            card.facts
-                .contains(&("Process", "PID 42 · postgres · postgres · UID 1000".into()))
-        );
-        assert!(!card.docker);
+        assert_eq!(facts_of(&card, "Program"), ["postgres, run by postgres"]);
+        assert_eq!(card.engine, None);
     }
 
     #[test]
@@ -607,7 +765,7 @@ mod tests {
                 unreachable!()
             };
             socket.ipv6_only = ipv6_only;
-            let card = Card::new(&entry, "bun".into(), ProcessIcon::Process);
+            let card = Card::new(&entry, "bun".into(), ProcessIcon::Process, None);
             assert!(
                 card.facts.contains(&("Listening", listening.into())),
                 "{ipv6_only:?}: {:?}",
@@ -617,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_explanations_never_render_remote_errors_or_arguments() {
+    fn a_known_program_card_leaves_scan_limits_to_discovery_details() {
         use newport_protocol::monitor::ports::discovery as p;
         let mut evidence = crate::connections::fixtures::observation([Listener::new(8000)
             .process(
@@ -651,30 +809,24 @@ mod tests {
             port,
             forwards: vec![],
         };
-        let mut card = Card::new(&entry, "worker".into(), ProcessIcon::Process);
+        let mut card = Card::new(
+            &entry,
+            "worker".into(),
+            ProcessIcon::Process,
+            Some("newport"),
+        );
         card.enrich(&entry, &view);
-        assert!(card.facts.iter().any(|(key, value)| {
-            *key == "Visibility" && value == "Process information is incomplete"
-        }));
+        assert_eq!(facts_of(&card, "Program"), ["worker, run by UID 1000"]);
         assert!(
             card.facts
                 .iter()
-                .all(|(_, value)| !value.contains("SECRET"))
+                .all(|(_, value)| !value.contains("SECRET") && !value.contains("permission denied"))
         );
-        for label in [
-            "Process details",
-            "Processes",
-            "Cgroups",
-            "Services",
-            "Elevation",
-            "Details",
-        ] {
-            assert!(
-                card.facts
-                    .iter()
-                    .any(|(key, value)| *key == label && value.contains("permission denied")),
-                "missing {label}"
-            );
+        for label in SCAN_LABELS
+            .into_iter()
+            .chain(["Cgroups", "Services", "Details"])
+        {
+            assert!(facts_of(&card, label).is_empty(), "{label}");
         }
     }
 
@@ -698,6 +850,7 @@ mod tests {
         let mut second = snapshot.processes[0].clone();
         second.id = 2;
         second.identity.pid = 43;
+        second.name = Some("helper".into());
         snapshot.processes.push(second);
         snapshot.sockets[0].holders.push(2);
         snapshot.sockets[0].uid = 0;
@@ -729,30 +882,18 @@ mod tests {
             port,
             forwards: vec![],
         };
-        let mut card = Card::new(&entry, "web.socket".into(), ProcessIcon::Process);
+        let mut card = Card::new(&entry, "web.socket".into(), ProcessIcon::Process, None);
         card.enrich(&entry, &view);
         assert_eq!(
-            card.facts
-                .iter()
-                .filter(|(label, _)| *label == "Process")
-                .count(),
-            2
+            facts_of(&card, "Program"),
+            ["worker, run by UID 1000", "helper, run by UID 1000"]
         );
-        assert!(
-            card.facts
-                .contains(&("Socket account", "root (UID 0)".into()))
-        );
-        assert!(card.facts.contains(&("Socket unit", "web.socket".into())));
+        assert_eq!(facts_of(&card, "Service"), ["web.socket"]);
+        assert_eq!(facts_of(&card, "Socket account"), Vec::<String>::new());
         assert!(card.facts.contains(&("Triggers", "web.service".into())));
         assert!(
             card.facts
-                .contains(&("Directory", "PID 42: /srv/app (deleted)".into()))
-        );
-        assert!(
-            !card
-                .facts
-                .iter()
-                .any(|(label, value)| *label == "Process" && value.starts_with("PID 1 "))
+                .contains(&("Directory", "/srv/app (deleted)".into()))
         );
     }
     #[gpui_kit::test]
@@ -778,7 +919,7 @@ mod tests {
             port,
             forwards: vec![],
         };
-        let card = std::rc::Rc::new(Card::new(&entry, "NATS".into(), ProcessIcon::Process));
+        let card = std::rc::Rc::new(Card::new(&entry, "NATS".into(), ProcessIcon::Process, None));
         let (_, visual) = cx.add_window_view(|_, _| Host(card));
         for width in [800., 320.] {
             visual.simulate_resize(size(px(width), px(600.)));

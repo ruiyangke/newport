@@ -151,6 +151,7 @@ fn publications_fit_without_inventing_socket_failure_or_losing_engine_scope() {
             },
             target_port: 80,
             target_address: None,
+            engine_kind: newport_protocol::monitor::ports::discovery::EngineKind::Docker,
             compose: None,
         })
         .collect();

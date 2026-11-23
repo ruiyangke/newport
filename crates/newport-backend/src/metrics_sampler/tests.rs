@@ -58,8 +58,15 @@ impl Fixture {
     fn request(&self, index: usize, force: bool) -> tokio::task::JoinHandle<Result<Value, String>> {
         let (state, db, id) = (self.state.clone(), self.db.clone(), self.servers[index].id);
         tokio::spawn(async move {
-            commands::cockpit_collect(&state, &db, Some(force), id, cockpit::Section::Overview)
-                .await
+            commands::cockpit_collect(
+                &state,
+                &db,
+                Some(force),
+                id,
+                cockpit::Section::Overview,
+                None,
+            )
+            .await
         })
     }
     async fn stop(self) {
@@ -289,6 +296,53 @@ async fn clear_fences_samples_waiting_to_write_history_and_other_servers_remain_
         .await
         .is_err()
     );
+    assert_eq!(f.db.cache_info().await.unwrap().samples, 0);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn a_process_search_asks_the_agent_with_its_text_and_skips_the_cached_reading() {
+    let f = Fixture::new().await;
+    let (_reading, mut calls) = f.install(0);
+    // An invalid search fails the agent request's own validation before any
+    // connection, so the error shows the search reached it.
+    let error = commands::cockpit_collect(
+        &f.state,
+        &f.db,
+        Some(false),
+        f.servers[0].id,
+        cockpit::Section::Overview,
+        Some("a\0b".into()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, "Invalid monitor process search");
+    assert!(calls.try_recv().is_err(), "a search never reads the cache");
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn a_process_search_reads_the_server_without_the_cached_reading_or_history() {
+    let f = Fixture::new().await;
+    let (_reading, mut calls) = f.install(0);
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let seen = asked.clone();
+    let data = search_with(&f.state, f.servers[0].id, "nginx".into(), |owner, search| {
+        let seen = seen.clone();
+        async move {
+            seen.lock().unwrap().push((owner.server().id, search));
+            Ok(json!({"cpu": 3, "processes": [{"pid": 9, "name": "nginx"}], "processMatches": 1}))
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        *asked.lock().unwrap(),
+        [(f.servers[0].id, "nginx".to_owned())]
+    );
+    assert_eq!(data["processes"][0]["pid"], 9);
+    assert!(data["sampledAt"].is_i64());
+    assert!(calls.try_recv().is_err(), "a search never reads the cache");
     assert_eq!(f.db.cache_info().await.unwrap().samples, 0);
     f.stop().await;
 }

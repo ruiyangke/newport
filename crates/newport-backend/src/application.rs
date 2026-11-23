@@ -305,12 +305,15 @@ impl<H: DesktopCommands> rpc::Host for Host<H> {
         let io = self
             .state
             .terminals
-            .open_bound_with_display(
+            .open_bound_shell(
                 request.session,
                 server,
                 (u32::from(request.columns), u32::from(request.rows)),
                 owner,
-                display,
+                terminal::Shell {
+                    display,
+                    directory: request.directory,
+                },
                 if request.attach {
                     terminal::Hold::Attach(request.colors)
                 } else if request.persist {

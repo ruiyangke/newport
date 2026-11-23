@@ -152,6 +152,13 @@ pub enum ContainerState {
     Unknown,
 }
 
+/// The container engine that published a port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum EngineKind {
+    Docker,
+    Podman,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Compose {
     pub project: Option<String>,
@@ -173,6 +180,7 @@ pub struct Publication {
     pub target_port: u16,
     pub target_address: Option<IpAddr>,
     pub compose: Option<Compose>,
+    pub engine_kind: EngineKind,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

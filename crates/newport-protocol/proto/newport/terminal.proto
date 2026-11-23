@@ -30,6 +30,9 @@ message Start {
   string command = 4;
   Computer creator = 5;
   bool stable_display = 6;
+  // The absolute folder a new shell starts in. A holder that already runs
+  // for the id keeps its own.
+  optional string directory = 7;
 }
 message Rename { string id = 1; string name = 2; }
 message End { string id = 1; }

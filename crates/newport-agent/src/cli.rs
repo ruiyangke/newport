@@ -47,6 +47,23 @@ pub fn run_product(
     run_core(&args, variant, services).map(|()| 0)
 }
 
+/// What a worker is called in `ps` and the Overview's process list.
+pub(crate) const WORKER_NAME: &str = "newport-agent";
+
+/// A worker runs from `/proc/self/exe`, which the kernel names "exe": name
+/// it as the agent it is.
+fn name_process() {
+    #[cfg(target_os = "linux")]
+    {
+        let name = std::ffi::CString::new(WORKER_NAME).expect("no NUL in the name");
+        // SAFETY: PR_SET_NAME reads a NUL-terminated string that outlives the
+        // call; the kernel keeps its own copy, cut to 15 bytes.
+        unsafe {
+            libc::prctl(libc::PR_SET_NAME, name.as_ptr() as libc::c_ulong, 0, 0, 0);
+        }
+    }
+}
+
 fn run_core(
     args: &[String],
     variant: newport_protocol::product::Variant,
@@ -74,6 +91,7 @@ fn run_core(
                 Ok(())
             }
             Some("worker") if args.len() >= 4 => {
+                name_process();
                 crate::runtime::worker_with(&args[2], &args[3..], services)
             }
             Some("serve") if args.iter().any(|a| a == "--managed") => {
@@ -116,5 +134,21 @@ fn run_core(
             }
             _ => Err(std::io::Error::other("Unknown command; use --help")),
         },
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    #[test]
+    fn a_worker_names_itself_as_the_agent() {
+        // PR_SET_NAME names the calling thread; a worker calls it on its
+        // main thread, which names the process.
+        std::thread::spawn(|| {
+            super::name_process();
+            let name = std::fs::read_to_string("/proc/thread-self/comm").unwrap();
+            assert_eq!(name.trim_end(), super::WORKER_NAME);
+        })
+        .join()
+        .unwrap();
     }
 }

@@ -105,3 +105,24 @@ fn minute_rollup_preserves_only_recorded_history_fields() {
     assert!(decoded.uptime.is_none());
     assert_eq!(decoded.disks.unwrap().len(), 0);
 }
+
+#[test]
+fn a_reading_carries_its_process_search_and_rejects_invalid_ones() {
+    use crate::desktop::metrics::{CollectArgs, Section};
+    let args = |search: Option<&str>| CollectArgs {
+        server: uuid::Uuid::nil(),
+        refresh: false,
+        section: Section::Overview,
+        search: search.map(str::to_owned),
+    };
+    for search in [None, Some("nginx")] {
+        let value = args(search);
+        value.validate().unwrap();
+        let decoded = CollectArgs::from_proto(value.to_proto().unwrap()).unwrap();
+        assert_eq!(decoded.search.as_deref(), search);
+    }
+    let longest = "x".repeat(crate::monitor::metrics::MAX_SEARCH + 1);
+    for search in ["", "a\0b", longest.as_str()] {
+        assert!(args(Some(search)).validate().is_err(), "{search:?}");
+    }
+}

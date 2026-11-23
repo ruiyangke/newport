@@ -437,7 +437,7 @@ fn monitor_worker_correlates_replies_and_survives_a_failed_action() {
             job: uuid::Uuid::new_v4().simple().to_string(),
         }),
         Request::StableDisplay,
-        Request::Metrics,
+        Request::Metrics { search: None },
         Request::Compose(compose::Request::Jobs),
     ]
     .into_iter()
@@ -476,7 +476,7 @@ fn monitor_worker_correlates_replies_and_survives_a_failed_action() {
             (Request::StableDisplay, Reply::StableDisplay(v)) => {
                 assert_eq!(v, stable_display::State::default());
             }
-            (Request::Metrics, Reply::Metrics(_)) => {}
+            (Request::Metrics { .. }, Reply::Metrics(_)) => {}
             unexpected => panic!("unexpected monitor result: {unexpected:?}"),
         }
     }

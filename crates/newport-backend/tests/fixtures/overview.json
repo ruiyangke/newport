@@ -5,5 +5,5 @@
   "disks": [{"mount":"/","device":"/dev/test","total":100000,"used":40000,"available":50000}],
   "network": [{"name":"eth0","received":1000,"sent":2000}],
   "processes": [{"pid":12,"user":"tester","cpu":4.2,"memory":524288,"state":"S","name":"worker"}],
-  "processCount": 1
+  "processCount": 1, "processMatches": 1
 }

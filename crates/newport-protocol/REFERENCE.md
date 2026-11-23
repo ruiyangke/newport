@@ -3141,6 +3141,7 @@ Imports: `newport/monitor.proto`, `newport/wire.proto`.
 | 1 | `server` | `string` | optional |  |
 | 2 | `refresh` | `bool` | optional | Absence uses the source API default. |
 | 3 | `section` | `newport.desktop.metrics.Section` | optional |  |
+| 4 | `search` | `string` | optional | A process search reads the server now, outside the sampled cache and history. |
 
 ### `newport.desktop.metrics.HistoryArgs`
 
@@ -3375,6 +3376,7 @@ Imports: `newport/desktop/common.proto`, `newport/desktop/configuration.proto`, 
 | 5 | `persist` | `bool` | optional | Absence uses the source API default. |
 | 6 | `attach` | `bool` | optional | Absence uses the source API default. |
 | 7 | `colors` | `bytes` | optional |  |
+| 8 | `directory` | `string` | optional | The absolute folder a new shell starts in. Attaching keeps the held shell's own. |
 
 ### `newport.desktop.stream.CommandOpenArgs`
 
@@ -4303,6 +4305,7 @@ Publication is an engine observation, not proof of a host listening socket.
 | 7 | `target_port` | `uint32` | implicit |  |
 | 8 | `target_address` | `bytes` | optional |  |
 | 9 | `compose` | `newport.discovery.Compose` | message presence |  |
+| 10 | `engine_kind` | `newport.discovery.EngineKind` | implicit |  |
 
 ### `newport.discovery.Issue`
 
@@ -4357,6 +4360,16 @@ Publication is an engine observation, not proof of a host listening socket.
 | 1 | `CONTAINER_STATE_RUNNING` |  |
 | 2 | `CONTAINER_STATE_STOPPED` |  |
 | 3 | `CONTAINER_STATE_UNKNOWN` |  |
+
+### `newport.discovery.EngineKind`
+
+The container engine that published a port.
+
+| Number | Value | Schema comment |
+| --- | --- | --- |
+| 0 | `ENGINE_KIND_UNSPECIFIED` |  |
+| 1 | `ENGINE_KIND_DOCKER` |  |
+| 2 | `ENGINE_KIND_PODMAN` |  |
 
 ### `newport.discovery.Outcome`
 
@@ -6272,6 +6285,13 @@ Imports: `newport/wire.proto`, `newport/worker.proto`, `newport/discovery.proto`
 | 14 | `network` | `newport.monitor.MetricsNetwork` | repeated |  |
 | 15 | `processes` | `newport.monitor.MetricsProcess` | repeated |  |
 | 16 | `process_count` | `uint32` | implicit |  |
+| 17 | `process_matches` | `uint32` | implicit | Processes that match the request's search; every process without one. |
+
+### `newport.monitor.MetricsRequest`
+
+| Tag | Field | Type | Presence | Schema comment |
+| --- | --- | --- | --- | --- |
+| 1 | `search` | `string` | optional | Case-insensitive text found in a process's name, command line, user or PID. The snapshot's processes are then chosen among the matches. |
 
 ### `newport.monitor.MetricsCore`
 
@@ -6918,7 +6938,7 @@ Imports: `newport/wire.proto`, `newport/worker.proto`, `newport/discovery.proto`
 | Tag | Field | Type | Presence | Schema comment |
 | --- | --- | --- | --- | --- |
 | 1 | `id` | `uint64` | implicit |  |
-| 2 | `metrics` | `newport.wire.Present` | oneof `request` |  |
+| 2 | `metrics` | `newport.monitor.MetricsRequest` | oneof `request` |  |
 | 3 | `stable_display` | `newport.wire.Present` | oneof `request` |  |
 | 4 | `services` | `newport.monitor.ServicesRequest` | oneof `request` |  |
 | 5 | `containers` | `newport.monitor.ContainersRequest` | oneof `request` |  |
@@ -8828,6 +8848,7 @@ Imports: `newport/wire.proto`, `newport/worker.proto`.
 | 4 | `command` | `string` | implicit |  |
 | 5 | `creator` | `newport.terminal.Computer` | message presence |  |
 | 6 | `stable_display` | `bool` | implicit |  |
+| 7 | `directory` | `string` | optional | The absolute folder a new shell starts in. A holder that already runs for the id keeps its own. |
 
 ### `newport.terminal.Rename`
 

@@ -18,6 +18,7 @@ fn binding(address: &str, host: u16, target: u16) -> Value {
 fn parse(rows: Vec<Value>) -> Publications {
     convert(
         Some("engine-a"),
+        EngineKind::Docker,
         rows,
         &Query::new(
             Instant::now() + Duration::from_secs(2),
@@ -98,12 +99,9 @@ fn podman_publications_remain_visible_without_claiming_verified_engine_absence()
         assert_eq!(value.report.outcome, Outcome::Partial);
         assert_eq!(value.values.len(), count);
         assert!(value.engine.is_none());
-        assert!(
-            value
-                .values
-                .iter()
-                .all(|publication| publication.engine.is_none())
-        );
+        assert!(value.values.iter().all(|publication| {
+            publication.engine.is_none() && publication.engine_kind == EngineKind::Podman
+        }));
         assert!(
             value
                 .report
@@ -284,6 +282,7 @@ fn complete_engine_query_uses_its_real_identity_and_existing_api() {
         containers.publication_inventory(Instant::now() + Duration::from_secs(2), &|| false, false);
     assert_eq!(result.report.outcome, Outcome::Complete);
     assert_eq!(result.values[0].engine.as_deref(), Some("real-engine"));
+    assert_eq!(result.values[0].engine_kind, EngineKind::Docker);
     assert_eq!(
         *fixture.requests.lock().unwrap(),
         [

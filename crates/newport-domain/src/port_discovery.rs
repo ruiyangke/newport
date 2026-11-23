@@ -78,6 +78,8 @@ pub struct Holder {
     pub identity: Process,
     pub name: Option<String>,
     pub executable: Option<String>,
+    /// The executable's full path, when the process could be read.
+    pub path: Option<String>,
     pub label: Option<String>,
     pub account: Option<String>,
     pub uid: Option<u32>,
@@ -123,9 +125,25 @@ pub struct Socket {
     pub units: Vec<Unit>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EngineKind {
+    Docker,
+    Podman,
+}
+
+impl EngineKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Docker => "Docker",
+            Self::Podman => "Podman",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Publication {
     pub engine: Option<String>,
+    pub engine_kind: EngineKind,
     pub container: String,
     pub name: String,
     pub image: Option<String>,
@@ -307,8 +325,20 @@ pub struct Row {
 }
 
 impl Row {
+    /// The members that name the row: its container publications when it has
+    /// any, since the host sockets in that row only forward to the container.
+    pub fn identifying_members(&self) -> impl Iterator<Item = &Member> + Clone {
+        let published = self
+            .members
+            .iter()
+            .any(|member| matches!(member.kind, Kind::Publication(_)));
+        self.members
+            .iter()
+            .filter(move |member| !published || matches!(member.kind, Kind::Publication(_)))
+    }
+
     pub fn label(&self) -> String {
-        let labels: BTreeSet<_> = self.members.iter().map(Member::label).collect();
+        let labels: BTreeSet<_> = self.identifying_members().map(Member::label).collect();
         if labels.len() == 1 {
             labels.into_iter().next().unwrap_or_default()
         } else {

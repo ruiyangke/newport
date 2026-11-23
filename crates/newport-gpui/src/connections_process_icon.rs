@@ -350,7 +350,7 @@ impl ProcessIcon {
             let file = match kind {
                 "Node" => "package.json",
                 "Bun" => "bun.lock",
-                "Docker" => "dockerfile",
+                "Docker" | "Podman" => "dockerfile",
                 "Python" => ".py",
                 "Ruby" | "Rails" | "Puma" | "Unicorn" => ".rb",
                 "Java" => ".java",

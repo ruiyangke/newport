@@ -100,7 +100,17 @@ pub(super) fn framework(exe: &str) -> Option<&'static str> {
 pub fn is_runtime_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "Node" | "Bun" | "Deno" | "Ruby" | "PHP" | "Java" | ".NET" | "Erlang" | "Python" | "Docker"
+        "Node"
+            | "Bun"
+            | "Deno"
+            | "Ruby"
+            | "PHP"
+            | "Java"
+            | ".NET"
+            | "Erlang"
+            | "Python"
+            | "Docker"
+            | "Podman"
     )
 }
 

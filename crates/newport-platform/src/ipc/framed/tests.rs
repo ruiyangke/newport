@@ -321,6 +321,34 @@ fn continuation_received_after_its_partial_deadline_is_never_delivered() {
     );
 }
 #[test]
+fn a_reader_that_waited_on_its_consumer_still_completes_a_held_frame() {
+    let frame = activate();
+    let long_ago = Instant::now() - 2 * LIMIT;
+    // One frame's first byte was decoded, another's read ahead, both long
+    // before the reader came back from its consumer.
+    let mut decoder = FrameDecoder::new(4096);
+    decoder.consume(&mut &frame[..1]).unwrap();
+    let decoded = ReadBuffer {
+        decoder: Some(decoder),
+        limit: 4096,
+        arrived: Some(long_ago),
+        frame_started: Some(long_ago),
+        ..ReadBuffer::default()
+    };
+    let read_ahead = ReadBuffer {
+        bytes: frame[..1].to_vec(),
+        arrived: Some(long_ago),
+        ..ReadBuffer::default()
+    };
+    for buffer in [decoded, read_ahead] {
+        let (stream, mut peer) = Stream::pair().unwrap();
+        let mut reader = Reader::from_parts(stream, buffer);
+        reader.resume();
+        peer.write_all(&frame[1..]).unwrap();
+        assert!(reader.next_idle(4096, LIMIT).unwrap().is_some());
+    }
+}
+#[test]
 fn peer_closed_before_first_read_keeps_final_data_and_eof() {
     let (stream, mut peer) = Stream::pair().unwrap();
     let frame = greeting();

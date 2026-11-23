@@ -59,26 +59,26 @@ pub async fn save_server(
                     .then(|| server.name.clone());
                 let reconnect =
                     password_changed || known.is_some_and(|saved| !saved.same_connection(&server));
+                // Consent and integrations belong to the machine and account
+                // reached; signing in another way reaches the same ones.
+                let kept = |given: fn(&Server) -> bool| {
+                    known.is_some_and(|saved| saved.same_destination(&server) && given(saved))
+                };
                 let mut saved = server.clone();
                 // Editors cannot grant consent or overwrite preferences committed while
                 // encryption was running. Derive those fields from the latest profile.
-                saved.agent_install_approved =
-                    known.is_some_and(|saved| !reconnect && saved.agent_install_approved);
-                saved.setup_complete =
-                    known.is_some_and(|saved| !reconnect && saved.setup_complete);
-                saved.clipboard_enabled =
-                    known.is_some_and(|saved| !reconnect && saved.clipboard_enabled);
-                saved.browser_enabled =
-                    known.is_some_and(|saved| !reconnect && saved.browser_enabled);
+                saved.agent_install_approved = kept(|saved| saved.agent_install_approved);
+                saved.setup_complete = kept(|saved| saved.setup_complete);
+                saved.clipboard_enabled = kept(|saved| saved.clipboard_enabled);
+                saved.browser_enabled = kept(|saved| saved.browser_enabled);
                 let retired = reconnect.then(|| manager.sessions.get(server.id)).flatten();
                 let active = if reconnect {
                     manager.active_tunnels(server.id)
                 } else {
                     Vec::new()
                 };
-                // Consent has already been derived for this exact connection.
-                // The generic editor helper preserves destination-only consent,
-                // which would restore it after a credential-only replacement.
+                // Consent is derived above from the latest profile, so the
+                // edited server replaces the saved one as it is.
                 if let Some(existing) = config.servers.iter_mut().find(|s| s.id == saved.id) {
                     *existing = saved;
                 } else {

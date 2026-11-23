@@ -282,6 +282,7 @@ fn snapshot(generation: u64) -> p::Snapshot {
             },
             target_port: 80,
             target_address: None,
+            engine_kind: p::EngineKind::Docker,
             compose: None,
         }],
         ..p::Snapshot::default()

@@ -3101,3 +3101,307 @@ fn empty_project_library_offers_the_add_choices_in_place(cx: &mut TestAppContext
     frame(visual);
     assert!(view.read_with(visual, |view, _| view.project_add.is_some()));
 }
+
+#[gpui::test]
+fn a_container_row_says_where_its_port_goes_and_keeps_its_name_when_narrow(
+    cx: &mut TestAppContext,
+) {
+    use newport_domain::{port_discovery as d, port_grouping};
+    cx.update(|cx| {
+        gpui::component::init(cx);
+        theme::install(false, cx);
+        cx.set_reduce_motion(true);
+    });
+    let mut port = discovery_fixture::publication(2201, "fx-minimal", "debian");
+    let port_grouping::Port::Observed(row) = &mut port else {
+        unreachable!()
+    };
+    let d::Kind::Publication(publication) = &mut row.members[0].kind else {
+        unreachable!()
+    };
+    publication.target_port = 22;
+    let entry = port_grouping::Entry {
+        addresses: port.addresses(),
+        port,
+        forwards: vec![],
+    };
+    let row =
+        crate::connections_rows::Row::new(port_grouping::CONTAINERS, entry, None, false, None);
+    let key = row.key.clone();
+    struct RowHost(Entity<Newport>, crate::connections_rows::Row);
+    impl Render for RowHost {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let row = self.1.clone();
+            let element = self.0.update(cx, |view, cx| {
+                view.content_width = f32::from(window.viewport_size().width);
+                view.connection_row(row, (1, 1), false, cx)
+            });
+            div().size_full().child(element)
+        }
+    }
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| typed_owner(window, cx));
+        RowHost(view, row)
+    });
+    let target: &'static str = format!("connection-target-{key}").leak();
+    let title: &'static str = format!("connection-title-{key}").leak();
+    let identity: &'static str = format!("connection-identity-{key}").leak();
+    let mut widths = Vec::new();
+    let mut titles = Vec::new();
+    // Wide enough for the whole row, then for the name and tag but only part
+    // of the target.
+    for width in [900., 420.] {
+        visual.simulate_resize(size(px(width), px(200.)));
+        frame(visual);
+        let label = visual.update(|window, _| {
+            gpui_kit::base::test_support::snapshots(window)
+                .iter()
+                .find_map(|node| {
+                    node.label()
+                        .filter(|label| label.starts_with("Connection details for port 2201"))
+                        .map(str::to_owned)
+                })
+                .unwrap()
+        });
+        assert_eq!(
+            label,
+            "Connection details for port 2201: fx-minimal, to container port 22"
+        );
+        let identity = visual.debug_bounds(identity).unwrap();
+        let shown = visual.debug_bounds(target).unwrap();
+        assert!(
+            shown.right() <= identity.right() + px(1.),
+            "{width}: {shown:?}"
+        );
+        widths.push(shown.size.width);
+        titles.push(visual.debug_bounds(title).unwrap().size.width);
+    }
+    assert!(widths[0] > px(60.), "the target is readable when wide");
+    assert!(
+        widths[1] > px(0.) && widths[1] < widths[0],
+        "a narrow row shortens the target: {widths:?}"
+    );
+    assert_eq!(titles[0], titles[1], "the name keeps its width");
+}
+
+#[gpui::test]
+fn a_process_search_waits_for_typing_to_pause_and_drops_an_earlier_searchs_answer(
+    cx: &mut TestAppContext,
+) {
+    use crate::overview_process::SEARCH_KEY;
+    use newport_protocol::{
+        desktop::{self, metrics},
+        monitor::metrics::{Process, Snapshot},
+    };
+    cx.update(|cx| {
+        gpui::component::init(cx);
+        theme::install(false, cx);
+        cx.set_reduce_motion(true);
+    });
+    let mut view = None;
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let entity = cx.new(|cx| owner(window, cx));
+        view = Some(entity.clone());
+        PageHost(entity)
+    });
+    let view = view.unwrap();
+    visual.simulate_resize(size(px(1100.), px(2000.)));
+    let (work, requests) = std::sync::mpsc::sync_channel(8);
+    let process = |pid: u32, name: &str| Process {
+        pid,
+        name: name.into(),
+        user: "root".into(),
+        state: "S".into(),
+        ..Default::default()
+    };
+    let reading = |processes: Vec<Process>, matches: u32| {
+        Ok(desktop::Reply::Metrics(Box::new(metrics::Reply::Collect(
+            Box::new(metrics::Reading {
+                sample: Snapshot {
+                    cores: 1,
+                    processes,
+                    process_count: 300,
+                    process_matches: matches,
+                    ..Default::default()
+                },
+                sampled_at: None,
+                collection_error: None,
+                history_error: None,
+            }),
+        ))))
+    };
+    visual.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.work = work.into();
+            view.server = "00000000-0000-4000-8000-000000000001".into();
+            view.page = Page::Overview;
+            view.put_reading(Snapshot {
+                cores: 1,
+                processes: vec![process(1, "systemd"), process(2, "nginx")],
+                process_count: 300,
+                process_matches: 300,
+                ..Default::default()
+            });
+            view.sync_overview_processes(window, cx);
+        })
+    });
+    frame(visual);
+    let input = view.read_with(visual, |view, _| {
+        view.overview_state.processes[&view.server]
+            .input()
+            .unwrap()
+            .clone()
+    });
+    let sent = || {
+        let work = requests.try_recv().ok()?;
+        assert_eq!(work.key, SEARCH_KEY);
+        let Some(desktop::Operation::Metrics(operation)) = work.request.operation() else {
+            panic!("a process search is a metrics read");
+        };
+        let metrics::Operation::Collect(args) = operation.as_ref() else {
+            panic!("a process search collects a reading");
+        };
+        Some((work.generation, args.search.clone().unwrap()))
+    };
+    let typing = |text: &str, visual: &mut VisualTestContext| {
+        visual.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_all(text.to_owned(), window, cx)
+            })
+        });
+        visual.run_until_parked();
+    };
+    let pause = crate::overview_process::SEARCH_PAUSE;
+    typing("ng", visual);
+    visual.executor().advance_clock(pause / 2);
+    typing("ngi", visual);
+    visual.executor().advance_clock(pause / 2);
+    visual.run_until_parked();
+    assert!(sent().is_none(), "typing restarts the pause");
+    visual.executor().advance_clock(pause);
+    visual.run_until_parked();
+    let (earlier, search) = sent().unwrap();
+    assert_eq!(search, "ngi");
+    typing("nginx", visual);
+    visual.executor().advance_clock(pause);
+    visual.run_until_parked();
+    assert!(sent().is_none(), "one search is in flight at a time");
+    // The earlier search's answer is dropped, and the current one is sent.
+    view.update(visual, |view, _| {
+        assert!(view.complete_process_search(
+            earlier,
+            reading(vec![process(2, "nginx"), process(7, "ngircd")], 2)
+        ));
+    });
+    frame(visual);
+    let (current, search) = sent().unwrap();
+    assert_eq!(search, "nginx");
+    assert!(visual.debug_bounds("overview-process-2").is_some());
+    assert!(visual.debug_bounds("overview-process-7").is_none());
+    view.update(visual, |view, _| {
+        assert!(view.complete_process_search(
+            current,
+            reading(vec![process(2, "nginx"), process(9, "nginx")], 2)
+        ));
+    });
+    frame(visual);
+    assert!(visual.debug_bounds("overview-process-9").is_some());
+    assert!(visual.debug_bounds("overview-process-1").is_none());
+    assert_eq!(
+        view.read_with(visual, |view, _| view.overview_state.processes
+            [&view.server]
+            .matches()),
+        Some(2)
+    );
+    // Clearing the search shows the collected processes again.
+    typing("", visual);
+    visual.executor().advance_clock(pause);
+    frame(visual);
+    assert!(sent().is_none());
+    assert!(visual.debug_bounds("overview-process-1").is_some());
+    assert!(visual.debug_bounds("overview-process-9").is_none());
+}
+
+#[gpui::test]
+fn leaving_a_server_forgets_its_search_in_flight_and_a_failed_search_says_so(
+    cx: &mut TestAppContext,
+) {
+    use crate::overview_process::{SEARCH_KEY, SEARCH_PAUSE};
+    use newport_protocol::{desktop, monitor::metrics::Snapshot};
+    const A: &str = "00000000-0000-4000-8000-000000000001";
+    cx.update(|cx| {
+        gpui::component::init(cx);
+        theme::install(false, cx);
+        cx.set_reduce_motion(true);
+    });
+    let mut view = None;
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let entity = cx.new(|cx| owner(window, cx));
+        view = Some(entity.clone());
+        PageHost(entity)
+    });
+    let view = view.unwrap();
+    let (work, requests) = std::sync::mpsc::sync_channel(8);
+    let open = |visual: &mut VisualTestContext| {
+        visual.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.server = A.into();
+                view.page = Page::Overview;
+                view.put_reading(Snapshot {
+                    cores: 1,
+                    process_count: 1,
+                    process_matches: 1,
+                    ..Default::default()
+                });
+                view.sync_overview_processes(window, cx);
+            })
+        });
+    };
+    view.update(visual, |view, _| view.work = work.into());
+    open(visual);
+    let input = view.read_with(visual, |view, _| {
+        view.overview_state.processes[A].input().unwrap().clone()
+    });
+    let search = |text: &str, visual: &mut VisualTestContext| {
+        visual.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_all(text.to_owned(), window, cx)
+            })
+        });
+        visual.run_until_parked();
+        visual.executor().advance_clock(SEARCH_PAUSE);
+        visual.run_until_parked();
+        let work = requests.try_recv().unwrap();
+        assert_eq!(work.key, SEARCH_KEY);
+        work.generation
+    };
+    let earlier = search("nginx", visual);
+    let state = |visual: &mut VisualTestContext| {
+        view.read_with(visual, |view, _| {
+            let state = &view.overview_state.processes[A];
+            (state.in_flight(), state.failed().map(str::to_owned))
+        })
+    };
+    assert_eq!(state(visual), (true, None));
+    // Another server, then back: the read in flight was refused with the
+    // cleared reads, so nothing waits for it.
+    view.update(visual, |view, _| {
+        view.reset();
+        view.server = "00000000-0000-4000-8000-000000000002".into();
+        view.reset();
+    });
+    open(visual);
+    assert_eq!(state(visual), (false, None));
+    view.update(visual, |view, _| {
+        assert!(!view.complete_process_search(earlier, Err("late".to_owned().into())));
+    });
+    let current = search("nginx ", visual);
+    view.update(visual, |view, _| {
+        assert!(view.complete_process_search(
+            current,
+            Err::<desktop::Reply, _>("Needle stopped.".to_owned().into())
+        ));
+    });
+    assert_eq!(state(visual), (false, Some("Needle stopped.".into())));
+    frame(visual);
+}

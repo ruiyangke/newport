@@ -55,6 +55,7 @@ pub fn encode_request(request: &Request) -> Result<Vec<u8>, Error> {
             command,
             creator,
             stable_display,
+            directory,
         } => Message::Start(pb::Start {
             id: id.clone(),
             columns: u32::from(*columns),
@@ -62,6 +63,7 @@ pub fn encode_request(request: &Request) -> Result<Vec<u8>, Error> {
             command: command.clone(),
             creator: Some(computer_to_wire(creator)),
             stable_display: *stable_display,
+            directory: directory.clone(),
         }),
         Request::List => Message::List(protobuf::Present {}),
         Request::Watch => Message::Watch(protobuf::Present {}),
@@ -91,6 +93,7 @@ pub fn decode_request(body: Bytes) -> Result<Request, Error> {
             command: value.command,
             creator: computer_from_wire(value.creator)?,
             stable_display: value.stable_display,
+            directory: value.directory,
         },
         Message::List(_) => Request::List,
         Message::Watch(_) => Request::Watch,

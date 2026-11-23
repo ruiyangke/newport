@@ -439,6 +439,7 @@ impl Convert for crate::desktop::metrics::CollectArgs {
                 server: Some(self.server.to_string()),
                 refresh: Some(self.refresh),
                 section: Some(self.section.to_proto()?),
+                search: self.search.clone(),
             },
         )
     }
@@ -449,6 +450,7 @@ impl Convert for crate::desktop::metrics::CollectArgs {
             section: <crate::desktop::metrics::Section as Convert>::from_proto(required(
                 value.section,
             )?)?,
+            search: value.search,
         })
     }
 }

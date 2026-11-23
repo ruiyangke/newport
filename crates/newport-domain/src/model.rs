@@ -223,10 +223,14 @@ impl From<&contract::Tunnel> for Tunnel {
     }
 }
 impl Server {
+    /// Whether both reach the same account on the same machine, however the
+    /// user signs in. The route counts: a proxy resolves the host on its own
+    /// side, so the same host through another proxy can be another machine.
     pub fn same_destination(&self, other: &Self) -> bool {
         self.ssh_host == other.ssh_host
             && self.ssh_port == other.ssh_port
             && self.ssh_user == other.ssh_user
+            && self.proxy == other.proxy
     }
     /// Every setting whose change needs a new SSH connection, as the
     /// desktop contract lists them.
@@ -674,12 +678,13 @@ mod tests {
         config.upsert_server(auth_change);
         assert!(config.servers[0].clipboard_enabled);
         assert!(config.servers[0].browser_enabled);
-        for field in ["host", "user", "port"] {
+        for field in ["host", "user", "port", "proxy"] {
             let mut changed = server.clone();
             match field {
                 "host" => changed.ssh_host = "elsewhere".into(),
                 "user" => changed.ssh_user = "other".into(),
-                _ => changed.ssh_port = 2222,
+                "port" => changed.ssh_port = 2222,
+                _ => changed.proxy = Some(Proxy::Command("nc %h %p".into())),
             }
             config.servers = vec![server.clone()];
             config.upsert_server(changed);
