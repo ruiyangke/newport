@@ -2,7 +2,10 @@
 use crate::{local_socket::Endpoint, wl_protocol::State};
 use std::{
     io,
-    os::unix::net::UnixListener,
+    os::{
+        fd::{AsRawFd, OwnedFd, RawFd},
+        unix::net::UnixListener,
+    },
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -19,6 +22,8 @@ use wayland_server::{
 
 pub struct Server {
     endpoint: Endpoint,
+    /// The listening socket, kept for a handoff.
+    listener: OwnedFd,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
     refresh: mpsc::Sender<mpsc::SyncSender<()>>,
@@ -52,11 +57,37 @@ impl Server {
         let (listener, endpoint) = Endpoint::fixed(socket)?;
         Self::listen(source, listener, endpoint)
     }
+    /// Serves on the socket another program of this process served, as
+    /// across `exec`: the shell's `WAYLAND_DISPLAY` names it.
+    pub(crate) fn adopt(
+        source: crate::clipboard_source::Source,
+        handoff: &Handoff,
+        listener: UnixListener,
+        lock: std::fs::File,
+    ) -> io::Result<Self> {
+        listener.set_nonblocking(true)?;
+        Self::listen(source, listener, Endpoint::adopt(&handoff.socket, lock)?)
+    }
+    /// What another program of this process needs to serve as this one
+    /// does, and the descriptors it must keep open; none for a socket
+    /// without a lock of its own.
+    pub(crate) fn handoff(&self) -> Option<(Handoff, [RawFd; 2])> {
+        let lock = self.endpoint.lock()?.as_raw_fd();
+        Some((
+            Handoff {
+                socket: self.endpoint.path().to_owned(),
+                lock,
+                listener: self.listener.as_raw_fd(),
+            },
+            [self.listener.as_raw_fd(), lock],
+        ))
+    }
     fn listen(
         source: crate::clipboard_source::Source,
         listener: UnixListener,
         endpoint: Endpoint,
     ) -> io::Result<Self> {
+        let kept: OwnedFd = listener.try_clone()?.into();
         let mut display = Display::<State>::new().map_err(io::Error::other)?;
         let mut handle = display.handle();
         State::register(&handle);
@@ -118,6 +149,7 @@ impl Server {
         });
         Ok(Self {
             endpoint,
+            listener: kept,
             stop,
             thread: Some(thread),
             refresh,
@@ -143,6 +175,15 @@ impl Server {
         self.endpoint.path().to_owned()
     }
 }
+/// A Wayland clipboard server handed to the next program of its process.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Handoff {
+    pub socket: PathBuf,
+    pub lock: RawFd,
+    pub listener: RawFd,
+}
+
 impl Drop for Server {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);

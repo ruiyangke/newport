@@ -242,7 +242,7 @@ impl Workspace {
                 tab.id,
                 tab.custom.is_some(),
                 tab.view.read(cx).active(),
-                self.tabs.len() > 1,
+                true,
             )
         })
     }
@@ -454,7 +454,7 @@ impl Workspace {
         self.add_tab(None, cx);
         self.tabs[self.active]
             .view
-            .update(cx, |view, _| view.attach_to(held));
+            .update(cx, |view, cx| view.attach_to(held, cx));
     }
 
     /// The terminal a tab shows: its held shell, or the one it is starting,
@@ -466,9 +466,8 @@ impl Workspace {
 
     /// Settles the tabs on the server's list: its shells appear as tabs
     /// wherever they were started, take their names from it, and go when it
-    /// no longer has them. An attached tab stays to show why its shell
-    /// ended, unless it ended before the tab reached it, and a tab whose
-    /// shell couldn't be held is this Mac's own.
+    /// no longer has them. A shell another window's tab has shows there
+    /// only, and a tab whose shell couldn't be held is this Mac's own.
     fn reconcile(&mut self, listed: HeldShells, cx: &mut Context<Self>) {
         let Some(mut shells) = listed.shells else {
             // A server that can't hold shells sends no list to wait for.
@@ -519,7 +518,8 @@ impl Workspace {
                 || self
                     .tabs
                     .iter()
-                    .any(|tab| Self::terminal(tab, cx) == Some(shell.terminal));
+                    .any(|tab| Self::terminal(tab, cx) == Some(shell.terminal))
+                || crate::terminal_view::open_elsewhere(shell.terminal, None, cx);
             if !known && self.tabs.len() < MAX_TERMINALS {
                 // Another Mac's new shell joins the end without taking the
                 // selection, and attaches when it is first shown.
@@ -540,7 +540,14 @@ impl Workspace {
             // Finishes seen on shells that are gone are forgotten.
             self.restored_seen.clear();
             if self.tabs.is_empty() {
-                self.add(cx);
+                // A window whose server's shells all show in another window
+                // starts empty, rather than with a shell nobody asked for.
+                if !shells
+                    .iter()
+                    .any(|shell| crate::terminal_view::open_elsewhere(shell.terminal, None, cx))
+                {
+                    self.add(cx);
+                }
             } else if count == 0 {
                 // What this Mac had selected, or else the newest shell.
                 self.active = selected
@@ -875,6 +882,14 @@ impl Workspace {
         let id = self.next;
         let mut previous = view.read(cx).tab_presentation();
         let observer = cx.observe(&view, move |this, view, cx| {
+            if view.read(cx).leaving.is_some() {
+                // Removed once this observer returns: it belongs to the tab.
+                let workspace = cx.entity().downgrade();
+                cx.defer(move |cx| {
+                    let _ = workspace.update(cx, |this, cx| this.drop_tab(id, cx));
+                });
+                return;
+            }
             // A tab's shell can become held, or end, while the tab is hidden.
             this.save(cx);
             let next = view.read(cx).tab_presentation();
@@ -981,7 +996,7 @@ impl Workspace {
             view.session_id().is_some() && view.running_command()
         };
         let description = close_warning(running, &tab.elsewhere);
-        let Some(description) = description.filter(|_| self.tabs.len() > 1) else {
+        let Some(description) = description else {
             self.close_now(id, keyboard, window, cx);
             return;
         };
@@ -1011,10 +1026,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The last session remains available to reconnect.
-        if self.tabs.len() <= 1 {
-            return;
-        }
         if let Some(tab) = self.tabs.iter().find(|tab| tab.id == id)
             && let Some(terminal) = tab.view.read(cx).held()
         {
@@ -1090,6 +1101,25 @@ impl Workspace {
         }
     }
 
+    /// Removes a tab that has no shell of its own to end: its shell belongs
+    /// to another tab, or the server no longer has it. The last tab may go
+    /// too; no shell starts in its place.
+    fn drop_tab(&mut self, id: usize, cx: &mut Context<Self>) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        if self.rename.as_ref().is_some_and(|rename| rename.id == id) {
+            self.rename = None;
+        }
+        if self.context_tab == Some(id) {
+            self.context_tab = None;
+        }
+        self.tabs.remove(index);
+        self.active = selected_after_close(self.active, index, self.tabs.len());
+        self.save(cx);
+        cx.notify();
+    }
+
     fn remove_closed_tab(
         &mut self,
         id: usize,
@@ -1098,21 +1128,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.tabs.len() <= 1 {
-            if ended_remotely && let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) {
-                if let Some(held) = tab.view.read(cx).held()
-                    && !self.ended.contains(&held)
-                {
-                    self.ended.push(held);
-                }
-                tab.view.update(cx, |view, cx| {
-                    view.ended_remotely();
-                    cx.notify();
-                });
-                cx.notify();
-            }
-            return;
-        }
         if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
             if self.rename.as_ref().is_some_and(|rename| rename.id == id) {
                 self.rename = None;
@@ -1579,7 +1594,7 @@ impl Render for Workspace {
                                         .child(exit),
                                 )
                             })
-                            .when(self.tabs.len() > 1, |tab| {
+                            .map(|tab| {
                                 let owner = cx.entity().downgrade();
                                 tab.on_close(("close-terminal", id), format!("Close {title}"), true, move |keyboard, window, cx| {
                                     let _ = owner.update(cx, |this, cx| this.close(id, keyboard, window, cx));
@@ -1865,53 +1880,123 @@ mod tests {
         }
     }
 
+    /// A server's workspace whose first tab shows `held`, and a second tab
+    /// for each of `more`.
+    fn showing_held(held: uuid::Uuid, more: &[uuid::Uuid], cx: &mut App) -> Entity<Workspace> {
+        cx.new(|cx| {
+            let mut workspace = Workspace::new(
+                "server".into(),
+                Some(crate::snapshot_fixture::scope("fixture")),
+                "e".into(),
+                cx,
+            );
+            workspace.tabs[0]
+                .view
+                .update(cx, |view, cx| view.attach_to(held, cx));
+            for held in more {
+                workspace.add_held(*held, cx);
+            }
+            workspace
+        })
+    }
+
+    fn held_tabs(workspace: &Entity<Workspace>, cx: &App) -> Vec<Option<uuid::Uuid>> {
+        workspace
+            .read(cx)
+            .tabs
+            .iter()
+            .map(|tab| tab.view.read(cx).held())
+            .collect()
+    }
+
     #[gpui::test]
-    fn a_restored_tab_whose_shell_ended_meanwhile_goes_and_a_live_one_stays(
-        cx: &mut TestAppContext,
-    ) {
+    fn a_tab_whose_shell_the_server_closed_closes(cx: &mut TestAppContext) {
         use newport_gpui::terminal_transport::Event;
         init(cx);
+        let (live, gone) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let workspace = cx.update(|cx| showing_held(live, &[gone], cx));
         cx.update(|cx| {
-            let (live, gone) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
-            let workspace = cx.new(|cx| {
-                let mut workspace = Workspace::new(
-                    "server".into(),
-                    Some(crate::snapshot_fixture::scope("fixture")),
-                    "e".into(),
-                    cx,
-                );
-                workspace.tabs[0]
-                    .view
-                    .update(cx, |view, _| view.attach_to(live));
-                workspace.add_held(gone, cx);
-                workspace
+            // It was showing its shell when the server ended it.
+            let tab = workspace.read(cx).tabs[1].view.clone();
+            tab.update(cx, |view, cx| {
+                view.receive_for_test(Event::Ready);
+                view.receive_for_test(Event::Ended);
+                cx.notify();
             });
-            workspace.update(cx, |workspace, cx| {
-                // The first tab was showing its shell when it ended; the
-                // second's shell was closed on another Mac while Newport was
-                // closed here.
-                workspace.tabs[0].view.update(cx, |view, _| {
-                    view.receive_for_test(Event::Persistent);
-                    view.receive_for_test(Event::Ready);
-                    view.receive_for_test(Event::Ended);
-                });
-                workspace.tabs[1].view.update(cx, |view, _| {
-                    view.receive_for_test(Event::Ended);
-                });
-                workspace.reconcile(listed(vec![]), cx);
-                assert_eq!(workspace.tabs.len(), 1);
-                assert_eq!(
-                    workspace.tabs[0].view.read(cx).status.label(),
-                    "Shell ended on the server",
-                    "the live tab says why its shell went"
-                );
+        });
+        cx.update(|cx| {
+            assert_eq!(held_tabs(&workspace, cx), [Some(live)]);
+            assert!(
+                !workspace.read(cx).ended.contains(&gone),
+                "the server's list, not this tab, says what it holds"
+            );
+        });
+        // The last tab goes too, and no shell starts in its place.
+        cx.update(|cx| {
+            let tab = workspace.read(cx).tabs[0].view.clone();
+            tab.update(cx, |view, cx| {
+                view.receive_for_test(Event::Ended);
+                cx.notify();
             });
+        });
+        cx.update(|cx| assert!(workspace.read(cx).tabs.is_empty()));
+    }
+
+    #[gpui::test]
+    fn a_window_whose_servers_shells_show_in_another_starts_empty(cx: &mut TestAppContext) {
+        init(cx);
+        let shell_id = uuid::Uuid::new_v4();
+        // The first window has it, though it hasn't shown that tab yet.
+        let first = cx.update(|cx| showing_held(shell_id, &[], cx));
+        let second = cx.update(|cx| opening_beside(None, cx));
+        cx.update(|cx| {
+            second.update(cx, |workspace, cx| {
+                workspace.reconcile(listed(vec![shell(shell_id, None, &[])]), cx);
+            });
+        });
+        cx.update(|cx| {
+            assert!(second.read(cx).tabs.is_empty(), "no shell nobody asked for");
+            assert_eq!(held_tabs(&first, cx), [Some(shell_id)]);
+        });
+        // Its tab gone from the first window, the shell shows in the second.
+        cx.update(|cx| first.update(cx, |workspace, _| workspace.tabs.clear()));
+        cx.update(|cx| {
+            second.update(cx, |workspace, cx| {
+                workspace.reconcile(listed(vec![shell(shell_id, None, &[])]), cx);
+            });
+        });
+        cx.update(|cx| assert_eq!(held_tabs(&second, cx), [Some(shell_id)]));
+    }
+
+    #[gpui::test]
+    fn a_tab_whose_shell_belongs_to_another_closes_without_ending_it(cx: &mut TestAppContext) {
+        init(cx);
+        let (shell_id, other) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let first = cx.update(|cx| showing_held(shell_id, &[], cx));
+        // A duplicate tab, as a list that raced the first window made it.
+        let second = cx.update(|cx| showing_held(other, &[], cx));
+        let duplicate = cx.update(|cx| cx.new(|cx| TerminalView::new("server".into(), cx)));
+        cx.update(|cx| {
+            duplicate.update(cx, |view, cx| view.attach_to(shell_id, cx));
+            second.update(cx, |workspace, cx| workspace.push(duplicate.clone(), cx));
+        });
+        cx.update(|cx| duplicate.update(cx, |view, cx| view.reconnect(cx)));
+        cx.update(|cx| {
+            assert_eq!(held_tabs(&second, cx), [Some(other)]);
+            assert!(!second.read(cx).ended.contains(&shell_id));
+            assert_eq!(held_tabs(&first, cx), [Some(shell_id)]);
         });
     }
 
-    /// A server's workspace as it opens: waiting for the server's list,
-    /// with the shell this Mac last had selected there.
+    /// A server's workspace as Newport opens: waiting for the server's
+    /// list, with the shell this Mac last had selected there.
     fn opening(selected: Option<uuid::Uuid>, cx: &mut App) -> Entity<Workspace> {
+        crate::terminal_view::forget_open_shells(cx);
+        opening_beside(selected, cx)
+    }
+
+    /// A server's workspace opening in another window of a running Newport.
+    fn opening_beside(selected: Option<uuid::Uuid>, cx: &mut App) -> Entity<Workspace> {
         cx.new(|cx| {
             let mut workspace = Workspace::empty(
                 "server".into(),
@@ -2448,7 +2533,7 @@ mod tests {
             workspace.update(cx, |workspace, cx| {
                 workspace.tabs[1]
                     .view
-                    .update(cx, |view, _| view.attach_to(held));
+                    .update(cx, |view, cx| view.attach_to(held, cx));
                 workspace.active = 2;
             });
             let saved = workspace.read(cx).saved_tabs(cx);
@@ -2474,7 +2559,7 @@ mod tests {
                 );
                 workspace.tabs[0]
                     .view
-                    .update(cx, |view, _| view.attach_to(mine));
+                    .update(cx, |view, cx| view.attach_to(mine, cx));
                 workspace
             });
             workspace.update(cx, |workspace, cx| {
@@ -2529,7 +2614,7 @@ mod tests {
                 workspace.add(cx);
                 workspace.tabs[1]
                     .view
-                    .update(cx, |view, _| view.attach_to(closing));
+                    .update(cx, |view, cx| view.attach_to(closing, cx));
                 let id = workspace.tabs[1].id;
                 workspace.finish_held_close(
                     HeldClose {
@@ -2552,7 +2637,33 @@ mod tests {
     }
 
     #[gpui::test]
-    fn concurrent_acknowledged_held_closes_keep_one_ended_tab_without_restoring_stale_rows(
+    fn the_only_tab_closes_like_any_other(cx: &mut TestAppContext) {
+        init(cx);
+        let cx = cx.add_empty_window();
+        let workspace = cx.new(|cx| {
+            Workspace::new(
+                "server".into(),
+                Some(crate::snapshot_fixture::scope("fixture")),
+                "e".into(),
+                cx,
+            )
+        });
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                assert_eq!(workspace.tabs.len(), 1);
+                let id = workspace.tabs[0].id;
+                assert_eq!(
+                    workspace.tab_menu_state(id, cx).map(|state| state.3),
+                    Some(true)
+                );
+                workspace.close(id, false, window, cx);
+                assert!(workspace.tabs.is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn concurrent_acknowledged_held_closes_close_every_tab_without_restoring_stale_rows(
         cx: &mut TestAppContext,
     ) {
         init(cx);
@@ -2572,10 +2683,10 @@ mod tests {
                 workspace.add(cx);
                 workspace.tabs[0]
                     .view
-                    .update(cx, |view, _| view.attach_to(first));
+                    .update(cx, |view, cx| view.attach_to(first, cx));
                 workspace.tabs[1]
                     .view
-                    .update(cx, |view, _| view.attach_to(second));
+                    .update(cx, |view, cx| view.attach_to(second, cx));
                 let first_id = workspace.tabs[0].id;
                 let second_id = workspace.tabs[1].id;
                 workspace.closing.extend([first, second]);
@@ -2596,8 +2707,7 @@ mod tests {
                     listed(vec![shell(first, None, &[]), shell(second, None, &[])]),
                     cx,
                 );
-                assert_eq!(workspace.tabs.len(), 1);
-                assert_eq!(workspace.tabs[0].view.read(cx).held(), None);
+                assert!(workspace.tabs.is_empty(), "the last tab closes too");
                 assert!(workspace.ended.contains(&first));
                 assert!(workspace.ended.contains(&second));
                 assert!(workspace.closing.is_empty());
@@ -2636,7 +2746,7 @@ mod tests {
                     workspace.add(cx);
                     workspace.tabs[1]
                         .view
-                        .update(cx, |view, _| view.attach_to(held));
+                        .update(cx, |view, cx| view.attach_to(held, cx));
                     let id = workspace.tabs[1].id;
                     workspace.closing.push(held);
                     workspace.finish_held_close(
@@ -2679,7 +2789,7 @@ mod tests {
                 );
                 workspace.tabs[0]
                     .view
-                    .update(cx, |view, _| view.attach_to(held));
+                    .update(cx, |view, cx| view.attach_to(held, cx));
                 workspace
             });
             workspace.update(cx, |workspace, cx| {
@@ -3385,7 +3495,7 @@ mod tests {
         let id = workspace.update(cx, |workspace, cx| {
             workspace.tabs[1]
                 .view
-                .update(cx, |view, _| view.attach_to(held));
+                .update(cx, |view, cx| view.attach_to(held, cx));
             workspace.tabs[1].id
         });
         draw(cx);

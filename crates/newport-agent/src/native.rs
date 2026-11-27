@@ -138,14 +138,13 @@ pub(crate) fn real_desktop(selection: Option<&std::path::Path>) -> bool {
 }
 
 pub fn find(name: &str) -> Option<PathBuf> {
-    let ours = env::current_exe().ok()?.canonicalize().ok()?;
     env::split_paths(&env::var_os("PATH").unwrap_or_default())
         .map(|p| p.join(name))
         .find(|p| {
             p.is_file()
                 && p.metadata()
                     .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
-                && p.canonicalize().is_ok_and(|p| p != ours)
+                && !crate::paths::is_own_program(p)
         })
 }
 fn publish(mut command: Command, data: Vec<u8>) -> bool {

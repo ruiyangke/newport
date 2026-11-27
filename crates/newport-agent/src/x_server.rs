@@ -4,8 +4,14 @@ use std::{
     collections::HashMap,
     io::{self, Write},
     net::Shutdown,
-    os::unix::{io::AsRawFd, net::UnixStream},
-    path::Path,
+    os::{
+        fd::{OwnedFd, RawFd},
+        unix::{
+            io::AsRawFd,
+            net::{UnixListener, UnixStream},
+        },
+    },
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -17,7 +23,10 @@ use std::{
 /// Private, local-only X transport with recorded ownership and crash recovery.
 pub struct Server {
     pub display: String,
-    authority: tempfile::NamedTempFile,
+    authority: tempfile::TempPath,
+    /// The listening socket, kept for a handoff.
+    listener: OwnedFd,
+    cookie: [u8; 16],
     _endpoint: crate::x_endpoint::Endpoint,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
@@ -33,16 +42,8 @@ impl Server {
     ) -> io::Result<Self> {
         let (listener, endpoint) = crate::x_endpoint::Endpoint::bind(requested)?;
         let number = endpoint.display;
-        let authority = tempfile::NamedTempFile::new_in(endpoint.directory())?;
-        // Construct the guard before fallible initialization so failed startup cleans up.
-        let mut server = Self {
-            display: format!(":{number}"),
-            authority,
-            _endpoint: endpoint,
-            stop: Arc::new(AtomicBool::new(false)),
-            thread: None,
-            clients: Arc::new(Mutex::new(HashMap::new())),
-        };
+        // Removed again if startup fails.
+        let mut authority = tempfile::NamedTempFile::new_in(endpoint.directory())?;
         let mut cookie = [0; 16];
         getrandom::fill(&mut cookie).map_err(|e| io::Error::other(e.to_string()))?;
         let mut auth = vec![0xff, 0xff]; // FamilyWild; cookie is unique to this listener.
@@ -55,8 +56,51 @@ impl Server {
             auth.extend_from_slice(&(field.len() as u16).to_be_bytes());
             auth.extend_from_slice(field);
         }
-        server.authority.write_all(&auth)?;
-        server.authority.flush()?;
+        authority.write_all(&auth)?;
+        authority.flush()?;
+        Self::serve(
+            source,
+            listener,
+            endpoint,
+            authority.into_temp_path(),
+            cookie,
+        )
+    }
+    /// Serves on what another program of this process served, as across
+    /// `exec`: the same socket, display number, authority file and cookie,
+    /// which the shell's `DISPLAY` and `XAUTHORITY` name.
+    pub(crate) fn adopt(
+        source: crate::clipboard_source::Source,
+        handoff: Handoff,
+        listener: UnixListener,
+        directory: crate::owned_directory::Directory,
+    ) -> io::Result<Self> {
+        let endpoint = crate::x_endpoint::Endpoint::adopt(handoff.display, directory);
+        Self::serve(
+            source,
+            listener,
+            endpoint,
+            tempfile::TempPath::try_from_path(handoff.authority)?,
+            handoff.cookie,
+        )
+    }
+    fn serve(
+        source: crate::clipboard_source::Source,
+        listener: UnixListener,
+        endpoint: crate::x_endpoint::Endpoint,
+        authority: tempfile::TempPath,
+        cookie: [u8; 16],
+    ) -> io::Result<Self> {
+        let mut server = Self {
+            display: format!(":{}", endpoint.display),
+            authority,
+            listener: listener.try_clone()?.into(),
+            cookie,
+            _endpoint: endpoint,
+            stop: Arc::new(AtomicBool::new(false)),
+            thread: None,
+            clients: Arc::new(Mutex::new(HashMap::new())),
+        };
         listener.set_nonblocking(true)?;
         let shared = Arc::new(x_protocol::Shared {
             atoms: Mutex::new(Default::default()),
@@ -105,8 +149,39 @@ impl Server {
             .is_some_and(|thread| !thread.is_finished())
     }
     pub fn authority(&self) -> &Path {
-        self.authority.path()
+        &self.authority
     }
+    /// What another program of this process needs to serve on as this one
+    /// does, with the descriptors it must keep open: the listening socket and
+    /// the endpoint directory's lease.
+    pub(crate) fn handoff(&self) -> (Handoff, [RawFd; 2]) {
+        (
+            Handoff {
+                display: self._endpoint.display,
+                directory: self._endpoint.directory().to_owned(),
+                directory_lease: self._endpoint.owned().lease().as_raw_fd(),
+                listener: self.listener.as_raw_fd(),
+                authority: self.authority.to_path_buf(),
+                cookie: self.cookie,
+            },
+            [
+                self.listener.as_raw_fd(),
+                self._endpoint.owned().lease().as_raw_fd(),
+            ],
+        )
+    }
+}
+
+/// An X11 clipboard server handed to the next program of its process.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Handoff {
+    pub display: u16,
+    pub directory: PathBuf,
+    pub directory_lease: RawFd,
+    pub listener: RawFd,
+    pub authority: PathBuf,
+    pub cookie: [u8; 16],
 }
 /// Whether the client runs as this account. Only it can reach the socket
 /// (mode 600), and it can read the cookie anyway, so the cookie proves nothing

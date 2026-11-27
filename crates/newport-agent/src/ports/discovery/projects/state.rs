@@ -32,7 +32,7 @@ impl State {
             return;
         }
         let deadline = deadline.min(Instant::now() + crate::ports::project::TIME_LIMIT);
-        let result = std::env::current_exe()
+        let result = crate::paths::own_program()
             .map_err(helper::Error::from)
             .and_then(|agent| self.client.projects(&agent, snapshot, deadline, cancelled));
         match result {

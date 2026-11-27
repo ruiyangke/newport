@@ -183,6 +183,9 @@ impl Bridge {
     }
 }
 
+/// The variables that name a display to a shell, unset where `None`.
+pub(crate) type Variables = Vec<(&'static str, Option<OsString>)>;
+
 /// A Newport terminal's clipboard display: X11 and Wayland, each where it
 /// can start. Each read goes to the computer the terminal is used on, chosen
 /// then; programs' copies go to `copies`.
@@ -198,16 +201,7 @@ impl TerminalDisplay {
         wayland: Option<&Path>,
         copies: crate::clipboard_source::Copy,
     ) -> Self {
-        use crate::routing::{Held, select_held_once};
-        let terminal = uuid::Uuid::parse_str(terminal)
-            .map(|id| id.to_string())
-            .unwrap_or_default();
-        let route: crate::clipboard_source::Route =
-            std::sync::Arc::new(move || match select_held_once(&terminal, "clipboard")? {
-                Held::Ready(selection) => Ok(selection.root.join("snapshot.tar")),
-                Held::Waiting(mac) => Err(Held::unavailable(mac.as_deref(), "clipboard")),
-            });
-        let source = crate::clipboard_source::Source::routed(route).with_copies(copies);
+        let source = terminal_source(terminal, copies);
         let x11 = x_server::Server::start_source(source.clone(), None).ok();
         let wayland = match wayland {
             Some(socket) => wl_server::Server::start_source(source, socket),
@@ -234,6 +228,295 @@ impl TerminalDisplay {
     fn started(&self) -> bool {
         self.x11.is_some() || self.wayland.is_some()
     }
+
+    /// Its handoff to the next program of its process, and the descriptors
+    /// that must stay open for it.
+    fn handoff(
+        &self,
+        terminal: &str,
+        tty: Option<&Path>,
+        control: std::os::fd::RawFd,
+    ) -> (Handoff, Vec<std::os::fd::RawFd>) {
+        let mut kept = vec![control];
+        let x11 = self.x11.as_ref().map(|server| {
+            let (handoff, fds) = server.handoff();
+            kept.extend(fds);
+            handoff
+        });
+        let wayland = self.wayland.as_ref().and_then(|server| {
+            let (handoff, fds) = server.handoff()?;
+            kept.extend(fds);
+            Some(handoff)
+        });
+        (
+            Handoff {
+                terminal: terminal.to_owned(),
+                tty: tty.map(Path::to_owned),
+                x11,
+                wayland,
+                control,
+            },
+            kept,
+        )
+    }
+}
+
+/// What a terminal's clipboard serves: reads from the computer the terminal
+/// is used on, chosen at each read, and copies to `copies`.
+fn terminal_source(
+    terminal: &str,
+    copies: crate::clipboard_source::Copy,
+) -> crate::clipboard_source::Source {
+    use crate::routing::{Held, select_held_once};
+    let terminal = uuid::Uuid::parse_str(terminal)
+        .map(|id| id.to_string())
+        .unwrap_or_default();
+    let route: crate::clipboard_source::Route =
+        std::sync::Arc::new(move || match select_held_once(&terminal, "clipboard")? {
+            Held::Ready(selection) => Ok(selection.root.join("snapshot.tar")),
+            Held::Waiting(mac) => Err(Held::unavailable(mac.as_deref(), "clipboard")),
+        });
+    crate::clipboard_source::Source::routed(route).with_copies(copies)
+}
+
+/// Copies sent to the terminal device `tty`, as programs' OSC 52.
+fn copies(tty: Option<PathBuf>) -> crate::clipboard_source::Copy {
+    crate::clipboard_copy::to_terminal(std::sync::Arc::new(
+        tty.map(std::sync::OnceLock::from).unwrap_or_default(),
+    ))
+}
+
+/// A held shell's clipboard display, handed to the next program of its
+/// process: what it serves for and the servers' sockets, which the shell's
+/// `DISPLAY`, `XAUTHORITY` and `WAYLAND_DISPLAY` name.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Handoff {
+    terminal: String,
+    tty: Option<PathBuf>,
+    x11: Option<x_server::Handoff>,
+    wayland: Option<wl_server::Handoff>,
+    /// The holder's pipe.
+    control: std::os::fd::RawFd,
+}
+
+/// How long a new build may take to show it can take a display over.
+const DRY_RUN: Duration = Duration::from_secs(10);
+
+/// Serves until the holder is gone, its pipe at an end. The holder tells it
+/// on the pipe to move to the build the holder moved to, `upgrade <path>`.
+fn follow(
+    terminal: &str,
+    tty: Option<&Path>,
+    display: &TerminalDisplay,
+    control: io::PipeReader,
+    handoff: &Path,
+) {
+    // A byte at a time: what follows a line stays in the pipe for the build
+    // this program may become.
+    let mut line = Vec::new();
+    let mut follow = crate::terminal::handoff::Follow::default();
+    loop {
+        let mut byte = [0u8];
+        match io::Read::read(&mut &control, &mut byte) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        }
+        if byte[0] != b'\n' {
+            line.push(byte[0]);
+            continue;
+        }
+        if let Some(build) = std::mem::take(&mut line).strip_prefix(b"upgrade ") {
+            use std::os::unix::ffi::OsStrExt;
+            follow.to(build, |build| {
+                let build = Path::new(std::ffi::OsStr::from_bytes(build));
+                move_display(terminal, tty, display, control.as_raw_fd(), build, handoff)
+            });
+        }
+    }
+}
+
+/// Replaces this program with `build` serving on the same sockets, after a
+/// dry run in which the build reads the handoff written at `path`. Returns
+/// only if this program keeps serving, with whether the build refused.
+/// Clients connected at that moment close with this program, and with them
+/// a selection a program such as `xclip` or `wl-copy` was serving;
+/// connections not yet accepted wait for the new one.
+fn move_display(
+    terminal: &str,
+    tty: Option<&Path>,
+    display: &TerminalDisplay,
+    control: std::os::fd::RawFd,
+    build: &Path,
+    path: &Path,
+) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let (handoff, kept) = display.handoff(terminal, tty, control);
+    let Ok(bytes) = serde_json::to_vec(&handoff) else {
+        return false;
+    };
+    if crate::paths::private_write(path, &bytes).is_err() {
+        return false;
+    }
+    let checked = crate::detached::bounded::status(
+        std::process::Command::new(build)
+            .args([
+                std::ffi::OsStr::new("terminal"),
+                "display-check".as_ref(),
+                path.as_os_str(),
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+        std::time::Instant::now() + DRY_RUN,
+    );
+    let argv = [
+        build.as_os_str(),
+        "terminal".as_ref(),
+        "display-resume".as_ref(),
+        path.as_os_str(),
+    ]
+    .map(|argument| std::ffi::CString::new(argument.as_bytes()));
+    if checked.as_ref().is_ok_and(|status| status.success())
+        && let [Ok(program), Ok(a), Ok(b), Ok(c)] = &argv
+    {
+        let pointers = [
+            program.as_ptr(),
+            a.as_ptr(),
+            b.as_ptr(),
+            c.as_ptr(),
+            std::ptr::null(),
+        ];
+        for &fd in &kept {
+            set_cloexec(fd, false);
+        }
+        // SAFETY: the array is NUL-terminated and outlives the call, which
+        // returns only if it fails; the other threads end with this program.
+        unsafe { libc::execv(program.as_ptr(), pointers.as_ptr()) };
+        for &fd in &kept {
+            set_cloexec(fd, true);
+        }
+    }
+    let _ = std::fs::remove_file(path);
+    crate::terminal::handoff::refused(&checked)
+}
+
+fn set_cloexec(fd: std::os::fd::RawFd, on: bool) {
+    // SAFETY: fcntl takes a live descriptor and scalar arguments.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        let flags = if on {
+            flags | libc::FD_CLOEXEC
+        } else {
+            flags & !libc::FD_CLOEXEC
+        };
+        libc::fcntl(fd, libc::F_SETFD, flags);
+    }
+}
+
+fn read_handoff(path: &Path) -> io::Result<Handoff> {
+    serde_json::from_slice(&std::fs::read(path)?)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid display handoff."))
+}
+
+/// `terminal display-check <handoff>`: a new build's dry run, which reads
+/// the handoff a held shell's display wrote, to show it can take it over.
+pub(crate) fn check(args: &[String]) -> io::Result<()> {
+    use crate::terminal::handoff::refusal;
+    let [path] = args else {
+        return Err(refusal(io::Error::other("Invalid display arguments.")));
+    };
+    let handoff = read_handoff(Path::new(path))?;
+    let paths = handoff
+        .x11
+        .iter()
+        .flat_map(|x11| [x11.directory.as_path(), x11.authority.as_path()])
+        .chain(
+            handoff
+                .wayland
+                .iter()
+                .map(|wayland| wayland.socket.as_path()),
+        );
+    for path in paths {
+        std::fs::symlink_metadata(path).map_err(refusal)?;
+    }
+    Ok(())
+}
+
+/// `terminal display-resume <handoff>`: a held shell's display once it has
+/// moved to this build, serving on the sockets the old build served.
+pub(crate) fn resume(args: &[String]) -> io::Result<()> {
+    use std::os::fd::{FromRawFd, RawFd};
+    let [path] = args else {
+        return Err(io::Error::other("Invalid display arguments."));
+    };
+    let read = read_handoff(Path::new(path));
+    let _ = std::fs::remove_file(path);
+    let handoff = read?;
+    let fds: Vec<RawFd> = std::iter::once(handoff.control)
+        .chain(
+            handoff
+                .x11
+                .iter()
+                .flat_map(|x11| [x11.listener, x11.directory_lease]),
+        )
+        .chain(
+            handoff
+                .wayland
+                .iter()
+                .flat_map(|wayland| [wayland.listener, wayland.lock]),
+        )
+        .collect();
+    // Only descriptors this process has, each once and none of the standard
+    // ones: taking another would close it.
+    // SAFETY: fcntl only reads a descriptor's flags.
+    if fds
+        .iter()
+        .any(|&fd| fd < 3 || unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0)
+        || (1..fds.len()).any(|i| fds[..i].contains(&fds[i]))
+    {
+        return Err(io::Error::other("Invalid display handoff."));
+    }
+    for &fd in &fds {
+        set_cloexec(fd, true);
+    }
+    let source = terminal_source(&handoff.terminal, copies(handoff.tty.clone()));
+    // SAFETY: the old build kept these open for this one, and nothing else in
+    // this process owns them.
+    let control = unsafe { io::PipeReader::from_raw_fd(handoff.control) };
+    let x11 = handoff.x11.and_then(|x11| {
+        // SAFETY: as above.
+        let (listener, lease) = unsafe {
+            (
+                std::os::unix::net::UnixListener::from_raw_fd(x11.listener),
+                std::fs::File::from_raw_fd(x11.directory_lease),
+            )
+        };
+        let directory = crate::owned_directory::Directory::adopt(&x11.directory, lease).ok()?;
+        x_server::Server::adopt(source.clone(), x11, listener, directory).ok()
+    });
+    let wayland = handoff.wayland.as_ref().and_then(|wayland| {
+        // SAFETY: as above.
+        let (listener, lock) = unsafe {
+            (
+                std::os::unix::net::UnixListener::from_raw_fd(wayland.listener),
+                std::fs::File::from_raw_fd(wayland.lock),
+            )
+        };
+        wl_server::Server::adopt(source, wayland, listener, lock).ok()
+    });
+    let display = TerminalDisplay { x11, wayland };
+    follow(
+        &handoff.terminal,
+        handoff.tty.as_deref(),
+        &display,
+        control,
+        Path::new(path),
+    );
+    drop(display);
+    Ok(())
 }
 
 /// How long a terminal's shell waits for its display before it starts
@@ -260,7 +543,35 @@ fn run_terminal(terminal: &str, command: &[OsString]) -> io::Error {
 /// Starts the terminal's display in a child that lives as long as this
 /// process, and returns the variables that name it.
 fn serve_terminal(terminal: &str) -> Option<Vec<(&'static str, Option<OsString>)>> {
-    let tty = crate::clipboard_copy::own_terminal();
+    serve_from_child(terminal, crate::clipboard_copy::own_terminal(), None, None)
+}
+
+/// Starts a held shell's clipboard display in a process of its own, which
+/// lives as long as this holder does, across the holder replacing its own
+/// program: its threads would end with the old program. The display serves
+/// its Wayland socket at `wayland` and sends copies to the shell's terminal
+/// `tty`. It keeps none of the holder's descriptors, so the shell's terminal
+/// and the holder's lock close with the holder. It runs the holder's build
+/// for the holder's whole life, which keeps that build installed. Returns
+/// the variables that name it, or `None` when no part of it started.
+pub(crate) fn serve_held(
+    terminal: &str,
+    wayland: &Path,
+    tty: PathBuf,
+) -> Option<(Variables, std::os::fd::OwnedFd)> {
+    let (control, holder) = io::pipe().ok()?;
+    let variables = serve_from_child(terminal, Some(tty), Some(wayland.to_owned()), Some(control))?;
+    Some((variables, holder.into()))
+}
+
+/// With `control`, the holder's pipe: the display keeps only it and its
+/// result pipe, and follows the holder through builds (see [`follow`]).
+fn serve_from_child(
+    terminal: &str,
+    tty: Option<PathBuf>,
+    wayland: Option<PathBuf>,
+    control: Option<io::PipeReader>,
+) -> Option<Vec<(&'static str, Option<OsString>)>> {
     let (mut reader, writer) = io::pipe().ok()?;
     let parent = std::process::id();
     // SAFETY: this process has started no threads, so the children may run
@@ -274,7 +585,14 @@ fn serve_terminal(terminal: &str) -> Option<Vec<(&'static str, Option<OsString>)
             // SAFETY: as above; the display's child never returns.
             unsafe {
                 if libc::fork() == 0 {
-                    serve_display(terminal, tty, writer, parent)
+                    let (writer, control) = match control {
+                        Some(control) => match keep_only(writer, control) {
+                            Some((writer, control)) => (writer, Some(control)),
+                            None => libc::_exit(1),
+                        },
+                        None => (writer, None),
+                    };
+                    serve_display(terminal, tty, wayland, writer, parent, control)
                 }
                 libc::_exit(0)
             }
@@ -282,7 +600,7 @@ fn serve_terminal(terminal: &str) -> Option<Vec<(&'static str, Option<OsString>)
         child => {
             // SAFETY: waits for the first child only, which ends at once.
             unsafe { libc::waitpid(child, std::ptr::null_mut(), 0) };
-            drop(writer);
+            drop((writer, control));
             let mut poll = libc::pollfd {
                 fd: reader.as_raw_fd(),
                 events: libc::POLLIN,
@@ -304,13 +622,22 @@ fn serve_terminal(terminal: &str) -> Option<Vec<(&'static str, Option<OsString>)
 /// The display's child: it leaves the terminal's session, so the terminal's
 /// signals and hangup never reach it, and ends as soon as `shell` does, so
 /// no copy goes to a terminal device the system has given another terminal.
-fn serve_display(terminal: &str, tty: Option<PathBuf>, mut names: io::PipeWriter, shell: u32) -> ! {
-    let shell = Process::watch(shell);
+fn serve_display(
+    terminal: &str,
+    tty: Option<PathBuf>,
+    wayland: Option<PathBuf>,
+    mut names: io::PipeWriter,
+    shell: u32,
+    control: Option<io::PipeReader>,
+) -> ! {
     // The directory the shell started in stays free to unmount.
     let _ = std::env::set_current_dir("/");
-    // SAFETY: setsid and dup2 change only this process's own state.
+    // SAFETY: setsid, signal and dup2 change only this process's own state.
     unsafe {
         libc::setsid();
+        // A client that disconnects mid-write ends its connection only, as
+        // in a display that has replaced its program.
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
         // Holding no descriptor of the terminal lets it close with the shell.
         if let Ok(null) = std::fs::File::options()
             .read(true)
@@ -322,17 +649,75 @@ fn serve_display(terminal: &str, tty: Option<PathBuf>, mut names: io::PipeWriter
             }
         }
     }
-    let copies = crate::clipboard_copy::to_terminal(std::sync::Arc::new(
-        tty.map(std::sync::OnceLock::from).unwrap_or_default(),
-    ));
-    let display = TerminalDisplay::start(terminal, None, copies);
+    let display = TerminalDisplay::start(terminal, wayland.as_deref(), copies(tty.clone()));
     if display.started() && names.write_all(&encode(&display.variables())).is_ok() {
         drop(names);
-        shell.wait();
+        // A held shell's display follows its holder, which writes the
+        // handoff beside the Wayland socket.
+        let handoff = wayland.as_ref().map(|socket| {
+            let mut path = socket.clone().into_os_string();
+            path.push(".handoff");
+            PathBuf::from(path)
+        });
+        match (control, handoff) {
+            (Some(control), Some(handoff)) => {
+                follow(terminal, tty.as_deref(), &display, control, &handoff)
+            }
+            _ => Process::watch(shell).wait(),
+        }
     }
     drop(display);
     // SAFETY: _exit ends only this child, skipping what the parent owns.
     unsafe { libc::_exit(0) }
+}
+
+/// Closes every descriptor but the standard ones, `writer`, which moves to
+/// descriptor 3, and `control`, which moves to 4, and gives every signal its
+/// default action, unblocked: the holder's handlers write to a socket closed
+/// here. Only for a process that has started no threads.
+fn keep_only(
+    writer: io::PipeWriter,
+    control: io::PipeReader,
+) -> Option<(io::PipeWriter, io::PipeReader)> {
+    use std::os::fd::{FromRawFd, IntoRawFd};
+    const WRITER: libc::c_int = 3;
+    const CONTROL: libc::c_int = 4;
+    const KEPT: libc::c_int = CONTROL;
+    let (writer, control) = (writer.into_raw_fd(), control.into_raw_fd());
+    // SAFETY: fcntl, dup2 and close take descriptors this process owns;
+    // nothing else runs while they change.
+    unsafe {
+        // Both above the targets first, so moving one can't overwrite the other.
+        let writer_above = libc::fcntl(writer, libc::F_DUPFD, 10);
+        let control_above = libc::fcntl(control, libc::F_DUPFD, 10);
+        if writer_above < 0
+            || control_above < 0
+            || libc::dup2(writer_above, WRITER) < 0
+            || libc::dup2(control_above, CONTROL) < 0
+        {
+            return None;
+        }
+        // Kernels before 5.9 have no close_range.
+        #[cfg(target_os = "linux")]
+        let closed = libc::syscall(libc::SYS_close_range, KEPT + 1, u32::MAX, 0) == 0;
+        #[cfg(not(target_os = "linux"))]
+        let closed = false;
+        if !closed {
+            for other in KEPT + 1..libc::getdtablesize() {
+                libc::close(other);
+            }
+        }
+        for signal in 1..65 {
+            libc::signal(signal, libc::SIG_DFL);
+        }
+        let mut none: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut none);
+        libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
+        Some((
+            io::PipeWriter::from_raw_fd(WRITER),
+            io::PipeReader::from_raw_fd(CONTROL),
+        ))
+    }
 }
 
 /// A process the display waits on, which isn't its parent.

@@ -70,7 +70,7 @@ pub fn launch(unit: &str, properties: &[&str], args: &[String]) -> io::Result<()
 /// launcher completion. An uncertain launch is never retried directly.
 pub fn launch_until(unit: &str, args: &[String], deadline: Instant) -> io::Result<()> {
     bounded::remaining(deadline)?;
-    let executable = std::fs::read_link("/proc/self/exe").or_else(|_| std::env::current_exe())?;
+    let executable = crate::paths::own_program()?;
     launch_until_with(
         &crate::linger::Linger::system(),
         OsStr::new("systemd-run"),
@@ -123,7 +123,7 @@ fn launch_with(
     properties: &[&str],
     args: &[String],
 ) -> io::Result<()> {
-    let executable = std::fs::read_link("/proc/self/exe").or_else(|_| std::env::current_exe())?;
+    let executable = crate::paths::own_program()?;
     let quiet = |command: &mut Command| {
         command
             .stdin(Stdio::null())

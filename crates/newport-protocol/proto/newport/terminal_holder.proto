@@ -46,5 +46,8 @@ message ServerFrame {
     // The shell's size, before the screen at attach and whenever it
     // changes: every attached tab draws the shell at this size.
     Size size = 10;
+    // The holder is moving to a new build of Needle and closes this
+    // connection: the same shell takes an attach again at once.
+    newport.wire.Present moving = 11;
   }
 }

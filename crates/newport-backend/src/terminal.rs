@@ -89,8 +89,33 @@ pub struct Io {
 }
 struct Session {
     server: Uuid,
+    /// The tab that opened it: only that tab's next open replaces it.
+    attachment: Uuid,
+    /// This open: only its lease ends it.
+    lease: Lease,
     owner: Arc<crate::server_session::ServerSession>,
     task: tokio::task::JoinHandle<()>,
+}
+
+/// Why a terminal didn't open.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OpenError {
+    /// Another tab has this session open.
+    AlreadyOpen,
+    Refused(String),
+}
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyOpen => f.write_str("Another tab has this terminal open."),
+            Self::Refused(reason) => f.write_str(reason),
+        }
+    }
+}
+impl From<String> for OpenError {
+    fn from(reason: String) -> Self {
+        Self::Refused(reason)
+    }
 }
 #[derive(Clone, Default)]
 pub struct Sessions {
@@ -100,7 +125,13 @@ pub struct Sessions {
 struct SessionRegistry {
     entries: Mutex<HashMap<Uuid, Session>>,
     cancelled: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    next_lease: std::sync::atomic::AtomicU64,
 }
+
+/// One open of a terminal. Its holder releases that open and no later one,
+/// though a tab's next open of the terminal may replace it first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Lease(u64);
 
 pub(crate) struct Closing(Vec<tokio::task::JoinHandle<()>>);
 impl Closing {
@@ -147,13 +178,17 @@ impl Sessions {
     }
     /// Lease drop cannot await. Abort synchronously and retain the task so the
     /// application can join it before releasing profile ownership.
-    pub fn cancel(&self, id: Uuid) {
-        if let Some(session) = self
+    /// An open replaced by the tab's next one no longer ends anything.
+    pub fn cancel(&self, id: Uuid, lease: Lease) {
+        let mut sessions = self
             .inner
             .entries
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&id)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if sessions
+            .get(&id)
+            .is_some_and(|session| session.lease == lease)
+            && let Some(session) = sessions.remove(&id)
         {
             session.task.abort();
             let mut cancelled = self
@@ -173,30 +208,59 @@ impl Sessions {
         rows: u32,
         owner: Arc<crate::server_session::ServerSession>,
     ) -> Result<Io, String> {
-        self.open_bound_shell(id, server, (cols, rows), owner, Shell::default(), Hold::No)
+        self.open_bound_shell(
+            id,
+            Uuid::new_v4(),
+            server,
+            (cols, rows),
+            owner,
+            Shell::default(),
+            Hold::No,
+        )
+        .map(|(io, _)| io)
+        .map_err(|error| error.to_string())
     }
+    /// Opens terminal `id` for the tab `attachment`. That tab's earlier open,
+    /// whose stream may still be letting go, gives way; another tab's open of
+    /// the same terminal stays and this one is refused.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn open_bound_shell(
         &self,
         id: Uuid,
+        attachment: Uuid,
         server: Server,
         (cols, rows): (u32, u32),
         owner: Arc<crate::server_session::ServerSession>,
         shell: Shell,
         hold: Hold,
-    ) -> Result<Io, String> {
+    ) -> Result<(Io, Lease), OpenError> {
         size(cols, rows)?;
         let mut sessions = self
             .inner
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if sessions.contains_key(&id) {
-            return Err("Terminal session already exists.".into());
+        match sessions.get(&id) {
+            Some(open) if open.attachment != attachment => return Err(OpenError::AlreadyOpen),
+            Some(_) => {
+                let replaced = sessions.remove(&id).expect("present");
+                replaced.task.abort();
+                let mut cancelled = self
+                    .inner
+                    .cancelled
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                cancelled.retain(|task| !task.is_finished());
+                cancelled.push(replaced.task);
+            }
+            None => {}
         }
         // The limit is each server's, as the app's tabs are.
         let open = sessions.values().filter(|s| s.server == server.id).count();
         if open >= newport_domain::terminal::MAX_TERMINALS {
-            return Err("Close an existing terminal before opening another.".into());
+            return Err(OpenError::Refused(
+                "Close an existing terminal before opening another.".into(),
+            ));
         }
         let (input, rx) = mpsc::channel(32);
         let (tx, output) = mpsc::channel(32);
@@ -246,15 +310,22 @@ impl Sessions {
                     .await;
             }
         });
+        let lease = Lease(
+            self.inner
+                .next_lease
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        );
         sessions.insert(
             id,
             Session {
                 server: server_id,
+                attachment,
+                lease,
                 owner,
                 task,
             },
         );
-        Ok(Io { input, output })
+        Ok((Io { input, output }, lease))
     }
     pub async fn close(&self, id: Uuid) {
         let session = self
@@ -365,6 +436,8 @@ mod tests {
             id,
             Session {
                 server,
+                attachment: Uuid::nil(),
+                lease: Lease(u64::MAX),
                 owner: test_owner(server, revision),
                 task,
             },
@@ -389,6 +462,87 @@ mod tests {
         assert_eq!(
             open(full).err().as_deref(),
             Some("Close an existing terminal before opening another.")
+        );
+        sessions.close_server(None).await;
+    }
+
+    fn open_tab(
+        sessions: &Sessions,
+        id: Uuid,
+        attachment: Uuid,
+        server: Uuid,
+    ) -> Result<Lease, OpenError> {
+        let owner = test_owner(server, 0);
+        let config = owner.server().clone();
+        sessions
+            .open_bound_shell(
+                id,
+                attachment,
+                config,
+                (80, 24),
+                owner,
+                Shell::default(),
+                Hold::No,
+            )
+            .map(|(_, lease)| lease)
+    }
+
+    #[tokio::test]
+    async fn another_tabs_open_of_a_terminal_is_refused_and_changes_nothing() {
+        let sessions = Sessions::default();
+        let (id, server) = (Uuid::new_v4(), Uuid::new_v4());
+        let lease = open_tab(&sessions, id, Uuid::new_v4(), server).unwrap();
+        assert_eq!(
+            open_tab(&sessions, id, Uuid::new_v4(), server),
+            Err(OpenError::AlreadyOpen)
+        );
+        assert_eq!(sessions.inner.entries.lock().unwrap()[&id].lease, lease);
+        sessions.close_server(None).await;
+    }
+
+    #[tokio::test]
+    async fn a_tabs_next_open_replaces_its_last_whose_lease_then_ends_nothing() {
+        let sessions = Sessions::default();
+        let (id, tab, server) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let first = open_tab(&sessions, id, tab, server).unwrap();
+        // The tab reconnects before its last stream has let go.
+        let second = open_tab(&sessions, id, tab, server).unwrap();
+        assert_ne!(first, second);
+        sessions.cancel(id, first);
+        assert_eq!(sessions.inner.entries.lock().unwrap()[&id].lease, second);
+        sessions.cancel(id, second);
+        assert!(sessions.inner.entries.lock().unwrap().is_empty());
+        sessions.close_server(None).await;
+    }
+
+    #[tokio::test]
+    async fn attaching_before_setup_finishes_fails_without_ending_the_shell() {
+        let sessions = Sessions::default();
+        let server: Server = serde_json::from_value(serde_json::json!({
+            "id":Uuid::new_v4(),"name":"Not set up","sshHost":"unconnected.invalid",
+            "sshUser":"fixture","sshPort":22
+        }))
+        .unwrap();
+        let registry = crate::server_session::Registry::default();
+        let owner = registry.session(&server, 0);
+        let (mut io, _) = sessions
+            .open_bound_shell(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                server,
+                (80, 24),
+                owner,
+                Shell::default(),
+                Hold::Attach(None),
+            )
+            .unwrap();
+        // The shell may still run: only this server's setup is missing.
+        let event = tokio::time::timeout(Duration::from_secs(5), io.output.recv())
+            .await
+            .unwrap();
+        assert!(
+            matches!(&event, Some(Event::Error(error)) if error.message.contains("not set up")),
+            "{event:?}"
         );
         sessions.close_server(None).await;
     }
@@ -424,6 +578,7 @@ mod tests {
             let factory: display::Source = Arc::new(|| Box::pin(std::future::pending()));
             let _io = sessions
                 .open_bound_shell(
+                    Uuid::new_v4(),
                     Uuid::new_v4(),
                     server,
                     (80, 24),
@@ -502,7 +657,7 @@ mod tests {
         let abort = task.abort_handle();
         started.await.unwrap();
         let (sessions, id) = queued_session(task);
-        sessions.cancel(id);
+        sessions.cancel(id, Lease(u64::MAX));
         assert!(matches!(
             sessions.link_owner(id),
             Err(error) if error.contains("Terminal is closed")
@@ -510,7 +665,7 @@ mod tests {
         sessions.close_server(None).await;
         assert!(abort.is_finished());
         assert!(sessions.inner.cancelled.lock().unwrap().is_empty());
-        sessions.cancel(id);
+        sessions.cancel(id, Lease(u64::MAX));
     }
 
     fn fixture() -> Server {
@@ -962,9 +1117,10 @@ mod tests {
         let owner = registry.session(&server, 0);
         let fake = FakeView::new();
         let id = Uuid::new_v4();
-        let mut io = sessions
+        let (mut io, _) = sessions
             .open_bound_shell(
                 id,
+                Uuid::new_v4(),
                 server.clone(),
                 (80, 24),
                 owner.clone(),
@@ -1020,8 +1176,16 @@ mod tests {
 
         // Where this computer may not use Remote apps, nothing is named.
         let id = Uuid::new_v4();
-        let mut io = sessions
-            .open_bound_shell(id, server, (80, 24), owner, Shell::default(), Hold::No)
+        let (mut io, _) = sessions
+            .open_bound_shell(
+                id,
+                Uuid::new_v4(),
+                server,
+                (80, 24),
+                owner,
+                Shell::default(),
+                Hold::No,
+            )
             .unwrap();
         until(&mut io, "fixture> ").await;
         type_in(&io, b"printf 'named=%s\\n' \"${WAYLAND_DISPLAY-none}\"\r").await;

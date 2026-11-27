@@ -19,6 +19,9 @@ pub struct TerminalOpenArgs {
     pub colors: Option<[[u8; 3]; 3]>,
     /// The folder a new shell starts in. Attaching keeps the held shell's.
     pub directory: Option<String>,
+    /// The tab asking: its own new open of `session` replaces its earlier
+    /// one, which may still be letting go, and another tab's is refused.
+    pub attachment: uuid::Uuid,
 }
 
 #[derive(Clone, Debug)]

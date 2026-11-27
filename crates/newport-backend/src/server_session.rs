@@ -578,56 +578,70 @@ impl ServerSession {
         };
         let expected = runtime.clone();
         let attaching = factory.clone();
-        let owner = self.clone();
+        // The display keeps this to attach again; it must not keep its owner.
+        let owner = Arc::downgrade(self);
+        let giving_up = factory.clone();
         let display = self
             .graphical
-            .acquire(runtime, demand, move |display_generation| {
-                let label = label.clone();
-                async move {
-                    let (channel, worker) = needle
-                        .launch_channel(agent::Service::RemoteApps { arguments })
-                        .await?;
-                    let admitted = worker.runtime.hello();
-                    if admitted.instance_id != expected.instance.to_string()
-                        || admitted.build_sha256 != expected.build_sha256
-                    {
-                        return Err(
+            .acquire_with(
+                runtime,
+                demand,
+                move |display_generation| {
+                    let (label, arguments, expected) =
+                        (label.clone(), arguments.clone(), expected.clone());
+                    let (needle, attaching, owner) =
+                        (needle.clone(), attaching.clone(), owner.clone());
+                    async move {
+                        attaching.validate()?;
+                        needle.validate()?;
+                        let (channel, worker) = needle
+                            .launch_channel(agent::Service::RemoteApps { arguments })
+                            .await?;
+                        let admitted = worker.runtime.hello();
+                        if admitted.instance_id != expected.instance.to_string()
+                            || admitted.build_sha256 != expected.build_sha256
+                        {
+                            return Err(
                         "Agent runtime changed during graphical preparation; retry the new session"
                             .into(),
                     );
+                        }
+                        let identity = Identity {
+                            runtime: expected,
+                            session,
+                            worker: worker.id,
+                            display_generation,
+                        };
+                        let attached = attaching
+                            .attach(
+                                crate::graphical_session::transport::Channel::attach(channel),
+                                identity.clone(),
+                                label,
+                            )
+                            .await?;
+                        needle.validate()?;
+                        // A ready display serves native selections before a GUI window
+                        // or host export grant exists. Provider assignment is not
+                        // permission to write the host clipboard.
+                        owner
+                            .upgrade()
+                            .ok_or(crate::graphical_session::ENDED)?
+                            .agent_runtime
+                            .clipboard_route(&identity, false, false)
+                            .await?;
+                        needle.validate()?;
+                        Ok(Prepared {
+                            identity,
+                            attached,
+                            fence: Box::new(GraphicalFence {
+                                needle,
+                                _worker: worker,
+                            }),
+                        })
                     }
-                    let identity = Identity {
-                        runtime: expected,
-                        session,
-                        worker: worker.id,
-                        display_generation,
-                    };
-                    let attached = attaching
-                        .attach(
-                            crate::graphical_session::transport::Channel::attach(channel),
-                            identity.clone(),
-                            label,
-                        )
-                        .await?;
-                    needle.validate()?;
-                    // A ready display serves native selections before a GUI window
-                    // or host export grant exists. Provider assignment is not
-                    // permission to write the host clipboard.
-                    owner
-                        .agent_runtime
-                        .clipboard_route(&identity, false, false)
-                        .await?;
-                    needle.validate()?;
-                    Ok(Prepared {
-                        identity,
-                        attached,
-                        fence: Box::new(GraphicalFence {
-                            needle,
-                            _worker: worker,
-                        }),
-                    })
-                }
-            })
+                },
+                move |display_generation| giving_up.reattach_failed(session, display_generation),
+            )
             .await?;
         factory.validate()?;
         Ok(display)

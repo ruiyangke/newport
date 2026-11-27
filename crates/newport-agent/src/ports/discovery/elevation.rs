@@ -96,7 +96,7 @@ impl State {
             return Err(report.clone());
         }
         if !matches!(self.helper, Helper::Running(_)) {
-            let started = std::env::current_exe()
+            let started = crate::paths::own_program()
                 .map_err(helper::Error::from)
                 .and_then(|agent| helper::Elevated::start(&agent));
             self.helper = match started {

@@ -9,12 +9,18 @@
 //! each pane, so a memory killer that takes the shell's scope leaves the
 //! holder to report how it ended. Without one it does the same work in the
 //! holder's process tree.
-use std::{ffi::CString, io, os::fd::RawFd};
+use std::{
+    ffi::CString,
+    io,
+    os::fd::{AsRawFd, RawFd},
+};
 
-/// The PTY's terminal side, and the pipe that takes the shell's pid and
-/// then its wait status to the holder, where the holder hands them over.
+/// The PTY's terminal side, the pipe that takes the shell's pid and then its
+/// wait status to the holder, and the pipe the holder tells it to move to a
+/// new build on, where the holder hands them over.
 pub(super) const TERMINAL_FD: RawFd = 3;
 pub(super) const STATUS_FD: RawFd = 4;
+pub(super) const CONTROL_FD: RawFd = 5;
 
 /// What a mistaken kill sends, and the job control and alarm signals a
 /// process that never reads a terminal has no use for. The shell gets them
@@ -61,10 +67,44 @@ pub(crate) fn run(args: &[String]) -> io::Result<()> {
     match pid {
         Ok(pid) => {
             send(pid);
-            reap(pid);
+            reap(&id, Some(pid));
         }
         Err(_) => send(-1),
     }
+    crate::linger::reconcile();
+    Ok(())
+}
+
+/// `terminal reaper-check <id> <shell>`: a new build's dry run, which reads
+/// the arguments a reaper would resume with.
+pub(crate) fn check(args: &[String]) -> io::Result<()> {
+    resume_arguments(args)
+        .map(drop)
+        .map_err(super::handoff::refusal)
+}
+
+fn resume_arguments(args: &[String]) -> io::Result<(String, libc::pid_t)> {
+    let [id, shell] = args else {
+        return Err(io::Error::other("Invalid terminal reaper arguments."));
+    };
+    let shell = shell
+        .parse()
+        .map_err(|_| io::Error::other("Invalid terminal reaper arguments."))?;
+    Ok((super::valid_id(id)?, shell))
+}
+
+/// `terminal reaper-resume <id> <shell>`: the reaper once it has moved to
+/// this build, collecting as before. `<shell>` is the shell's pid while its
+/// wait status is still to be sent, and 0 after; the status and control
+/// pipes stay at their descriptors.
+pub(crate) fn resume(args: &[String]) -> io::Result<()> {
+    let (id, shell) = resume_arguments(args)?;
+    for signal in IGNORED {
+        // SAFETY: signal takes scalar arguments.
+        unsafe { libc::signal(signal, libc::SIG_IGN) };
+    }
+    become_subreaper();
+    reap(&id, (shell > 0).then_some(shell));
     crate::linger::reconcile();
     Ok(())
 }
@@ -144,6 +184,7 @@ fn spawn(command: &CString, folder: Option<&Folder>) -> io::Result<libc::pid_t> 
             }
             libc::close(TERMINAL_FD);
             libc::close(STATUS_FD);
+            libc::close(CONTROL_FD);
             if let Some(folder) = folder {
                 let entered = folder
                     .path
@@ -168,8 +209,82 @@ fn send(value: libc::c_int) {
 }
 
 /// Collects every child until none is left, telling the holder how the shell
-/// ended. Orphans that outlive the shell keep the reaper, not the holder.
-fn reap(shell: libc::pid_t) {
+/// ended while `shell` is still to be reported. Orphans that outlive the
+/// shell keep the reaper, not the holder. Between children it waits on the
+/// holder's control pipe too, which may tell it to move to a new build.
+fn reap(id: &str, mut shell: Option<libc::pid_t>) {
+    // Each SIGCHLD as a byte, so one wait covers both.
+    let Ok((exited, notify)) = std::os::unix::net::UnixStream::pair() else {
+        return reap_blocking(shell);
+    };
+    if signal_hook::low_level::pipe::register(libc::SIGCHLD, notify).is_err() {
+        return reap_blocking(shell);
+    }
+    let _ = exited.set_nonblocking(true);
+    let mut control = Some(CONTROL_FD);
+    let mut line = Vec::new();
+    let mut follow = super::handoff::Follow::default();
+    loop {
+        loop {
+            let mut status = 0;
+            // SAFETY: `status` is a valid out-pointer.
+            let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+            if pid == 0 {
+                break;
+            }
+            if pid == -1 {
+                if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return;
+            }
+            if Some(pid) == shell {
+                send(status);
+                shell = None;
+                // SAFETY: nothing else is sent; the holder sees the pipe close.
+                unsafe { libc::close(STATUS_FD) };
+            }
+        }
+        let mut fds = vec![libc::pollfd {
+            fd: exited.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        if let Some(control) = control {
+            fds.push(libc::pollfd {
+                fd: control,
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        // SAFETY: the pointer and count describe the live `fds` vector.
+        if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) } < 0 {
+            continue;
+        }
+        let mut drained = [0u8; 64];
+        while std::io::Read::read(&mut &exited, &mut drained).is_ok_and(|n| n > 0) {}
+        if fds.get(1).is_some_and(|control| control.revents != 0) {
+            let mut byte = [0u8];
+            // SAFETY: one byte into a live buffer from the control pipe.
+            let read = unsafe { libc::read(CONTROL_FD, byte.as_mut_ptr().cast(), 1) };
+            if read <= 0 {
+                // The holder is gone: the shell's hangup ends it, and this
+                // collects what is left.
+                control = None;
+                // SAFETY: the reaper no longer reads it.
+                unsafe { libc::close(CONTROL_FD) };
+            } else if byte[0] != b'\n' {
+                line.push(byte[0]);
+            } else if let Some(build) = std::mem::take(&mut line).strip_prefix(b"upgrade ") {
+                follow.to(build, |build| move_to(id, build, shell));
+            }
+        }
+    }
+}
+
+/// Collects children with one blocking wait each, where SIGCHLD can't wake
+/// a poll.
+fn reap_blocking(mut shell: Option<libc::pid_t>) {
     loop {
         let mut status = 0;
         // SAFETY: `status` is a valid out-pointer.
@@ -180,12 +295,53 @@ fn reap(shell: libc::pid_t) {
             }
             return;
         }
-        if pid == shell {
+        if Some(pid) == shell {
             send(status);
+            shell = None;
             // SAFETY: nothing else is sent; the holder sees the pipe close.
             unsafe { libc::close(STATUS_FD) };
         }
     }
+}
+
+/// Replaces this program with `build`, the one the holder moved to, keeping
+/// the shell and every orphan its children, once the build has shown in a
+/// dry run that it can resume. The status and control pipes stay at their
+/// descriptors. Returns only if this build keeps reaping, with whether the
+/// build refused; a reaper that fails after the exec is no loss to the
+/// shell, which the holder takes back.
+fn move_to(id: &str, build: &[u8], shell: Option<libc::pid_t>) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let pid = shell.unwrap_or(0).to_string();
+    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(build));
+    let checked = crate::detached::bounded::status(
+        std::process::Command::new(path)
+            .args(["terminal", "reaper-check", id, &pid])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+        std::time::Instant::now() + std::time::Duration::from_secs(10),
+    );
+    if !checked.as_ref().is_ok_and(|status| status.success()) {
+        return super::handoff::refused(&checked);
+    }
+    let (Ok(program), Ok(id), Ok(shell)) =
+        (CString::new(build), CString::new(id), CString::new(pid))
+    else {
+        return true;
+    };
+    let argv = [
+        program.as_ptr(),
+        c"terminal".as_ptr(),
+        c"reaper-resume".as_ptr(),
+        id.as_ptr(),
+        shell.as_ptr(),
+        std::ptr::null(),
+    ];
+    // SAFETY: the array is NUL-terminated and outlives the call, which
+    // returns only if it fails.
+    unsafe { libc::execv(program.as_ptr(), argv.as_ptr()) };
+    false
 }
 
 #[cfg(target_os = "linux")]

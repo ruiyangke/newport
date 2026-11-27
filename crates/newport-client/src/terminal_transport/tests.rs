@@ -8,14 +8,14 @@ use std::{
 struct Fake {
     opens: Mutex<Vec<stream::TerminalOpenArgs>>,
     peers: mpsc::Sender<Stream>,
-    refuse: Option<String>,
+    refuse: Option<Refusal>,
 }
 impl Lease for Fake {
-    fn open(&self, args: stream::TerminalOpenArgs) -> Result<Opened, String> {
+    fn open(&self, args: stream::TerminalOpenArgs) -> Result<Opened, Refusal> {
         let session = args.session;
         self.opens.lock().unwrap().push(args);
-        if let Some(error) = &self.refuse {
-            return Err(error.clone());
+        if let Some(refusal) = &self.refuse {
+            return Err(refusal.clone());
         }
         let (client, peer) = Stream::pair().map_err(|error| error.to_string())?;
         let writer = Writer::new(client.try_clone().map_err(|error| error.to_string())?);
@@ -67,12 +67,12 @@ impl Peer {
         matches!(result, Err(protobuf::FrameError::Io(error)) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut))
     }
 }
-fn start_holding(hold: Hold, refuse: Option<String>) -> (Session, Arc<Fake>, Receiver<Stream>) {
+fn start_holding(hold: Hold, refuse: Option<Refusal>) -> (Session, Arc<Fake>, Receiver<Stream>) {
     start_in(hold, refuse, None)
 }
 fn start_in(
     hold: Hold,
-    refuse: Option<String>,
+    refuse: Option<Refusal>,
     directory: Option<String>,
 ) -> (Session, Arc<Fake>, Receiver<Stream>) {
     let (peers, receiver) = mpsc::channel();
@@ -84,9 +84,9 @@ fn start_in(
     let session = Session::start(
         fake.clone(),
         &uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4(),
         hold,
-        80,
-        24,
+        (80, 24),
         directory,
     )
     .unwrap();
@@ -195,14 +195,43 @@ fn restore_and_persistent_events_preserve_order_and_only_ready_allows_input() {
         matches!(peer.next(), Some(TerminalClient::Input(value)) if value.epoch == 0 && value.data.as_ref() == [1])
     );
 }
+/// The backend's refusal, as the client decodes it.
+fn refused(code: &str, retry: newport_protocol::common::Retry, message: &str) -> Option<Refusal> {
+    Some(Refusal::of(code, retry, message.into()))
+}
 #[test]
 fn a_refused_open_ends_the_session_with_its_reason() {
-    let (session, _, _) = start_holding(Hold::No, Some("holder requires reopening".into()));
-    assert_eq!(
-        next(&session),
-        Event::Error("holder requires reopening".into())
+    use newport_protocol::common::Retry;
+    for hold in [Hold::No, Hold::Attach(uuid::Uuid::new_v4(), None)] {
+        let refusal = refused("operation", Retry::No, "holder requires reopening");
+        let (session, _, _) = start_holding(hold, refusal);
+        assert_eq!(
+            next(&session),
+            Event::Error("holder requires reopening".into())
+        );
+        wait(|| session.is_closed());
+    }
+}
+#[test]
+fn an_open_of_a_terminal_another_tab_has_open_says_so_rather_than_failing() {
+    use newport_protocol::common::Retry;
+    let refusal = refused(
+        newport_protocol::terminal::ALREADY_OPEN,
+        Retry::No,
+        "Another tab has this terminal open.",
     );
+    let (session, _, _) = start_holding(Hold::Attach(uuid::Uuid::new_v4(), None), refusal);
+    assert_eq!(next(&session), Event::AlreadyOpen);
     wait(|| session.is_closed());
+}
+#[test]
+fn an_attach_refused_in_passing_tries_again_and_a_new_shell_does_not() {
+    use newport_protocol::common::Retry;
+    let busy = || refused("busy", Retry::Yes, "Newport is busy.");
+    let (session, _, _) = start_holding(Hold::Attach(uuid::Uuid::new_v4(), None), busy());
+    assert_eq!(next(&session), Event::Lost("Newport is busy.".into()));
+    let (session, _, _) = start_holding(Hold::WhenAvailable(None), busy());
+    assert_eq!(next(&session), Event::Error("Newport is busy.".into()));
 }
 #[test]
 fn input_and_resize_reach_the_backend_in_order() {

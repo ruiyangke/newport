@@ -516,10 +516,7 @@ mod tests {
                 .unwrap();
                 assert_eq!(terminals.len(), 2);
                 let workspace = terminals["fixture"].read(cx);
-                assert_eq!(
-                    workspace.menu_state(cx),
-                    Some((index, true, false, index > 0))
-                );
+                assert_eq!(workspace.menu_state(cx), Some((index, true, false, true)));
                 // Handover queues the first open until layout supplies its size.
                 assert!(workspace.session_ids(cx).is_empty());
             }

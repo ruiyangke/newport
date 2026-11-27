@@ -24,6 +24,7 @@ fn open(
     sessions
         .open_bound_shell(
             id,
+            Uuid::new_v4(),
             server.clone(),
             (100, 30),
             owner.clone(),
@@ -35,6 +36,7 @@ fn open(
             },
         )
         .unwrap()
+        .0
 }
 
 async fn next(io: &mut Io) -> Event {
@@ -347,4 +349,115 @@ async fn a_terminal_opened_after_setup_finished_is_held() {
     attached(&mut io).await;
     io.input.send(Input::End).await.unwrap();
     sessions.close_server(None).await;
+}
+
+/// Output until `text` appears, through a move of the shell's holder: the
+/// tab attaches again, its screen restored, and its shell's exit never comes.
+/// Returns the output and whether the screen was restored.
+async fn through_upgrade(io: &mut Io, text: &str) -> (String, bool) {
+    let (mut seen, mut restored) = (String::new(), false);
+    while !seen.contains(text) {
+        match next(io).await {
+            Event::Data(bytes) => seen.push_str(&String::from_utf8_lossy(&bytes)),
+            Event::Restore { state, .. } => {
+                restored = true;
+                seen.push_str(&String::from_utf8_lossy(&state))
+            }
+            Event::Active(_) | Event::Persistent | Event::Size { .. } | Event::Ready => {}
+            event => panic!("Unexpected {event:?} waiting for {text:?}: {seen}"),
+        }
+    }
+    (seen, restored)
+}
+
+#[tokio::test]
+#[ignore = "Requires cargo xtask test remote and real OpenSSH"]
+async fn a_held_shell_keeps_running_while_needle_moves_to_a_new_build() {
+    let server = held_server().await;
+    let owner = owner(&server);
+    let sessions = Sessions::default();
+    let id = Uuid::new_v4();
+    let mut io = open(&sessions, &server, &owner, id, false);
+    attached(&mut io).await;
+    let pid = shell_pid(&mut io).await;
+    let stop = format!("~/.newport-test-stop-{}", id.simple());
+    type_in(
+        &io,
+        &format!(
+            "i=0; while [ ! -e {stop} ]; do i=$((i+1)); echo n=$i; sleep 0.2; done; echo loop-$((6*7))\r"
+        ),
+    )
+    .await;
+    until(&mut io, "n=3\r").await;
+    // An update, as Needle's install makes one: another build staged in a
+    // folder named by its checksum, then the entry point moved to it. One
+    // byte past the end makes this build's copy another build.
+    let shell = crate::remote::Shell::new(&server);
+    let staged = shell
+        .execute(
+            "set -e; builds=~/.local/share/newport/needle/builds; \
+             current=$(readlink -f ~/.local/bin/newport-agent); \
+             next=$(mktemp ~/.local/share/newport/needle/next.XXXXXX); \
+             cp $current $next; printf x >> $next; chmod 700 $next; \
+             build=$(sha256sum $next | cut -c1-64); \
+             mkdir -p $builds/$build; mv $next $builds/$build/newport-agent; \
+             ln -s $builds/$build/newport-agent ~/.local/bin/.newport-agent-next; \
+             mv -T ~/.local/bin/.newport-agent-next ~/.local/bin/newport-agent; \
+             echo $current $build",
+            None,
+        )
+        .await
+        .unwrap();
+    let (previous, build) = staged.trim().split_once(' ').unwrap();
+    // The tab follows its holder while the loop runs: it attaches again, its
+    // screen restored, and the loop's output goes on.
+    let count =
+        format!("for p in /proc/[0-9]*; do readlink $p/exe 2>/dev/null; done | grep -c {build}");
+    let moved = async || {
+        shell
+            .execute(&count, None)
+            .await
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap()
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let (mut seen, mut restored) = (String::new(), false);
+    // The holder, its reaper and clipboard display.
+    while !(restored && moved().await >= 3) {
+        assert!(tokio::time::Instant::now() < deadline, "no move: {seen}");
+        let (output, again) = through_upgrade(&mut io, "\r\n").await;
+        seen.push_str(&output);
+        restored |= again;
+    }
+    // The last whole count: output may end in the middle of one.
+    let last = |output: &str| -> u32 {
+        output
+            .split("n=")
+            .filter_map(|count| count.split_once('\r')?.0.parse().ok())
+            .last()
+            .unwrap()
+    };
+    let at_move = last(&seen);
+    // The attach's last events may still come.
+    through_upgrade(&mut io, &format!("n={}\r", at_move + 3)).await;
+    shell.execute(&format!("touch {stop}"), None).await.unwrap();
+    through_upgrade(&mut io, "loop-42").await;
+    // The same shell, which still takes what the tab sends.
+    assert_eq!(shell_pid(&mut io).await, pid, "the same shell");
+    shell.execute(&format!("rm -f {stop}"), None).await.unwrap();
+    io.input.send(Input::End).await.unwrap();
+    sessions.close_server(None).await;
+    // The account as the suite set it up, for the tests after this one.
+    shell
+        .execute(
+            &format!(
+                "ln -sfn {previous} ~/.local/bin/newport-agent && \
+                 rm -rf ~/.local/share/newport/needle/builds/{build}"
+            ),
+            None,
+        )
+        .await
+        .unwrap();
 }

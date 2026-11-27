@@ -30,6 +30,9 @@ pub const MAX_ATTACHED: usize = 256;
 /// The code of a start that failed before Needle launched anything: no holder
 /// runs for its id, so the desktop may open an ordinary shell instead.
 pub const NOT_STARTED: &str = "holder_not_started";
+/// The failure code of a terminal open for a tab this computer already has
+/// open: the open changes nothing.
+pub const ALREADY_OPEN: &str = "terminal_already_open";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Computer {

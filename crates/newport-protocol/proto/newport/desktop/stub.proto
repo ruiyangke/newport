@@ -44,6 +44,7 @@ message WindowState {
   Size max = 13;
   optional string title = 14;
   optional Activate activate = 15;
+  optional bool minimized = 16;
 }
 
 message HostHello {

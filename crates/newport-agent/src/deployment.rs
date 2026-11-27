@@ -59,6 +59,16 @@ pub(crate) fn valid_hash(value: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Needle's entry point in `home`: a link to the build in use.
+fn entry_point_in(home: &Path) -> PathBuf {
+    home.join(".local/bin/newport-agent")
+}
+
+/// The build Needle's entry point names now, if it names one.
+pub fn active_build() -> Option<PathBuf> {
+    fs::canonicalize(entry_point_in(Path::new(&env::var_os("HOME")?))).ok()
+}
+
 struct Installation {
     root: PathBuf,
     active: PathBuf,
@@ -95,7 +105,7 @@ impl Installation {
         fs::create_dir_all(home.join(".local/bin"))?;
         Ok(Self {
             root,
-            active: home.join(".local/bin/newport-agent"),
+            active: entry_point_in(home),
             _lock: lock,
         })
     }
@@ -227,20 +237,19 @@ impl Installation {
                 Err(error) => return Err(error),
             }
         }
-        self.prune(&[hash], running.as_ref());
+        let replaced = (current != hash && current != "missing").then_some(current.as_str());
+        self.prune(&[hash], replaced);
         Ok(true)
     }
-    /// Removes builds nothing needs any more. Kept: the active build, builds a
-    /// process still runs (a runtime keeps launching workers from its own
-    /// build, and a replaced one drains), builds staged or started within
-    /// `RECENTLY_STAGED`, which another Newport may be about to use, and the
-    /// `IDLE_KEPT` most recently used of the rest within `IDLE_LIFETIME`, so a
-    /// desktop that comes back finds its own build. Without a list of running
-    /// builds nothing is removed. Cleanup is best effort.
-    fn prune(&self, keep: &[&str], running: Option<&HashSet<String>>) {
-        let Some(running) = running else {
-            return;
-        };
+    /// Removes every build but those still needed, at once: the active one,
+    /// those Needle's helpers name, and candidates staged within `CANDIDATE`,
+    /// which a Newport may be about to install. `replaced`, the build an
+    /// install just moved the entry point from, goes however recently it was
+    /// staged. A process that still runs a removed build goes on running it:
+    /// none starts its own program by path once its build is gone (see
+    /// `paths::own_program`), and terminals move to the active build. Cleanup
+    /// is best effort.
+    fn prune(&self, keep: &[&str], replaced: Option<&str>) {
         let Some(directory) = self.active.parent() else {
             return;
         };
@@ -251,14 +260,12 @@ impl Installation {
         let Ok(entries) = fs::read_dir(self.root.join("builds")) else {
             return;
         };
-        let mut idle = Vec::new();
         for entry in entries.flatten() {
             let Some(hash) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
             if valid_hash(&hash).is_err()
                 || keep.contains(&hash.as_str())
-                || running.contains(&hash)
                 || helpers.contains(&hash)
             {
                 continue;
@@ -270,19 +277,14 @@ impl Installation {
                 continue;
             }
             // Unknown or future times count as recent.
-            match metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.elapsed().ok())
-            {
-                Some(age) if age >= RECENTLY_STAGED => idle.push((age, entry.path())),
-                _ => {}
-            }
-        }
-        idle.sort();
-        for (index, (age, path)) in idle.into_iter().enumerate() {
-            if index >= IDLE_KEPT || age >= IDLE_LIFETIME {
-                let _ = fs::remove_dir_all(path);
+            let candidate = replaced != Some(hash.as_str())
+                && metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.elapsed().ok())
+                    .is_none_or(|age| age < CANDIDATE);
+            if !candidate {
+                let _ = fs::remove_dir_all(entry.path());
             }
         }
     }
@@ -304,15 +306,12 @@ fn may_replace(
         || running.is_some_and(|running| !running.contains(current))
 }
 
-/// How long a staged or started build is safe from pruning.
-const RECENTLY_STAGED: Duration = Duration::from_secs(60 * 60);
-/// How many idle builds pruning keeps beyond those, most recently used first,
-/// and for how long at most.
-const IDLE_KEPT: usize = 2;
-const IDLE_LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+/// How long a staged build that was never installed is kept: from the
+/// moment a Newport stages it to its install.
+const CANDIDATE: Duration = Duration::from_secs(10 * 60);
 
 /// The builds this account's processes are running, from `/proc`. `None`
-/// where they can't be listed, so pruning keeps everything.
+/// where they can't be listed, which counts as running.
 fn running_builds() -> Option<HashSet<String>> {
     #[cfg(target_os = "linux")]
     {
@@ -356,23 +355,8 @@ fn build_of(executable: &Path) -> Option<String> {
         && valid_hash(hash).is_ok())
     .then(|| hash.to_owned())
 }
-/// Marks the build this process runs as just used, so pruning keeps it a
-/// while after it stops: the time of its folder is when it last started.
-pub(crate) fn mark_used() {
-    let Ok(executable) = env::current_exe() else {
-        return;
-    };
-    if build_of(&executable).is_none() {
-        return;
-    }
-    if let Some(Ok(folder)) = executable.parent().map(fs::File::open) {
-        let _ = folder.set_modified(std::time::SystemTime::now());
-    }
-}
-
-/// Cleanup when a runtime starts, so a replaced build that was still running
-/// at its update goes once it stopped. Skipped when an install holds the lock;
-/// it never waits.
+/// Cleanup when a runtime starts, for builds a failed or interrupted cleanup
+/// left. Skipped when an install holds the lock; it never waits.
 pub(crate) fn prune_retained(home: &Path) {
     let root = home.join(".local/share/newport/needle");
     if check_directory(&root).is_err() {
@@ -392,7 +376,7 @@ pub(crate) fn prune_retained(home: &Path) {
     if let Ok(active) = installation.current()
         && active != "missing"
     {
-        installation.prune(&[&active], running_builds().as_ref());
+        installation.prune(&[&active], None);
     }
 }
 
@@ -514,8 +498,9 @@ mod tests {
         hash
     }
 
+    /// Staged longer ago than a candidate is kept.
     fn age(install: &Installation, hash: &str) {
-        age_by(install, hash, RECENTLY_STAGED + Duration::from_secs(60));
+        age_by(install, hash, CANDIDATE + Duration::from_secs(60));
     }
 
     fn age_by(install: &Installation, hash: &str, age: Duration) {
@@ -582,12 +567,12 @@ mod tests {
             fs::write(install.root.join(journal), b"{}").unwrap();
         }
         fs::create_dir(install.root.join("helpers")).unwrap();
+        // Staged moments ago, and maybe still running: it goes all the same.
         let new = candidate(&install, b"new build");
-        age_by(&install, &old, IDLE_LIFETIME);
         install.install(&new, false).unwrap();
         assert!(
             install.verify(&old).is_err(),
-            "the replaced build is removed"
+            "the replaced build is removed at once"
         );
         assert!(install.verify(&new).is_ok());
         for gone in [
@@ -601,53 +586,30 @@ mod tests {
     }
 
     #[test]
-    fn pruning_keeps_active_running_and_recent_builds() {
+    fn pruning_keeps_only_the_active_build_and_new_candidates() {
         let home = tempfile::tempdir().unwrap();
         let install = Installation::open(home.path()).unwrap();
-        let [expired, running, recent, active] = ["expired", "running", "recent", "active"]
+        let [old, running, candidate_build, active] = ["old", "running", "candidate", "active"]
             .map(|name| candidate(&install, name.as_bytes()));
-        for hash in [&running, &active] {
+        for hash in [&old, &running, &active] {
             age(&install, hash);
         }
-        age_by(&install, &expired, IDLE_LIFETIME);
         let unrelated = install.root.join("builds/not-a-build");
         fs::create_dir(&unrelated).unwrap();
-        install.prune(&[&active], Some(&HashSet::from([running.clone()])));
-        assert!(
-            install.verify(&expired).is_err(),
-            "a build unused for a month is removed"
-        );
-        for hash in [&running, &recent, &active] {
-            assert!(install.verify(hash).is_ok());
-        }
-        assert!(unrelated.exists(), "only build folders are touched");
-        // Not knowing what runs keeps everything.
-        let other = candidate(&install, b"other");
-        age_by(&install, &other, IDLE_LIFETIME);
         install.prune(&[&active], None);
-        assert!(install.verify(&other).is_ok());
-    }
-
-    #[test]
-    fn pruning_keeps_the_most_recently_used_idle_builds() {
-        let home = tempfile::tempdir().unwrap();
-        let install = Installation::open(home.path()).unwrap();
-        let active = candidate(&install, b"active");
-        // Idle builds last used two, three and four hours ago.
-        let idle: Vec<String> = (2..=4)
-            .map(|hours| {
-                let hash = candidate(&install, format!("idle {hours}").as_bytes());
-                age_by(&install, &hash, Duration::from_secs(hours * 60 * 60));
-                hash
-            })
-            .collect();
-        install.prune(&[&active], Some(&HashSet::new()));
-        assert!(install.verify(&idle[0]).is_ok());
-        assert!(install.verify(&idle[1]).is_ok());
+        // A build a process runs goes too: the process keeps its file open.
+        for hash in [&old, &running] {
+            assert!(install.verify(hash).is_err(), "only the active build stays");
+        }
+        assert!(install.verify(&active).is_ok());
         assert!(
-            install.verify(&idle[2]).is_err(),
-            "only the two most recently used idle builds stay"
+            install.verify(&candidate_build).is_ok(),
+            "a Newport may be about to install it"
         );
+        assert!(unrelated.exists(), "only build folders are touched");
+        // The build an install just left goes however new it is.
+        install.prune(&[&active], Some(&candidate_build));
+        assert!(install.verify(&candidate_build).is_err());
     }
 
     #[test]
@@ -673,14 +635,14 @@ mod tests {
         )
         .unwrap();
         for hash in [&browser, &opener, &unused] {
-            age_by(&install, hash, IDLE_LIFETIME);
+            age(&install, hash);
         }
-        install.prune(&[&active], Some(&HashSet::new()));
+        install.prune(&[&active], None);
         assert!(install.verify(&browser).is_ok());
         assert!(install.verify(&opener).is_ok());
         assert!(install.verify(&unused).is_err());
         fs::remove_file(home.path().join(".local/bin/newport-browser")).unwrap();
-        install.prune(&[&active], Some(&HashSet::new()));
+        install.prune(&[&active], None);
         assert!(install.verify(&browser).is_err());
         assert!(install.verify(&opener).is_ok());
     }
@@ -720,7 +682,10 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(install.current().unwrap(), ours);
-        assert!(install.verify(&theirs).is_ok(), "a recent build stays");
+        assert!(
+            install.verify(&theirs).is_err(),
+            "the replaced build goes at once"
+        );
     }
 
     #[test]

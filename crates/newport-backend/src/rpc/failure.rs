@@ -18,6 +18,10 @@ pub(super) fn failure(code: &str, message: impl Into<String>, retry: Retry) -> F
 pub(crate) fn operation(message: impl std::fmt::Display) -> Failure {
     failure("operation", message.to_string(), Retry::Unknown)
 }
+/// A terminal open for a tab already open here: the tab on screen keeps it.
+pub(crate) fn terminal_already_open(message: impl Into<String>) -> Failure {
+    failure(newport_protocol::terminal::ALREADY_OPEN, message, Retry::No)
+}
 pub(super) fn invalid_result(field: &str) -> Failure {
     failure(
         "invalid_result",

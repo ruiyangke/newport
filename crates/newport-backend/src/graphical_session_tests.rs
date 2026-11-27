@@ -136,6 +136,36 @@ struct Fixture {
     driver: Arc<Probe>,
     valid: Arc<AtomicBool>,
 }
+fn probe(slot: &Slot) -> Arc<Probe> {
+    Arc::new(Probe {
+        updates: watch::channel(DriverState::Ready {
+            windows: 0,
+            applications: 0,
+        })
+        .0,
+        stops: AtomicUsize::new(0),
+        stands: AtomicUsize::new(0),
+        owner: Arc::downgrade(&slot.shared),
+        requests: Mutex::new(Vec::new()),
+        app_next: Default::default(),
+        app_states: Default::default(),
+        app_stops: Default::default(),
+        app_endings: Default::default(),
+        shown: Default::default(),
+    })
+}
+/// A start for a display that is never attached again.
+fn once<F, Fut>(start: F) -> impl Fn(u64) -> StartFuture + Send + Sync + 'static
+where
+    F: FnOnce(u64) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<Prepared, String>> + Send + 'static,
+{
+    let start = Mutex::new(Some(start));
+    move |generation| match start.lock().unwrap().take() {
+        Some(start) => Box::pin(start(generation)),
+        None => Box::pin(async { Err("Attached once".to_owned()) }),
+    }
+}
 impl Fixture {
     fn new(slot: &Slot) -> Self {
         Self {
@@ -145,26 +175,14 @@ impl Fixture {
                 transport_generation: 1,
             },
             session: Uuid::new_v4(),
-            driver: Arc::new(Probe {
-                updates: watch::channel(DriverState::Ready {
-                    windows: 0,
-                    applications: 0,
-                })
-                .0,
-                stops: AtomicUsize::new(0),
-                stands: AtomicUsize::new(0),
-                owner: Arc::downgrade(&slot.shared),
-                requests: Mutex::new(Vec::new()),
-                app_next: Default::default(),
-                app_states: Default::default(),
-                app_stops: Default::default(),
-                app_endings: Default::default(),
-                shown: Default::default(),
-            }),
+            driver: probe(slot),
             valid: Arc::new(AtomicBool::new(true)),
         }
     }
     fn prepared(&self, generation: u64) -> Prepared {
+        self.prepared_with(generation, self.driver.clone())
+    }
+    fn prepared_with(&self, generation: u64, driver: Arc<Probe>) -> Prepared {
         Prepared {
             identity: Identity {
                 runtime: self.runtime.clone(),
@@ -172,17 +190,17 @@ impl Fixture {
                 worker: Uuid::new_v4(),
                 display_generation: generation,
             },
-            attached: Attached {
-                driver: self.driver.clone(),
-            },
+            attached: Attached { driver },
             fence: Box::new(Validity(self.valid.clone())),
         }
     }
     async fn acquire(&self, slot: &Slot, demand: Demand) -> Lease {
         let fixture = self.clone();
-        slot.acquire(self.runtime.clone(), demand, move |generation| async move {
-            Ok(fixture.prepared(generation))
-        })
+        slot.acquire(
+            self.runtime.clone(),
+            demand,
+            once(move |generation| async move { Ok(fixture.prepared(generation)) }),
+        )
         .await
         .unwrap()
     }
@@ -240,10 +258,10 @@ async fn requests_coalesce_on_one_pending_startup() {
             .acquire(
                 preparing.runtime.clone(),
                 Demand::ActiveTerminal,
-                move |generation| async move {
+                once(move |generation| async move {
                     let _permit = release.acquire().await.unwrap();
                     Ok(preparing.prepared(generation))
-                },
+                }),
             )
             .await
             .unwrap()
@@ -437,11 +455,11 @@ async fn concurrent_consumers_share_startup_even_when_initiator_cancels() {
                 .acquire(
                     fixture.runtime.clone(),
                     demand,
-                    move |generation| async move {
+                    once(move |generation| async move {
                         caller_starts.fetch_add(1, Ordering::SeqCst);
                         let _permit = gate.acquire().await.unwrap();
                         Ok(fixture.prepared(generation))
-                    },
+                    }),
                 )
                 .await
         }));
@@ -495,11 +513,11 @@ async fn cancelling_final_waiter_cancels_owned_preparation_and_allows_new_genera
             slot.acquire(
                 fixture.runtime.clone(),
                 Demand::ActiveTerminal,
-                move |_| async move {
+                once(move |_| async move {
                     let _drop = Dropped(dropped);
                     started.send(()).unwrap();
                     std::future::pending::<Result<Prepared, String>>().await
-                },
+                }),
             )
             .await
         })
@@ -661,7 +679,7 @@ async fn invalid_preparation_is_never_published_and_stops_adapter() {
             .acquire(
                 fixture.runtime.clone(),
                 Demand::ActiveTerminal,
-                move |generation| async move {
+                once(move |generation| async move {
                     let mut prepared = factory.prepared(generation);
                     match mismatch {
                         0 => prepared.identity.runtime.instance = Uuid::new_v4(),
@@ -673,7 +691,7 @@ async fn invalid_preparation_is_never_published_and_stops_adapter() {
                         }
                     }
                     Ok(prepared)
-                },
+                }),
             )
             .await;
         assert!(result.is_err(), "mismatch {mismatch} accepted");
@@ -693,11 +711,11 @@ async fn timeout_and_panicked_startup_do_not_strand_waiters() {
             .acquire(
                 fixture.runtime.clone(),
                 Demand::ActiveTerminal,
-                move |_| async move {
+                once(move |_| async move {
                     let _guard = guard;
                     assert!(!panic, "simulated adapter panic");
                     std::future::pending::<Result<Prepared, String>>().await
-                },
+                }),
             )
             .await;
         let error = result.err().unwrap();
@@ -727,12 +745,12 @@ async fn attachment_finishing_after_owner_close_is_stopped_without_publication()
             slot.acquire(
                 fixture.runtime.clone(),
                 Demand::ActiveTerminal,
-                move |generation| async move {
+                once(move |generation| async move {
                     started.send(()).unwrap();
                     // Simulate attachment completing in the same poll as close.
                     blocked.recv_timeout(Duration::from_secs(2)).unwrap();
                     Ok(fixture.prepared(generation))
-                },
+                }),
             )
             .await
         })
@@ -1396,4 +1414,323 @@ async fn another_computer_of_the_same_name_reads_as_showing_the_display() {
     slot.viewer_checked(ask_viewer(&slot), Live::Viewed(on(&name)));
     assert_eq!(slot.display().shown_on, Some(on(&name)));
     slot.close();
+}
+
+/// A display that attaches again on every start, each time through a new
+/// driver, failing the tries after the first while `refused` is set.
+struct Restarts {
+    fixture: Fixture,
+    drivers: Arc<Mutex<Vec<Arc<Probe>>>>,
+    refused: Arc<AtomicBool>,
+    gate: Arc<Semaphore>,
+    /// When each start began.
+    started: Arc<Mutex<Vec<tokio::time::Instant>>>,
+    /// Restarts that couldn't attach again.
+    gave_up: Arc<AtomicUsize>,
+}
+impl Restarts {
+    fn new(slot: &Slot) -> Self {
+        Self {
+            fixture: Fixture::new(slot),
+            drivers: Default::default(),
+            refused: Default::default(),
+            gate: Arc::new(Semaphore::new(Semaphore::MAX_PERMITS)),
+            started: Default::default(),
+            gave_up: Default::default(),
+        }
+    }
+    async fn acquire(&self, slot: &Arc<Slot>, demand: Demand) -> Result<Lease, String> {
+        let (fixture, drivers, refused, gate) = (
+            self.fixture.clone(),
+            self.drivers.clone(),
+            self.refused.clone(),
+            self.gate.clone(),
+        );
+        let owner = Arc::downgrade(slot);
+        let (started, gave_up) = (self.started.clone(), self.gave_up.clone());
+        let start = move |generation| {
+            let (fixture, drivers, refused, gate, owner) = (
+                fixture.clone(),
+                drivers.clone(),
+                refused.clone(),
+                gate.clone(),
+                owner.clone(),
+            );
+            started.lock().unwrap().push(tokio::time::Instant::now());
+            async move {
+                let first = drivers.lock().unwrap().is_empty();
+                if !first {
+                    let _permit = gate.acquire().await.unwrap();
+                    if refused.load(Ordering::SeqCst) {
+                        drivers.lock().unwrap().push(fixture.driver.clone());
+                        return Err("The display refused the viewer".into());
+                    }
+                }
+                let driver = probe(&owner.upgrade().unwrap());
+                // Its windows and apps came with the display.
+                driver.publish(1, 1);
+                drivers.lock().unwrap().push(driver.clone());
+                Ok(fixture.prepared_with(generation, driver))
+            }
+        };
+        slot.acquire_with(self.fixture.runtime.clone(), demand, start, move |_| {
+            gave_up.fetch_add(1, Ordering::SeqCst);
+        })
+        .await
+    }
+    fn driver(&self, index: usize) -> Arc<Probe> {
+        self.drivers.lock().unwrap()[index].clone()
+    }
+    fn tries(&self) -> usize {
+        self.drivers.lock().unwrap().len()
+    }
+}
+
+#[tokio::test]
+async fn a_display_that_restarts_keeps_its_generation_holders_and_apps() {
+    let slot = Arc::new(Slot::default());
+    let restarts = Restarts::new(&slot);
+    let terminal = restarts
+        .acquire(&slot, Demand::ActiveTerminal)
+        .await
+        .unwrap();
+    let before = terminal.identity().unwrap();
+    let clipboard = restarts.acquire(&slot, Demand::Clipboard).await.unwrap();
+    let launch = restarts.acquire(&slot, Demand::Launch).await.unwrap();
+    let started = launch.launch_application(command()).unwrap();
+    drop(launch);
+    restarts.gate.forget_permits(Semaphore::MAX_PERMITS);
+    restarts
+        .driver(0)
+        .updates
+        .send_replace(DriverState::Restarting);
+    changed_until(&slot, |state| state[0].phase == Phase::Restarting).await;
+    assert_eq!(restarts.driver(0).stops.load(Ordering::SeqCst), 1);
+    // Its holders keep it, and its apps still run, while it attaches again.
+    let unavailable = tokio::spawn(async move { clipboard.unavailable().await });
+    assert_eq!(
+        slot.application_state(&started.application),
+        Ok(launch::State::Running)
+    );
+    assert_eq!(slot.snapshot()[0].active_terminals, 1);
+    restarts.gate.add_permits(1);
+    changed_until(&slot, |state| state[0].phase == Phase::Ready).await;
+    let after = terminal.identity().unwrap();
+    assert_eq!(after.display_generation, before.display_generation);
+    assert_ne!(after.worker, before.worker);
+    assert_eq!(restarts.tries(), 2);
+    assert_eq!(slot.snapshot().len(), 1);
+    assert_eq!(
+        (slot.snapshot()[0].windows, slot.snapshot()[0].applications),
+        (1, 1)
+    );
+    assert!(!terminal.failed());
+    assert!(!unavailable.is_finished());
+    assert_eq!(
+        slot.application_state(&started.application),
+        Ok(launch::State::Running)
+    );
+    unavailable.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_display_that_attached_again_is_kept_until_its_windows_come_back() {
+    let slot = Arc::new(Slot::default());
+    let restarts = Restarts::new(&slot);
+    // Only its windows and apps keep it: nobody holds it.
+    let launch = restarts.acquire(&slot, Demand::Launch).await.unwrap();
+    drop(launch);
+    restarts
+        .driver(0)
+        .updates
+        .send_replace(DriverState::Restarting);
+    changed_until(&slot, |state| {
+        state[0].phase == Phase::Ready && restarts.tries() == 2
+    })
+    .await;
+    // The new session reports nothing at first: the display stays for its
+    // windows to be announced.
+    restarts.driver(1).publish(0, 0);
+    tokio::time::sleep(REATTACH_GRACE / 2).await;
+    assert_eq!(slot.snapshot().len(), 1, "kept while its windows come back");
+    restarts.driver(1).publish(1, 1);
+    tokio::time::sleep(REATTACH_GRACE).await;
+    assert_eq!(slot.snapshot().len(), 1, "in use again");
+    // Without windows or apps after the grace, it retires as before.
+    restarts.driver(1).publish(0, 0);
+    let mut changes = slot.shared.changes.subscribe();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !slot.snapshot().is_empty() {
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("an unused display retires");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_display_that_cannot_attach_again_ends_with_its_last_error_after_spread_tries() {
+    let slot = Arc::new(Slot::default());
+    let restarts = Restarts::new(&slot);
+    let terminal = restarts
+        .acquire(&slot, Demand::ActiveTerminal)
+        .await
+        .unwrap();
+    restarts.refused.store(true, Ordering::SeqCst);
+    let restarted = tokio::time::Instant::now();
+    restarts
+        .driver(0)
+        .updates
+        .send_replace(DriverState::Restarting);
+    let refused = "The display refused the viewer".to_owned();
+    let mut changes = slot.shared.changes.subscribe();
+    tokio::time::timeout(RESTART_WITHIN * 2, async {
+        while slot.snapshot()[0].phase != Phase::Failed(refused.clone()) {
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the restart did not give up");
+    assert_eq!(restarts.tries(), 1 + RESTART_AT.len());
+    // Spread over the budget, so a compositor still starting gets its time.
+    let started = restarts.started.lock().unwrap().clone();
+    for (began, offset) in started[1..].iter().zip(RESTART_AT) {
+        assert!(*began >= restarted + offset, "{:?}", *began - restarted);
+    }
+    assert!(started[RESTART_AT.len()] - restarted < RESTART_WITHIN);
+    assert_eq!(restarts.gave_up.load(Ordering::SeqCst), 1);
+    assert!(terminal.failed());
+    assert_eq!(terminal.identity(), Err(refused));
+    drop(terminal);
+    slot.drained().await;
+}
+
+#[tokio::test]
+async fn an_attaching_display_says_it_is_reconnecting() {
+    let slot = Arc::new(Slot::default());
+    let restarts = Restarts::new(&slot);
+    let terminal = restarts
+        .acquire(&slot, Demand::ActiveTerminal)
+        .await
+        .unwrap();
+    restarts.gate.forget_permits(Semaphore::MAX_PERMITS);
+    restarts
+        .driver(0)
+        .updates
+        .send_replace(DriverState::Restarting);
+    changed_until(&slot, |state| state[0].phase == Phase::Restarting).await;
+    assert_eq!(terminal.identity(), Err(RESTARTING.into()));
+    assert_eq!(terminal.launch(command()).err(), Some(RESTARTING.into()));
+    assert_eq!(restarts.gave_up.load(Ordering::SeqCst), 0);
+}
+
+fn desktop(id: &str) -> launch::Target {
+    launch::Target::Desktop(Box::new(newport_protocol::desktop::applications::Desktop {
+        id: id.into(),
+        uris: Vec::new(),
+        action: None,
+    }))
+}
+
+#[tokio::test]
+async fn apps_launched_before_a_restart_follow_the_new_session() {
+    let slot = Arc::new(Slot::default());
+    let restarts = Restarts::new(&slot);
+    let launch = restarts.acquire(&slot, Demand::Launch).await.unwrap();
+    let editor = launch
+        .launch_application(desktop("org.example.Editor.desktop"))
+        .unwrap();
+    let viewer = launch
+        .launch_application(desktop("org.example.Viewer.desktop"))
+        .unwrap();
+    let finished = launch
+        .launch_application(desktop("org.example.Done.desktop"))
+        .unwrap();
+    let old = restarts.driver(0);
+    old.app_endings.lock().unwrap().insert(
+        finished.application.request,
+        launch::Ending::Failed(Box::new("it crashed".into())),
+    );
+    restarts.gate.forget_permits(Semaphore::MAX_PERMITS);
+    old.updates.send_replace(DriverState::Restarting);
+    changed_until(&slot, |state| state[0].phase == Phase::Restarting).await;
+    assert_eq!(
+        slot.application_state(&editor.application),
+        Ok(launch::State::Running)
+    );
+    restarts.gate.add_permits(1);
+    changed_until(&slot, |state| state[0].phase == Phase::Ready).await;
+    // The new session shows the editor's windows, and not the viewer's.
+    *restarts.driver(1).shown.lock().unwrap() = vec![launch::Shown {
+        app_id: "org.example.Editor".into(),
+        windows: 1,
+    }];
+    assert_eq!(
+        slot.application_state(&editor.application),
+        Ok(launch::State::Running)
+    );
+    assert_eq!(
+        slot.application_state(&viewer.application),
+        Ok(launch::State::Ended)
+    );
+    assert_eq!(
+        slot.application_state(&finished.application),
+        Ok(launch::State::Ended)
+    );
+    assert_eq!(
+        slot.application_ending(&finished.application),
+        Ok(Some(launch::Ending::Failed(Box::new("it crashed".into()))))
+    );
+    // Its new session can't quit it, and doesn't say another computer showed it.
+    assert_eq!(
+        slot.stop_application(&editor.application),
+        Err(QUIT_RESTARTED.into())
+    );
+    assert_eq!(slot.stop_application(&viewer.application), Ok(false));
+    assert!(old.app_stops.lock().unwrap().is_empty());
+    assert!(restarts.driver(1).app_stops.lock().unwrap().is_empty());
+    // A launch in the new session is its own.
+    let again = launch.launch_application(command()).unwrap();
+    assert_eq!(
+        slot.application_state(&again.application),
+        Ok(launch::State::Pending)
+    );
+}
+
+#[tokio::test]
+async fn acquiring_a_display_that_attaches_again_waits_for_it() {
+    let slot = Arc::new(Slot::default());
+    let restarts = Restarts::new(&slot);
+    let terminal = restarts
+        .acquire(&slot, Demand::ActiveTerminal)
+        .await
+        .unwrap();
+    restarts.gate.forget_permits(Semaphore::MAX_PERMITS);
+    restarts
+        .driver(0)
+        .updates
+        .send_replace(DriverState::Restarting);
+    changed_until(&slot, |state| state[0].phase == Phase::Restarting).await;
+    let waiting = tokio::spawn({
+        let slot = slot.clone();
+        let runtime = restarts.fixture.runtime.clone();
+        async move {
+            slot.acquire(runtime, Demand::Launch, |_| async {
+                panic!("a launch must wait for the display attaching again")
+            })
+            .await
+        }
+    });
+    // Released while it attaches again, a holder doesn't end it.
+    drop(terminal);
+    tokio::task::yield_now().await;
+    assert!(!waiting.is_finished());
+    assert_eq!(slot.snapshot()[0].phase, Phase::Restarting);
+    restarts.gate.add_permits(1);
+    let lease = waiting.await.unwrap().unwrap();
+    assert_eq!(restarts.tries(), 2);
+    let identity = lease.identity().unwrap();
+    assert_eq!(identity.display_generation, lease.generation());
+    lease.launch_application(command()).unwrap();
+    assert_eq!(restarts.driver(1).requests.lock().unwrap().len(), 1);
 }

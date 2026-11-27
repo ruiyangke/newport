@@ -325,11 +325,10 @@ pub fn serve_product(
     // Clipboard. Live displays retain their directory lease and are untouched.
     crate::x_endpoint::sweep();
     crate::owned_directory::sweep(&crate::paths::runtime()?, "wl-");
-    // Builds a finished update replaced while they still ran go now, in the
-    // background so the handshake isn't delayed. This build counts as used.
+    // Builds an interrupted cleanup left go now, in the background so the
+    // handshake isn't delayed.
     if let Some(home) = std::env::var_os("HOME") {
         std::thread::spawn(move || {
-            crate::deployment::mark_used();
             crate::deployment::prune_retained(std::path::Path::new(&home));
         });
     }

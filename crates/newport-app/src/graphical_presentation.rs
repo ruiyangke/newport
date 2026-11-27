@@ -3,7 +3,7 @@
 use crate::graphical::Registry;
 use gpui_kit::gpui::App;
 use newport_remote_provider_gpui::native_session::{
-    self, NativeSession, PlacementMemory, SharedOptions,
+    self, HeldWindows, NativeSession, PlacementMemory, SharedOptions,
 };
 use std::{
     cell::RefCell,
@@ -132,8 +132,13 @@ const LAUNCH_FOCUS: std::time::Duration = std::time::Duration::from_secs(15);
 
 enum Presenter {
     Windows(NativeSession),
+    /// With the client it shows: a display that attaches again comes back
+    /// through another, which the presenter takes over.
     #[cfg(target_os = "macos")]
-    Stubs(newport_remote_provider_stubs::StubPresenter),
+    Stubs(
+        newport_remote_provider_stubs::StubPresenter,
+        Weak<newport_remote_client::RemoteSession>,
+    ),
 }
 impl Presenter {
     /// The user opened the app with this catalogue id just now.
@@ -142,7 +147,7 @@ impl Presenter {
             // Newport's own windows open in front.
             Self::Windows(_) => {}
             #[cfg(target_os = "macos")]
-            Self::Stubs(presenter) => presenter.launching(
+            Self::Stubs(presenter, _) => presenter.launching(
                 newport_remote_provider_stubs::routing::AppKey::Desktop(app.to_owned()),
             ),
         }
@@ -154,7 +159,7 @@ impl Presenter {
         match self {
             Self::Windows(session) => session.bring_forward(app, cx),
             #[cfg(target_os = "macos")]
-            Self::Stubs(presenter) => {
+            Self::Stubs(presenter, _) => {
                 presenter.bring_forward(newport_remote_provider_stubs::routing::AppKey::Desktop(
                     app.to_owned(),
                 ));
@@ -169,14 +174,14 @@ impl Presenter {
         match self {
             Self::Windows(session) => session.detach(),
             #[cfg(target_os = "macos")]
-            Self::Stubs(presenter) => presenter.detach(),
+            Self::Stubs(presenter, _) => presenter.detach(),
         }
     }
     fn is_presenting(&self) -> bool {
         match self {
             Self::Windows(session) => session.is_presenting(),
             #[cfg(target_os = "macos")]
-            Self::Stubs(presenter) => presenter.is_presenting(),
+            Self::Stubs(presenter, _) => presenter.is_presenting(),
         }
     }
 }
@@ -199,7 +204,6 @@ fn present_with_stubs(
     let server = candidate.server.id.to_string();
     // Names and icons for apps that open before the Remote apps page is shown.
     newport_gpui::remote_app_catalog::load(&server, &candidate.server.name);
-    let clipboard = candidate.clipboard_presenter();
     let detached = registry.clone();
     let options = stubs::Options {
         host_bundle_id,
@@ -234,15 +238,24 @@ fn present_with_stubs(
         placeholder_icon: Arc::new(|name| {
             newport_gpui::remote_app_tile::png(name).map(|png| png.to_vec())
         }),
-        on_focus: clipboard.map(|presenter| {
-            Arc::new(move |focused| {
-                presenter.set_focused(focused);
-            }) as Arc<dyn Fn(bool) + Send + Sync>
-        }),
+        on_focus: stub_focus(candidate),
         // A window arriving after the idle snapshot causes a fresh attachment.
         on_detached: Arc::new(move || detached.recheck_presentation()),
     };
-    stubs::present_shared(candidate.connection.clone(), options).map(Presenter::Stubs)
+    stubs::present_shared(candidate.connection.clone(), options)
+        .map(|presenter| Presenter::Stubs(presenter, Arc::downgrade(&candidate.connection)))
+}
+
+/// Where the stubs report whether one of the display's apps is active.
+#[cfg(target_os = "macos")]
+fn stub_focus(
+    candidate: &crate::graphical::Presentation,
+) -> Option<Arc<dyn Fn(bool) + Send + Sync>> {
+    candidate.clipboard_presenter().map(|presenter| {
+        Arc::new(move |focused| {
+            presenter.set_focused(focused);
+        }) as Arc<dyn Fn(bool) + Send + Sync>
+    })
 }
 
 pub fn start(
@@ -297,17 +310,42 @@ pub fn start(
         let mut placements =
             BTreeMap::<String, (Weak<newport_remote_client::RemoteSession>, PlacementMemory)>::new(
             );
+        // Each display's Newport windows that wait for it to attach again.
+        let mut held = BTreeMap::<String, HeldWindows>::new();
+        // When a pass is already due to close windows that waited too long.
+        let mut expiry: Option<std::time::Instant> = None;
         loop {
             // Mark before reconciling: activity or detachment during the update
             // must schedule another pass, including when window counts match.
             changes.borrow_and_update();
             if registry.is_closed() {
+                cx.update(|cx| {
+                    for windows in held.values() {
+                        windows.close_all(cx);
+                    }
+                });
                 break;
             }
-            cx.update(|cx| {
+            let deadline = cx.update(|cx| {
                 let mut presenters = presenters.borrow_mut();
+                // A display that couldn't attach again takes its waiting
+                // windows and stubs with it now.
+                for key in registry.take_reattach_failures() {
+                    if let Some(windows) = held.get(&key) {
+                        windows.close_all(cx);
+                    }
+                    #[cfg(target_os = "macos")]
+                    if let Some((presenter @ Presenter::Stubs(..), _, _)) = presenters.get(&key) {
+                        presenter.detach();
+                    }
+                }
                 presenters.retain(|_, (presenter, _, _)| presenter.is_presenting());
-                placements.retain(|_, (owner, _)| owner.strong_count() > 0);
+                for windows in held.values() {
+                    windows.expire(cx);
+                }
+                held.retain(|key, windows| !windows.is_empty() || presenters.contains_key(key));
+                placements
+                    .retain(|key, (owner, _)| owner.strong_count() > 0 || held.contains_key(key));
                 // Remote windows as their own apps. A changed setting applies
                 // to open apps too: a presenter that started under the other
                 // one releases its display, and a later pass presents it
@@ -322,7 +360,16 @@ pub fn start(
                     }
                 }
                 for candidate in registry.presentation_candidates() {
-                    if presenters.contains_key(&candidate.key) {
+                    if let Some((_presenter, _, _)) = presenters.get_mut(&candidate.key) {
+                        // The stubs stay through the gap, their apps in the
+                        // Dock, and show the display's new client.
+                        #[cfg(target_os = "macos")]
+                        if let Presenter::Stubs(stubs, shown) = _presenter
+                            && !shown.ptr_eq(&Arc::downgrade(&candidate.connection))
+                        {
+                            stubs.rebind(candidate.connection.clone(), stub_focus(&candidate));
+                            *shown = Arc::downgrade(&candidate.connection);
+                        }
                         continue;
                     }
                     // Separate apps take their names and icons from the
@@ -371,16 +418,16 @@ pub fn start(
                     }
                     let detached = registry.clone();
                     let clipboard = candidate.clipboard_presenter();
+                    let owner = Arc::downgrade(&candidate.connection);
                     let placement = placements
                         .entry(candidate.key.clone())
-                        .or_insert_with(|| {
-                            (
-                                Arc::downgrade(&candidate.connection),
-                                PlacementMemory::default(),
-                            )
-                        })
-                        .1
-                        .clone();
+                        .or_insert_with(|| (owner.clone(), PlacementMemory::default()));
+                    // Positions are kept per client; windows that waited
+                    // for the display keep their own.
+                    if !placement.0.ptr_eq(&owner) {
+                        *placement = (owner, PlacementMemory::default());
+                    }
+                    let placement = placement.1.clone();
                     // Without an identity the apps still open, grouped with
                     // Newport on the taskbar.
                     #[cfg(windows)]
@@ -411,6 +458,7 @@ pub fn start(
                         // A window arriving after its idle snapshot therefore
                         // causes a fresh attachment to the same client.
                         on_detached: Rc::new(move |_, _| detached.recheck_presentation()),
+                        held: held.entry(candidate.key.clone()).or_default().clone(),
                         #[cfg(windows)]
                         identities,
                     };
@@ -429,7 +477,27 @@ pub fn start(
                         Err(error) => abort(&candidate, &error),
                     }
                 }
+                held.values().filter_map(HeldWindows::deadline).min()
             });
+            // A pass closes the windows that waited too long, also while no
+            // presenter runs.
+            let now = std::time::Instant::now();
+            expiry = expiry.filter(|due| *due > now);
+            if let Some(deadline) = deadline
+                && expiry.is_none_or(|due| deadline < due)
+            {
+                expiry = Some(deadline);
+                let timer = cx
+                    .background_executor()
+                    .timer(deadline.saturating_duration_since(now));
+                let recheck = registry.clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        timer.await;
+                        recheck.recheck_presentation();
+                    })
+                    .detach();
+            }
             if changes.changed().await.is_err() {
                 break;
             }

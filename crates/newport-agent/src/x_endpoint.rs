@@ -87,6 +87,13 @@ impl Endpoint {
     pub(crate) fn directory(&self) -> &Path {
         self.directory.path()
     }
+    pub(crate) fn owned(&self) -> &Directory {
+        &self.directory
+    }
+    /// Takes over the endpoint another program of this process owned.
+    pub(crate) fn adopt(display: u16, directory: Directory) -> Self {
+        Self { display, directory }
+    }
 }
 fn lock_path(parent: &Path, display: u16) -> PathBuf {
     parent.join(format!(".X{display}-lock"))

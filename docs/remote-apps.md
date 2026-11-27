@@ -65,6 +65,7 @@ When another computer shows the apps, their windows close here and **Remote apps
 ## Keep apps running
 
 - When the connection drops, the windows close here and the apps keep running. After Newport reconnects, type in one of the server's terminals or open an app to show them again.
+- When Newport Remote updates on the server, or its display restarts after a problem, the windows stay open and pause for a moment, then carry on where they are.
 - Quitting Newport leaves every app running on the server. When you come back, type in one of the server's terminals or open an app to show them again.
 - Restarting the server ends every app.
 

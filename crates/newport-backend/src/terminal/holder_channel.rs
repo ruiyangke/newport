@@ -364,7 +364,83 @@ enum Attached {
     Closed,
     /// The channel ended: the connection was lost, or the holder went away.
     Disconnected,
+    /// The holder said it is moving to a new build of Needle: the same
+    /// shell takes an attach again at once.
+    Moving,
 }
+
+/// What a tab sends while its holder moves to a new build, kept for the
+/// same shell and screen once it is attached again, as typing to any shell
+/// that is briefly busy is: keystrokes, an activation and a close.
+struct Carried {
+    data: Vec<u8>,
+    activate: bool,
+    end: bool,
+    /// More was typed than is kept: nothing typed after it is kept either,
+    /// so the shell never gets the typing with a piece missing.
+    full: bool,
+    since: tokio::time::Instant,
+}
+
+/// The most typed while a holder moves that is kept for it.
+const CARRIED: usize = 64 * 1024;
+/// How long typing is kept for a holder that moves: typing older than this,
+/// when the holder takes an attach again only after a slow reconnect, would
+/// reach a prompt nobody is looking at any more.
+const CARRIED_AGE: Duration = Duration::from_secs(5);
+
+impl Carried {
+    fn new() -> Self {
+        Carried {
+            data: Vec::new(),
+            activate: false,
+            end: false,
+            full: false,
+            since: tokio::time::Instant::now(),
+        }
+    }
+
+    fn take(&mut self, command: Input, size: &mut (u32, u32)) {
+        match command {
+            Input::Resize(columns, rows) => *size = (columns, rows),
+            Input::Activate => self.activate = true,
+            Input::End => self.end = true,
+            Input::Data(bytes) if !self.full && self.data.len() + bytes.len() <= CARRIED => {
+                self.data.extend_from_slice(&bytes)
+            }
+            Input::Data(_) => self.full = true,
+        }
+    }
+
+    /// What is still sent once attached: a close always, typing only while
+    /// it is recent.
+    fn current(mut self) -> Self {
+        if self.since.elapsed() >= CARRIED_AGE {
+            self.data.clear();
+            self.activate = false;
+        }
+        self
+    }
+}
+
+/// Keeps what the tab sends until the moved holder is attached again;
+/// returns when the tab closes the shell or is gone.
+async fn carry_input(
+    input: &mut mpsc::Receiver<Input>,
+    size: &mut (u32, u32),
+    carried: &mut Carried,
+) {
+    while let Some(command) = input.recv().await {
+        carried.take(command, size);
+        if carried.end {
+            return;
+        }
+    }
+}
+
+/// How long a tab waits before attaching again to a holder that is moving,
+/// which replaces its program in milliseconds.
+const MOVING_PAUSE: Duration = Duration::from_millis(50);
 
 /// A tab whose shell Needle couldn't hold, handed back for an ordinary
 /// shell: its display as prepared, its input and its size.
@@ -401,9 +477,9 @@ pub(crate) async fn run(
         // session, and the caller's copy, began.
         let profile = owner.profile();
         if !(profile.setup_complete && profile.agent_install_approved) {
+            // The shell may well still run; only this server's setup is missing.
             if attach {
-                output.send(Event::Ended).await?;
-                return Ok(None);
+                bail!("Needle is not set up on this server. Open Overview to set up this server.");
             }
             return Ok(Some(Fallback { shell, input, size }));
         }
@@ -510,19 +586,48 @@ async fn follow(
 ) -> Result<()> {
     let holder = attachment.holder;
     let mut retry = Attempts::new();
+    let mut carried: Option<Carried> = None;
     loop {
-        let channel = tokio::select! {
-            result = connect(owner, server, link, holder) => result,
-            _ = discard_input(input, size) => return Ok(()),
+        let channel = match &mut carried {
+            Some(kept) => {
+                let connected = tokio::select! {
+                    result = connect(owner, server, link, holder) => Some(result),
+                    () = carry_input(input, size, kept) => None,
+                };
+                match connected {
+                    Some(result) => result,
+                    // Closed while its holder moved: the close still reaches
+                    // the same shell.
+                    None if kept.end => connect(owner, server, link, holder).await,
+                    None => return Ok(()),
+                }
+            }
+            None => tokio::select! {
+                result = connect(owner, server, link, holder) => result,
+                _ = discard_input(input, size) => return Ok(()),
+            },
         };
         let failure = match channel {
             Ok(channel) => {
                 let fate = channel.fate();
                 let stream = channel.into_stream();
                 let started = tokio::time::Instant::now();
-                let attached =
-                    attach_once(stream, attachment, opened, viewing, size, input, output).await;
+                let attached = attach_once(
+                    stream,
+                    attachment,
+                    opened,
+                    viewing,
+                    size,
+                    input,
+                    output,
+                    &mut carried,
+                )
+                .await;
                 opened = false;
+                // Typing is kept only from one move to the attach after it.
+                if !matches!(attached, Ok(Attached::Moving)) {
+                    carried = None;
+                }
                 let lasted = started.elapsed();
                 // Only attaches that keep ending at once wait ever longer.
                 if lasted >= SHORT_ATTACH {
@@ -534,6 +639,23 @@ async fn follow(
                         return Ok(());
                     }
                     Ok(Attached::Closed) => return Ok(()),
+                    Ok(Attached::Moving) => {
+                        // No failure: no grace, no listing and no backoff.
+                        retry = Attempts::new();
+                        // Still unsent when the holder moved again before
+                        // the attach was through.
+                        let mut kept = carried.take().unwrap_or_else(Carried::new);
+                        tokio::select! {
+                            () = tokio::time::sleep(MOVING_PAUSE) => {}
+                            () = carry_input(input, size, &mut kept) => {
+                                if !kept.end {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        carried = Some(kept);
+                        continue;
+                    }
                     Err(error)
                         if error.downcast_ref::<Error>().is_none()
                             && error.downcast_ref::<GreetingFailure>().is_none()
@@ -850,6 +972,7 @@ async fn send<W: tokio::io::AsyncWrite + Unpin>(
 
 /// Identity first, then attachment and an initial screen under one deadline.
 /// No queued keystroke or control reaches a peer before all three are valid.
+#[allow(clippy::too_many_arguments)]
 async fn attach_once(
     stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite,
     attachment: Attachment<'_>,
@@ -858,6 +981,7 @@ async fn attach_once(
     size: &mut (u32, u32),
     input: &mut mpsc::Receiver<Input>,
     output: &mpsc::Sender<Event>,
+    carried: &mut Option<Carried>,
 ) -> Result<Attached> {
     tokio::pin!(stream);
     let (reader, mut writer) = tokio::io::split(stream);
@@ -872,6 +996,7 @@ async fn attach_once(
         ServerMessage::Hello(hello) => hello
             .require(&attachment.holder.id)
             .context(Error::Remote(protocol::reopen_required()))?,
+        ServerMessage::Moving => return Ok(Attached::Moving),
         ServerMessage::Failed(error) => return Err(Error::Remote(error).into()),
         _ => return Err(Error::Remote(protocol::reopen_required()).into()),
     }
@@ -888,10 +1013,11 @@ async fn attach_once(
         }),
         colors: attachment.colors,
     });
-    let (prompted, shell_size, state) = tokio::time::timeout_at(deadline, async {
+    let handshake = tokio::time::timeout_at(deadline, async {
         send(&mut writer, &attach).await?;
         let prompted = match message(&mut reader).await? {
             ServerMessage::Attached { prompted } => prompted,
+            ServerMessage::Moving => return Ok(None),
             ServerMessage::Failed(error) => return Err(Error::Remote(error).into()),
             _ => bail!("The terminal did not acknowledge its attachment."),
         };
@@ -906,13 +1032,17 @@ async fn attach_once(
         };
         let state = match next {
             ServerMessage::Screen(state) => state,
+            ServerMessage::Moving => return Ok(None),
             ServerMessage::Failed(error) => return Err(Error::Remote(error).into()),
             _ => bail!("The terminal sent no initial screen."),
         };
-        Ok::<_, anyhow::Error>((prompted, shell_size, state))
+        Ok::<_, anyhow::Error>(Some((prompted, shell_size, state)))
     })
     .await
     .context("The terminal attachment timed out.")??;
+    let Some((prompted, shell_size, state)) = handshake else {
+        return Ok(Attached::Moving);
+    };
     if let Some((columns, rows)) = shell_size {
         output.send(Event::Size { columns, rows }).await?;
     }
@@ -922,16 +1052,22 @@ async fn attach_once(
             prompted,
         })
         .await?;
-    // Input queued for the previous screen is stale; activation and latest size survive.
+    // Input queued for the previous screen is stale; activation and latest
+    // size survive. Typed while the holder moved, it is for this same screen,
+    // and is taken only now, with the attach through.
     let before = *size;
     let mut activate = false;
+    let mut carried = carried.take();
     while let Ok(command) = input.try_recv() {
-        match command {
-            Input::Resize(columns, rows) => *size = (columns, rows),
-            Input::Activate => activate = true,
-            Input::Data(_) | Input::End => {}
+        match (&mut carried, command) {
+            (Some(carried), command) => carried.take(command, size),
+            (None, Input::Resize(columns, rows)) => *size = (columns, rows),
+            (None, Input::Activate) => activate = true,
+            (None, Input::Data(_) | Input::End) => {}
         }
     }
+    let carried = carried.map(Carried::current).unwrap_or_else(Carried::new);
+    activate |= carried.activate;
     if *size != before {
         let (columns, rows) = dimensions(*size)?;
         tokio::time::timeout(
@@ -944,8 +1080,18 @@ async fn attach_once(
         tokio::time::timeout(INPUT_TIMEOUT, send(&mut writer, &ClientMessage::Activate)).await??;
         viewing.activated();
     }
+    for bytes in carried.data.chunks(protocol::MAX_DATA) {
+        tokio::time::timeout(
+            INPUT_TIMEOUT,
+            send(&mut writer, &ClientMessage::Input(bytes.to_vec().into())),
+        )
+        .await??;
+    }
+    let mut input_open = !carried.end;
+    if carried.end {
+        tokio::time::timeout(INPUT_TIMEOUT, send(&mut writer, &ClientMessage::End)).await??;
+    }
     output.send(Event::Ready).await?;
-    let mut input_open = true;
     let mut full_pending = true;
     // What the holder sent that the tab hasn't taken yet: one message's worth
     // at most, as the holder is read again only once it has gone. Waiting for
@@ -989,6 +1135,7 @@ async fn attach_once(
                     ServerMessage::Size { columns, rows } => {
                         queued.push_back(Event::Size { columns, rows });
                     }
+                    ServerMessage::Moving => return Ok(Attached::Moving),
                     ServerMessage::Failed(error) => return Err(Error::Remote(error).into()),
                     _ => bail!("The terminal sent an unexpected frame."),
                 }
@@ -1085,8 +1232,10 @@ fn greeting_failed(error: &Error) -> bool {
             || remote.code == newport_protocol::terminal::holder::GREETING_INCOMPLETE)
 }
 
-/// Sends SIGTERM to the holder of terminal `id` when it runs a build other
-/// than `own`, and waits for it to end its shell and exit: prints `ended`.
+/// Sends SIGTERM to the holder of terminal `id`, as started or as it resumed
+/// on a build it moved to, when it runs a build other than `own`, and waits for it to end its shell and exit: prints `ended`.
+/// A holder started after its build was removed names `/proc/<pid>/exe`;
+/// its build is then the one its program is.
 /// Prints `same` for a holder of this build, which only Needle may end, and
 /// `gone` when no holder runs.
 fn end_other_build(id: &str, own: &str) -> String {
@@ -1096,13 +1245,21 @@ fn end_other_build(id: &str, own: &str) -> String {
     // which holds its pieces, never matches it.
     format!(
         r#"role=hol; role=${{role}}der; holder=
+named() {{ case "$1" in *"/newport-agent terminal $role {id} "*|*"/newport-agent terminal $role-resume {id} "*|*"/exe terminal $role {id} "*|*"/exe terminal $role-resume {id} "*) return 0;; esac; return 1; }}
 for p in /proc/[0-9]*; do
   test "${{p#/proc/}}" = "$$" && continue
   cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
-  case "$cmd" in *"/newport-agent terminal $role {id} "*) holder=${{p#/proc/}}; break;; esac
+  named "$cmd" || continue
+  # The holder's clipboard display, forked from it, has its command line.
+  parent=$(sed 's/.*) . \([0-9]*\) .*/\1/' "$p/stat" 2>/dev/null)
+  named "$(tr '\0' ' ' < "/proc/$parent/cmdline" 2>/dev/null)" && continue
+  holder=${{p#/proc/}}; break
 done
 if test -z "$holder"; then echo gone; exit 0; fi
-case "$cmd" in *"/needle/builds/{own}/newport-agent terminal $role "*) echo same; exit 0;; esac
+case "$cmd" in *"/needle/builds/{own}/newport-agent terminal $role "*|*"/needle/builds/{own}/newport-agent terminal $role-resume "*)
+  echo same; exit 0;; esac
+case "$cmd" in /proc/*/exe" terminal "*)
+  case "$(readlink "/proc/$holder/exe" 2>/dev/null)" in *"/needle/builds/{own}/newport-agent"*) echo same; exit 0;; esac;; esac
 kill -TERM "$holder" 2>/dev/null || {{ echo gone; exit 0; }}
 alive() {{ test -d "/proc/$holder" && ! grep -q '^State:.*Z' "/proc/$holder/status" 2>/dev/null; }}
 i=0; while alive && test $i -lt 50; do sleep 0.1; i=$((i+1)); done
@@ -1151,7 +1308,7 @@ mod tests {
     #[test]
     fn closing_ends_only_a_holder_of_that_terminal_on_another_build() {
         let root = tempfile::tempdir().unwrap();
-        let holder = |build: &str, id: &str| {
+        let spawn = |build: &str, args: &[&str]| {
             let directory = root.path().join(format!("needle/builds/{build}"));
             std::fs::create_dir_all(&directory).unwrap();
             let agent = directory.join("newport-agent");
@@ -1159,10 +1316,11 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
             std::process::Command::new(&agent)
-                .args(["terminal", "holder", id, "80", "24"])
+                .args(args)
                 .spawn()
                 .unwrap()
         };
+        let holder = |build: &str, id: &str| spawn(build, &["terminal", "holder", id, "80", "24"]);
         let (old, own) = ("a".repeat(64), "b".repeat(64));
         let (id, other) = ("1".repeat(32), "2".repeat(32));
         let run = |id: &str| {
@@ -1183,8 +1341,80 @@ mod tests {
         assert!(stale.try_wait().unwrap().is_some());
         assert!(current.try_wait().unwrap().is_none());
         assert_eq!(run(&"3".repeat(32)).trim(), "gone");
-        current.kill().unwrap();
-        let _ = current.wait();
+        // One started after its build was removed names `/proc/<pid>/exe`,
+        // here a copy of that path's shape, and runs another build.
+        let exe = root.path().join("proc/123/exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "#!/bin/sh\nsleep 30\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let orphaned = "6".repeat(32);
+        let mut removed = std::process::Command::new(&exe)
+            .args(["terminal", "holder", &orphaned, "80", "24"])
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(run(&orphaned).trim(), "ended");
+        assert!(removed.try_wait().unwrap().is_some());
+        // A holder that moved runs as `holder-resume`; its dry run, which
+        // names the same terminal, is never the holder.
+        let (moved, checked) = ("4".repeat(32), "5".repeat(32));
+        let mut check = spawn(&old, &["terminal", "holder-check", &checked, "handoff"]);
+        let mut resumed = spawn(&old, &["terminal", "holder-resume", &moved, "handoff"]);
+        let mut resumed_here = spawn(&own, &["terminal", "holder-resume", &checked, "handoff"]);
+        // A holder whose clipboard display, forked from it, has its command
+        // line.
+        let forked = "7".repeat(32);
+        let child = root.path().join("child");
+        let forking = root
+            .path()
+            .join(format!("needle/builds/{}/newport-agent", "c".repeat(64)));
+        std::fs::create_dir_all(forking.parent().unwrap()).unwrap();
+        std::fs::write(
+            &forking,
+            format!(
+                "#!/bin/sh\nif [ -z \"$FORKED\" ]; then FORKED=1 \"$0\" \"$@\" & echo $! > {}; fi\nsleep 30\n",
+                child.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&forking, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut forks = std::process::Command::new(&forking)
+            .args(["terminal", "holder", &forked, "80", "24"])
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !std::fs::read_to_string(&child).is_ok_and(|pid| pid.ends_with('\n')) {
+            assert!(std::time::Instant::now() < deadline, "the forked display");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(run(&moved).trim(), "ended");
+        assert!(resumed.try_wait().unwrap().is_some());
+        assert_eq!(run(&checked).trim(), "same");
+        assert!(check.try_wait().unwrap().is_none());
+        let display: i32 = std::fs::read_to_string(&child)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(run(&forked).trim(), "ended");
+        assert!(forks.try_wait().unwrap().is_some());
+        // SAFETY: kill takes scalar arguments; signal 0 only asks.
+        assert_eq!(
+            unsafe { libc::kill(display, 0) },
+            0,
+            "the display is never the holder"
+        );
+        // SAFETY: kill takes scalar arguments; the pid is this test's.
+        unsafe { libc::kill(display, libc::SIGKILL) };
+        for mut child in [current, check, resumed_here] {
+            child.kill().unwrap();
+            let _ = child.wait();
+        }
     }
     use crate::terminal::display::FakeView;
     use std::sync::atomic::Ordering;
@@ -1705,8 +1935,9 @@ mod tests {
             input_tx.send(Input::Data(b"\x03".to_vec())).await.unwrap();
             sent(&mut server, ClientMessage::Input(b"\x03".to_vec().into())).await;
         };
+        let mut carried = None;
         tokio::select! {
-            result = attach_once(client, attachment, true, &mut viewing, &mut size, &mut input, &output) => {
+            result = attach_once(client, attachment, true, &mut viewing, &mut size, &mut input, &output, &mut carried) => {
                 panic!("the attachment ended: {:?}", result.err());
             }
             () = holder_side => {}
@@ -1730,6 +1961,7 @@ mod tests {
             mac: Uuid::new_v4(),
         };
         let mut size = (80, 24);
+        let mut carried = None;
         let attach = attach_once(
             client,
             attachment,
@@ -1738,6 +1970,7 @@ mod tests {
             &mut size,
             &mut input,
             &output,
+            &mut carried,
         );
         let holder_side = async {
             let mut server = FrameReader::new(server, protocol::CLIENT_LIMITS);
@@ -1842,6 +2075,7 @@ mod tests {
                 input_tx.send(Input::Activate).await.unwrap();
             }
             let mut size = (80, 24);
+            let mut carried = None;
             let attach = attach_once(
                 client,
                 attachment,
@@ -1850,6 +2084,7 @@ mod tests {
                 &mut size,
                 &mut input,
                 &output,
+                &mut carried,
             );
             let holder_side = async {
                 let mut server = FrameReader::new(server, protocol::CLIENT_LIMITS);
@@ -1935,9 +2170,17 @@ mod tests {
                 peer.read_to_end(&mut sent).await.unwrap();
                 assert!(sent.is_empty());
             };
+            let mut carried = None;
             let (result, ()) = tokio::join!(
                 attach_once(
-                    client, attachment, false, &mut view, &mut size, &mut input, &output
+                    client,
+                    attachment,
+                    false,
+                    &mut view,
+                    &mut size,
+                    &mut input,
+                    &output,
+                    &mut carried
                 ),
                 remote
             );
@@ -2005,9 +2248,17 @@ mod tests {
                 colors: None,
                 mac: Uuid::new_v4(),
             };
+            let mut carried = None;
             let (result, ()) = tokio::join!(
                 attach_once(
-                    client, attachment, false, &mut view, &mut size, &mut input, &output
+                    client,
+                    attachment,
+                    false,
+                    &mut view,
+                    &mut size,
+                    &mut input,
+                    &output,
+                    &mut carried
                 ),
                 remote
             );
@@ -2057,9 +2308,17 @@ mod tests {
             colors: None,
             mac: Uuid::new_v4(),
         };
+        let mut carried = None;
         let (result, ()) = tokio::join!(
             attach_once(
-                client, attachment, false, &mut view, &mut size, &mut input, &output
+                client,
+                attachment,
+                false,
+                &mut view,
+                &mut size,
+                &mut input,
+                &output,
+                &mut carried
             ),
             remote
         );
@@ -2112,13 +2371,231 @@ mod tests {
             colors: None,
             mac: Uuid::new_v4(),
         };
+        let mut carried = None;
         let (result, ()) = tokio::join!(
             attach_once(
-                client, attachment, false, &mut view, &mut size, &mut input, &output
+                client,
+                attachment,
+                false,
+                &mut view,
+                &mut size,
+                &mut input,
+                &output,
+                &mut carried
             ),
             remote
         );
         assert!(matches!(result.unwrap(), Attached::Exited(Some(0))));
+    }
+
+    #[tokio::test]
+    async fn a_moving_holder_ends_the_attachment_as_moving_at_every_step() {
+        // 0: instead of its greeting; 1: instead of acknowledging the
+        // attach; 2: instead of the screen; 3: while attached.
+        for step in 0..4 {
+            let holder = Holder {
+                id: holder_id(Uuid::new_v4()),
+                socket: "/unused".into(),
+            };
+            let (client, peer) = tokio::io::duplex(4096);
+            let mut peer = FrameReader::new(peer, protocol::CLIENT_LIMITS);
+            let (_input_tx, mut input) = mpsc::channel(8);
+            let (output, mut events) = mpsc::channel(8);
+            let mut view = Viewing::new(None);
+            let mut size = (80, 24);
+            let remote = async {
+                if step > 0 {
+                    write_server(
+                        &mut peer,
+                        ServerMessage::Hello(protocol::Hello {
+                            version: protocol::VERSION,
+                            terminal_id: holder.id.clone(),
+                        }),
+                    )
+                    .await;
+                }
+                if step > 1 {
+                    write_server(&mut peer, ServerMessage::Attached { prompted: true }).await;
+                }
+                if step > 2 {
+                    write_server(&mut peer, ServerMessage::Screen(Vec::new().into())).await;
+                    assert!(matches!(next(&mut events).await, Event::Restore { .. }));
+                    assert!(matches!(next(&mut events).await, Event::Ready));
+                }
+                write_server(&mut peer, ServerMessage::Moving).await;
+                peer
+            };
+            let attachment = Attachment {
+                holder: &holder,
+                colors: None,
+                mac: Uuid::new_v4(),
+            };
+            let mut carried = None;
+            let (result, _peer) = tokio::join!(
+                attach_once(
+                    client,
+                    attachment,
+                    false,
+                    &mut view,
+                    &mut size,
+                    &mut input,
+                    &output,
+                    &mut carried
+                ),
+                remote
+            );
+            assert!(matches!(result.unwrap(), Attached::Moving), "step {step}");
+        }
+    }
+
+    #[tokio::test]
+    async fn what_is_typed_while_a_holder_moves_reaches_the_same_shell_after_it() {
+        let holder = Holder {
+            id: holder_id(Uuid::new_v4()),
+            socket: "/unused".into(),
+        };
+        let (input_tx, mut input) = mpsc::channel(8);
+        let mut size = (80, 24);
+        let mut carried = Carried::new();
+        // Typed while no holder listens, then while the attach is answered;
+        // the attach itself takes the latest size.
+        for command in [
+            Input::Data(b"ec".to_vec()),
+            Input::Resize(100, 30),
+            Input::Activate,
+        ] {
+            carried.take(command, &mut size);
+        }
+        assert_eq!(
+            (carried.data.as_slice(), carried.activate, size),
+            (b"ec".as_slice(), true, (100, 30))
+        );
+        input_tx.send(Input::Data(b"ho\r".to_vec())).await.unwrap();
+        input_tx.send(Input::End).await.unwrap();
+        let (client, peer) = tokio::io::duplex(4096);
+        let mut peer = FrameReader::new(peer, protocol::CLIENT_LIMITS);
+        let (output, mut events) = mpsc::channel(8);
+        let mut view = Viewing::new(None);
+        let remote = async {
+            greet(&mut peer, &holder.id).await;
+            assert!(matches!(next(&mut events).await, Event::Restore { .. }));
+            sent(&mut peer, ClientMessage::Activate).await;
+            sent(&mut peer, ClientMessage::Input(b"echo\r".to_vec().into())).await;
+            sent(&mut peer, ClientMessage::End).await;
+            assert!(matches!(next(&mut events).await, Event::Ready));
+            write_server(&mut peer, ServerMessage::Exit(service::Exit::Code(0))).await;
+        };
+        let attachment = Attachment {
+            holder: &holder,
+            colors: None,
+            mac: Uuid::new_v4(),
+        };
+        let mut carried = Some(carried);
+        let (result, ()) = tokio::join!(
+            attach_once(
+                client,
+                attachment,
+                false,
+                &mut view,
+                &mut size,
+                &mut input,
+                &output,
+                &mut carried,
+            ),
+            remote
+        );
+        assert!(matches!(result.unwrap(), Attached::Exited(Some(0))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn typing_kept_while_a_holder_moves_is_whole_and_recent_or_not_sent() {
+        let mut size = (80, 24);
+        let mut carried = Carried::new();
+        for command in [
+            Input::Data(b"one".to_vec()),
+            Input::Data(vec![b'x'; CARRIED]),
+            Input::Data(b"two".to_vec()),
+        ] {
+            carried.take(command, &mut size);
+        }
+        // Past the limit, nothing more is kept: never the typing with a gap.
+        assert_eq!(carried.data, b"one");
+        carried.take(Input::End, &mut size);
+        tokio::time::advance(CARRIED_AGE).await;
+        let late = carried.current();
+        assert!(
+            late.data.is_empty() && late.end,
+            "a close is sent however late"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_close_while_a_holder_moves_waits_for_the_attach_and_reaches_the_shell() {
+        let (input_tx, mut input) = mpsc::channel(8);
+        let mut size = (80, 24);
+        let mut carried = Carried::new();
+        input_tx
+            .send(Input::Data(b"exit\r".to_vec()))
+            .await
+            .unwrap();
+        input_tx.send(Input::End).await.unwrap();
+        drop(input_tx);
+        // Back once the close is kept, though the tab is gone: `follow`
+        // attaches again to send it.
+        carry_input(&mut input, &mut size, &mut carried).await;
+        assert!(carried.end);
+        assert_eq!(carried.data, b"exit\r");
+    }
+
+    #[tokio::test]
+    async fn typing_kept_through_a_second_move_before_the_attach_is_through_is_still_sent() {
+        let holder = Holder {
+            id: holder_id(Uuid::new_v4()),
+            socket: "/unused".into(),
+        };
+        let mut carried = Some(Carried::new());
+        carried
+            .as_mut()
+            .unwrap()
+            .take(Input::Data(b"kept".to_vec()), &mut (80, 24));
+        let (client, peer) = tokio::io::duplex(4096);
+        let mut peer = FrameReader::new(peer, protocol::CLIENT_LIMITS);
+        let (_input_tx, mut input) = mpsc::channel(8);
+        let (output, _events) = mpsc::channel(8);
+        let mut view = Viewing::new(None);
+        let mut size = (80, 24);
+        let remote = async {
+            write_server(
+                &mut peer,
+                ServerMessage::Hello(protocol::Hello {
+                    version: protocol::VERSION,
+                    terminal_id: holder.id.clone(),
+                }),
+            )
+            .await;
+            write_server(&mut peer, ServerMessage::Moving).await;
+            peer
+        };
+        let attachment = Attachment {
+            holder: &holder,
+            colors: None,
+            mac: Uuid::new_v4(),
+        };
+        let (result, _peer) = tokio::join!(
+            attach_once(
+                client,
+                attachment,
+                false,
+                &mut view,
+                &mut size,
+                &mut input,
+                &output,
+                &mut carried
+            ),
+            remote
+        );
+        assert!(matches!(result.unwrap(), Attached::Moving));
+        assert_eq!(carried.unwrap().data, b"kept");
     }
 
     #[test]

@@ -22,6 +22,7 @@ fn window_state() -> WindowState {
         max: None,
         title: "Préférences".into(),
         activate: Activate::Attention,
+        minimized: true,
     }
 }
 

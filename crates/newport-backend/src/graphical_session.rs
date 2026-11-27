@@ -24,6 +24,21 @@ const FINISHED_LIMIT: usize = 64; // Metadata only; never retain an old driver.
 /// Endings kept per finished display: the requests its adapter still knows.
 const ENDINGS_LIMIT: u64 = 64;
 pub(crate) const ENDED: &str = "Needle's display on the server stopped. Open the app again.";
+/// Why a display can't be used while it attaches again.
+const RESTARTING: &str = "Needle's display on the server is reconnecting. Try again in a moment.";
+/// Attaching again to a display that moved to a new compositor: one try at
+/// a time, each starting no sooner than its offset from the restart, so the
+/// new compositor has time to come up, and all within `RESTART_WITHIN`.
+const RESTART_AT: [Duration; 3] = [
+    Duration::ZERO,
+    Duration::from_millis(1000),
+    Duration::from_millis(2500),
+];
+const RESTART_WITHIN: Duration = Duration::from_secs(5);
+/// How long a display that attached again counts as in use without windows
+/// or apps: its session announces them a moment after it attaches.
+const REATTACH_GRACE: Duration = Duration::from_secs(10);
+const RESTART_TRY: Duration = Duration::from_secs(3);
 /// How often the server is asked who shows the account's display, while
 /// another computer showed it last.
 const VIEWER_CHECK: Duration = Duration::from_secs(5);
@@ -31,6 +46,10 @@ const VIEWER_CHECK: Duration = Duration::from_secs(5);
 /// computer showed it, so it can't quit them.
 const QUIT_SHOWN_AGAIN: &str =
     "Quit it in its own window: another computer showed it since it opened here.";
+/// A display that attached again knows the apps launched before only by the
+/// windows it shows, so it can't quit them.
+const QUIT_RESTARTED: &str =
+    "Quit it in its own window: the server's display restarted since it opened.";
 
 pub use newport_protocol::desktop::applications::{Identity, Runtime};
 fn validate_runtime(runtime: &Runtime) -> Result<(), String> {
@@ -67,6 +86,9 @@ pub enum DriverState {
     /// Another computer took the account's display over and shows it now.
     /// Its apps keep running there.
     ShownElsewhere(launch::ShownOn),
+    /// The display moved to a new compositor, or lost its stream, with its
+    /// windows and apps: attaching again finds them.
+    Restarting,
     Closed,
 }
 /// Who shows the account's display, as the server reports it now.
@@ -122,6 +144,16 @@ pub trait Driver: Send + Sync + 'static {
     fn stand(&self) {}
     fn stop(&self);
 }
+/// Attaches the display of a generation: run once to start it, and again
+/// for each restart of that same display.
+#[derive(Clone)]
+pub(crate) struct Starter {
+    attach: Arc<dyn Fn(u64) -> StartFuture + Send + Sync>,
+    /// Told when the display of a generation restarted and couldn't attach
+    /// again, so what waits for it stops waiting.
+    gave_up: Arc<dyn Fn(u64) + Send + Sync>,
+}
+pub(crate) type StartFuture = Pin<Box<dyn Future<Output = Result<Prepared, String>> + Send>>;
 /// Returned only after a validated GUI handshake and clipboard readiness.
 /// Even rejected or late attachment results request cleanup when discarded.
 pub struct Attached {
@@ -150,6 +182,9 @@ pub trait Factory: Send + Sync + 'static {
         identity: Identity,
         server: ServerLabel,
     ) -> AttachFuture;
+    /// The display of this session and generation restarted and couldn't
+    /// attach again: what waits for it here stops waiting.
+    fn reattach_failed(&self, _session: uuid::Uuid, _display_generation: u64) {}
 }
 
 /// The server a display belongs to. The desktop names the display's apps by
@@ -185,6 +220,8 @@ impl Prepared {
 pub enum Phase {
     Preparing,
     Ready,
+    /// Attaching again to the same display, which keeps its holders.
+    Restarting,
     Failed(String),
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,8 +247,23 @@ struct Entry {
     prepared: Option<Prepared>,
     updates: Option<watch::Receiver<DriverState>>,
     task: Option<AbortHandle>,
+    starter: Starter,
+    /// Counts restarts, so a restart's late bookkeeping can't touch the next.
+    restarts: u64,
+    /// When it last attached again after a restart.
+    reattached: Option<tokio::time::Instant>,
+    /// The desktop entry each recent launch opened, by request.
+    desktops: Arc<Mutex<BTreeMap<std::num::NonZeroU64, String>>>,
 }
 impl Entry {
+    /// It attaches again, or its driver said it will.
+    fn restarting(&self) -> bool {
+        self.phase == Phase::Restarting
+            || self
+                .updates
+                .as_ref()
+                .is_some_and(|updates| *updates.borrow() == DriverState::Restarting)
+    }
     fn activity(&self) -> Result<(u32, u32), String> {
         let Some(updates) = &self.updates else {
             return Ok((0, 0));
@@ -222,6 +274,7 @@ impl Entry {
                 applications,
             } => Ok((*windows, *applications)),
             DriverState::Failed(error) => Err(error.clone()),
+            DriverState::Restarting => Err(RESTARTING.into()),
             DriverState::ShownElsewhere(_) | DriverState::Closed => Err(ENDED.into()),
         }
     }
@@ -233,8 +286,10 @@ impl Entry {
         }
     }
     fn validate(&self, generation: u64) -> Result<&Prepared, String> {
-        if let Phase::Failed(error) = &self.phase {
-            return Err(error.clone());
+        match &self.phase {
+            Phase::Failed(error) => return Err(error.clone()),
+            Phase::Restarting => return Err(RESTARTING.into()),
+            Phase::Preparing | Phase::Ready => {}
         }
         let prepared = self
             .prepared
@@ -245,7 +300,12 @@ impl Entry {
         Ok(prepared)
     }
     fn unused(&self) -> bool {
-        self.demand == [0; 3] && self.windows == 0 && self.applications == 0
+        self.demand == [0; 3]
+            && self.windows == 0
+            && self.applications == 0
+            && self
+                .reattached
+                .is_none_or(|at| at.elapsed() >= REATTACH_GRACE)
     }
 }
 impl Drop for Entry {
@@ -283,6 +343,9 @@ struct Finished {
     last: u64,
     endings: Vec<(std::num::NonZeroU64, launch::Ending)>,
     apps: Apps,
+    /// For apps of a display that attached again: the desktop entry each
+    /// opened, by which the new session tells whether it still runs.
+    desktops: BTreeMap<std::num::NonZeroU64, String>,
 }
 /// Where the apps of a finished display are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -294,6 +357,9 @@ enum Apps {
     /// This computer shows them again, on the display of this generation,
     /// and they go with it.
     Here(u64),
+    /// The display of this generation restarted and attached again: they
+    /// run there, known to its new session only by their windows.
+    Restarted(u64),
 }
 impl State {
     fn finished(&self, application: &launch::Application) -> Option<&Finished> {
@@ -325,7 +391,7 @@ impl State {
                             },
                         ))
                     }),
-                    Apps::Ended | Apps::Here(_) => None,
+                    Apps::Ended | Apps::Here(_) | Apps::Restarted(_) => None,
                 })
         })
     }
@@ -333,7 +399,7 @@ impl State {
     fn shown_here(&self, application: &launch::Application) -> Option<u64> {
         match self.finished(application)?.apps {
             Apps::Here(generation) => Some(generation),
-            Apps::Ended | Apps::Elsewhere => None,
+            Apps::Ended | Apps::Elsewhere | Apps::Restarted(_) => None,
         }
     }
     /// Moves the apps of displays in one place to another.
@@ -402,6 +468,7 @@ impl State {
             let identity = prepared.identity.clone();
             // The apps it showed again closed their windows with it.
             self.move_apps(Apps::Here(generation), Apps::Ended);
+            self.move_apps(Apps::Restarted(generation), Apps::Ended);
             self.applications.clear();
             if last > 0 {
                 self.record_finished(Finished {
@@ -409,6 +476,7 @@ impl State {
                     last,
                     endings,
                     apps: Apps::Ended,
+                    desktops: BTreeMap::new(),
                 });
             }
         }
@@ -442,6 +510,12 @@ impl Shared {
                 return;
             };
             entry.demand[kind.index()] -= 1;
+            // Its windows and apps still hold it while it attaches again.
+            if entry.restarting() {
+                drop(state);
+                self.notify();
+                return;
+            }
             if let Some(shown) = entry.shown_elsewhere() {
                 drop(state);
                 self.shown_elsewhere(generation, shown);
@@ -492,9 +566,11 @@ impl Shared {
                     last,
                     endings: Vec::new(),
                     apps: Apps::Elsewhere,
+                    desktops: BTreeMap::new(),
                 });
             }
             state.move_apps(Apps::Here(generation), Apps::Elsewhere);
+            state.move_apps(Apps::Restarted(generation), Apps::Elsewhere);
             state.set_elsewhere(Some(shown));
             entry
         };
@@ -572,6 +648,187 @@ impl Shared {
         drop(retired);
         self.notify();
     }
+    /// The display moved to a new compositor with its windows and apps, or
+    /// lost its stream and recovers them: it attaches again as the same
+    /// display, keeping its holders, and fails with the last try's error if
+    /// it can't in time.
+    fn restart(self: &Arc<Self>, generation: u64) {
+        let (old, task, starter, runtime, restart) = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(entry) = state.entries.get_mut(&generation) else {
+                return;
+            };
+            if entry.phase != Phase::Ready {
+                return;
+            }
+            entry.phase = Phase::Restarting;
+            entry.updates = None;
+            entry.restarts += 1;
+            // Request ids are the session's own; the next session counts anew.
+            let last = std::mem::take(&mut entry.launched).load(Ordering::Acquire);
+            let desktops = std::mem::take(&mut *entry.desktops.lock().unwrap());
+            (
+                entry
+                    .prepared
+                    .take()
+                    .map(|prepared| (prepared, last, desktops)),
+                entry.task.take(),
+                entry.starter.clone(),
+                entry.runtime.clone(),
+                entry.restarts,
+            )
+        };
+        if let Some(task) = task {
+            task.abort();
+        }
+        if let Some((prepared, last, desktops)) = old {
+            if last > 0 {
+                let endings = read_endings(&*prepared.attached.driver, last);
+                // The apps it launched run on in the display attached again.
+                self.state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .record_finished(Finished {
+                        identity: prepared.identity.clone(),
+                        last,
+                        endings,
+                        apps: Apps::Restarted(generation),
+                        desktops,
+                    });
+            }
+            drop(prepared);
+        }
+        self.notify();
+        let weak = Arc::downgrade(self);
+        let task = tokio::spawn(async move {
+            let mut interrupted = Startup {
+                shared: weak.clone(),
+                generation,
+                armed: true,
+                failure: ENDED,
+            };
+            let began = tokio::time::Instant::now();
+            let deadline = began + RESTART_WITHIN;
+            let mut failure = None;
+            for offset in RESTART_AT {
+                tokio::time::sleep_until(began + offset).await;
+                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                let Some(shared) = weak.upgrade() else {
+                    interrupted.armed = false;
+                    return;
+                };
+                if !shared.awaits_restart(generation) {
+                    interrupted.armed = false;
+                    return;
+                }
+                drop(shared);
+                match prepare(&starter, &runtime, generation, left.min(RESTART_TRY)).await {
+                    Ok(prepared) => {
+                        interrupted.armed = false;
+                        if let Some(shared) = weak.upgrade() {
+                            shared.install(&weak, generation, prepared, false);
+                        }
+                        return;
+                    }
+                    Err(error) => {
+                        log::info!("The server's display didn't attach again: {error}");
+                        failure = Some(error);
+                    }
+                }
+            }
+            interrupted.armed = false;
+            if let Some(shared) = weak.upgrade()
+                && shared.awaits_restart(generation)
+            {
+                (starter.gave_up)(generation);
+                shared.failed(generation, failure.unwrap_or_else(|| ENDED.into()));
+            }
+        });
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match state.entries.get_mut(&generation) {
+            // A fast attachment may already have installed its watcher, or
+            // a later restart its own task.
+            Some(entry) if entry.phase == Phase::Restarting && entry.restarts == restart => {
+                entry.task = Some(task.abort_handle());
+            }
+            Some(_) => {}
+            None => task.abort(),
+        }
+    }
+    /// The display of `generation` still waits to attach again.
+    fn awaits_restart(&self, generation: u64) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !state.closed
+            && state
+                .entries
+                .get(&generation)
+                .is_some_and(|entry| entry.phase == Phase::Restarting)
+    }
+    /// Makes `prepared` the ready display of `generation`, watched from now
+    /// on, unless that display no longer waits for it. `shown_here`: it is
+    /// newly shown on this computer, with the apps another computer showed.
+    fn install(&self, weak: &Weak<Shared>, generation: u64, prepared: Prepared, shown_here: bool) {
+        let updates = prepared.attached.driver.state();
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(entry) = state
+            .entries
+            .get_mut(&generation)
+            .filter(|entry| matches!(entry.phase, Phase::Preparing | Phase::Restarting))
+        else {
+            drop(state);
+            drop(prepared);
+            return;
+        };
+        entry.updates = Some(updates.clone());
+        if let Ok((windows, applications)) = entry.activity() {
+            entry.windows = windows;
+            entry.applications = applications;
+        }
+        if entry.phase == Phase::Restarting {
+            entry.reattached = Some(tokio::time::Instant::now());
+        }
+        entry.prepared = Some(prepared);
+        entry.phase = Phase::Ready;
+        let watcher = tokio::spawn(watch_driver(weak.clone(), generation, updates));
+        entry.task = Some(watcher.abort_handle());
+        if shown_here {
+            // This computer shows the account's display, and the apps
+            // another computer showed, again.
+            state.set_elsewhere(None);
+            state.move_apps(Apps::Elsewhere, Apps::Here(generation));
+        }
+        drop(state);
+        self.notify();
+    }
+}
+/// Runs `starter` for `generation` within `timeout`, and checks it attached
+/// that display of `runtime`.
+async fn prepare(
+    starter: &Starter,
+    runtime: &Runtime,
+    generation: u64,
+    timeout: Duration,
+) -> Result<Prepared, String> {
+    let prepared = tokio::time::timeout(timeout, (starter.attach)(generation))
+        .await
+        .map_err(|_| "Graphical session preparation timed out".to_owned())??;
+    prepared.validate(runtime, generation)?;
+    Ok(prepared)
 }
 #[derive(Default)]
 pub(crate) struct Slot {
@@ -656,9 +913,81 @@ impl Slot {
             return None;
         }
         Some(match state.entries.get(&generation) {
+            // It runs on while its display attaches again.
+            Some(entry) if entry.restarting() => Ok(()),
             Some(entry) => entry.validate(generation).map(drop),
             None => Err(ENDED.into()),
         })
+    }
+    /// Some for an app launched before its display restarted and attached
+    /// again: how the new session shows it. Its requests belong to the old
+    /// session, so the new one knows it only by its desktop entry's windows.
+    fn restarted_state(
+        &self,
+        application: &launch::Application,
+    ) -> Option<Result<launch::State, String>> {
+        let restarted = |state: &State| match state.finished(application) {
+            Some(Finished {
+                apps: Apps::Restarted(generation),
+                endings,
+                desktops,
+                ..
+            }) => Some((
+                *generation,
+                endings
+                    .iter()
+                    .any(|(request, _)| *request == application.request),
+                desktops.get(&application.request).cloned(),
+            )),
+            _ => None,
+        };
+        let (generation, ended, desktop) = restarted(
+            &self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )?;
+        if ended {
+            return Some(Ok(launch::State::Ended));
+        }
+        self.settle_takeover(generation);
+        let (driver, applications) = {
+            let state = self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Taken over meanwhile, it runs elsewhere.
+            if restarted(&state).map(|(shown, ..)| shown) != Some(generation) {
+                return None;
+            }
+            match state.entries.get(&generation) {
+                None => return Some(Ok(launch::State::Ended)),
+                Some(entry) if entry.restarting() => return Some(Ok(launch::State::Running)),
+                Some(entry) => match entry.validate(generation) {
+                    Err(error) => return Some(Err(error)),
+                    Ok(prepared) => (prepared.attached.driver.clone(), entry.applications),
+                },
+            }
+        };
+        let running = match desktop {
+            Some(desktop) => {
+                let bare = |id: &str| id.strip_suffix(".desktop").unwrap_or(id).to_owned();
+                let desktop = bare(&desktop);
+                driver
+                    .applications()
+                    .iter()
+                    .any(|shown| bare(&shown.app_id) == desktop)
+            }
+            // A command is known only to run while the display runs apps.
+            None => applications > 0,
+        };
+        Some(Ok(if running {
+            launch::State::Running
+        } else {
+            launch::State::Ended
+        }))
     }
     fn application_driver(
         &self,
@@ -687,6 +1016,9 @@ impl Slot {
         &self,
         application: &launch::Application,
     ) -> Result<launch::State, String> {
+        if let Some(state) = self.restarted_state(application) {
+            return state;
+        }
         if let Some(shown) = self.shown_again(application) {
             return shown.map(|()| launch::State::Running);
         }
@@ -745,6 +1077,12 @@ impl Slot {
         &self,
         application: &launch::Application,
     ) -> Result<bool, String> {
+        if let Some(state) = self.restarted_state(application) {
+            return match state? {
+                launch::State::Ended => Ok(false),
+                _ => Err(QUIT_RESTARTED.into()),
+            };
+        }
         if let Some(shown) = self.shown_again(application) {
             shown?;
             return Err(QUIT_SHOWN_AGAIN.into());
@@ -903,6 +1241,7 @@ impl Slot {
         drop(retired);
         self.shared.notify();
     }
+    #[cfg(test)]
     pub(crate) async fn acquire<F, Fut>(
         &self,
         runtime: Runtime,
@@ -910,10 +1249,29 @@ impl Slot {
         start: F,
     ) -> Result<Lease, String>
     where
-        F: FnOnce(u64) -> Fut + Send + 'static,
+        F: Fn(u64) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Prepared, String>> + Send + 'static,
+    {
+        self.acquire_with(runtime, kind, start, |_| {}).await
+    }
+    /// `start` attaches the display of a generation, and again after each
+    /// restart; `gave_up` hears of a restart that couldn't attach again.
+    pub(crate) async fn acquire_with<F, Fut>(
+        &self,
+        runtime: Runtime,
+        kind: Demand,
+        start: F,
+        gave_up: impl Fn(u64) + Send + Sync + 'static,
+    ) -> Result<Lease, String>
+    where
+        F: Fn(u64) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Prepared, String>> + Send + 'static,
     {
         validate_runtime(&runtime)?;
+        let starter = Starter {
+            attach: Arc::new(move |generation| -> StartFuture { Box::pin(start(generation)) }),
+            gave_up: Arc::new(gave_up),
+        };
         let mut changes = self.shared.changes.subscribe();
         let (generation, create) = {
             let mut state = self
@@ -950,6 +1308,10 @@ impl Slot {
                         prepared: None,
                         updates: None,
                         task: None,
+                        starter: starter.clone(),
+                        restarts: 0,
+                        reattached: None,
+                        desktops: Default::default(),
                     },
                 );
                 id
@@ -973,47 +1335,13 @@ impl Slot {
                     shared: weak.clone(),
                     generation,
                     armed: true,
+                    failure: "Graphical session preparation was interrupted",
                 };
-                let result = tokio::time::timeout(Duration::from_secs(30), start(generation))
-                    .await
-                    .map_err(|_| "Graphical session preparation timed out".to_owned())
-                    .and_then(|result| result)
-                    .and_then(|prepared| {
-                        prepared.validate(&runtime, generation)?;
-                        Ok(prepared)
-                    });
+                let result = prepare(&starter, &runtime, generation, Duration::from_secs(30)).await;
                 let Some(shared) = weak.upgrade() else { return };
                 match result {
                     Err(error) => shared.failed(generation, error),
-                    Ok(prepared) => {
-                        let updates = prepared.attached.driver.state();
-                        let mut state = shared
-                            .state
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        if let Some(entry) = state.entries.get_mut(&generation) {
-                            entry.updates = Some(updates.clone());
-                            if let Ok((windows, applications)) = entry.activity() {
-                                entry.windows = windows;
-                                entry.applications = applications;
-                            }
-                            entry.prepared = Some(prepared);
-                            entry.phase = Phase::Ready;
-                            let watcher = tokio::spawn(watch_driver(weak, generation, updates));
-                            entry.task = Some(watcher.abort_handle());
-                            // This computer shows the account's display, and
-                            // the apps another computer showed, again.
-                            state.set_elsewhere(None);
-                            state.move_apps(Apps::Elsewhere, Apps::Here(generation));
-                        } else {
-                            drop(state);
-                            drop(prepared);
-                            interrupted.armed = false;
-                            return;
-                        }
-                        drop(state);
-                        shared.notify();
-                    }
+                    Ok(prepared) => shared.install(&weak, generation, prepared, true),
                 }
                 interrupted.armed = false;
             });
@@ -1031,14 +1359,15 @@ impl Slot {
                 task.abort();
             }
         }
+        // A display attaching again is bounded by its own tries.
         loop {
             match lease.phase()? {
-                Phase::Ready => {
+                Phase::Ready if !lease.restarting() => {
                     lease.identity()?;
                     return Ok(lease);
                 }
                 Phase::Failed(error) => return Err(error),
-                Phase::Preparing => (),
+                Phase::Ready | Phase::Preparing | Phase::Restarting => (),
             }
             changes.changed().await.map_err(|_| ENDED)?;
         }
@@ -1065,16 +1394,15 @@ struct Startup {
     shared: Weak<Shared>,
     generation: u64,
     armed: bool,
+    /// What the display fails with when its attachment is interrupted.
+    failure: &'static str,
 }
 impl Drop for Startup {
     fn drop(&mut self) {
         if self.armed
             && let Some(shared) = self.shared.upgrade()
         {
-            shared.failed(
-                self.generation,
-                "Graphical session preparation was interrupted".into(),
-            );
+            shared.failed(self.generation, self.failure.into());
         }
     }
 }
@@ -1143,6 +1471,11 @@ async fn watch_driver(
                     (retired, None, changed)
                 }
                 DriverState::Failed(message) => (None, Some(message), false),
+                DriverState::Restarting if error.is_none() => {
+                    drop(state);
+                    owner.restart(generation);
+                    return;
+                }
                 DriverState::ShownElsewhere(shown) => {
                     drop(state);
                     owner.shown_elsewhere(generation, shown);
@@ -1197,7 +1530,9 @@ impl Lease {
         let mut changes = shared.changes.subscribe();
         drop(shared);
         loop {
-            if let Err(error) = self.identity() {
+            if !self.restarting()
+                && let Err(error) = self.identity()
+            {
                 return error;
             }
             if changes.changed().await.is_err() {
@@ -1228,6 +1563,7 @@ impl Lease {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     match state.entries.get(&self.generation) {
+                        Some(entry) if entry.restarting() => {}
                         Some(entry) if entry.phase == Phase::Ready => {
                             if entry.windows > 0 || entry.applications > 0 {
                                 return;
@@ -1259,6 +1595,18 @@ impl Lease {
     pub fn failed(&self) -> bool {
         matches!(self.phase(), Ok(Phase::Failed(_)))
     }
+    /// Its display attaches again, or its driver said it will.
+    fn restarting(&self) -> bool {
+        self.shared.upgrade().is_some_and(|shared| {
+            shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entries
+                .get(&self.generation)
+                .is_some_and(Entry::restarting)
+        })
+    }
     fn phase(&self) -> Result<Phase, String> {
         let shared = self.shared.upgrade().ok_or(ENDED)?;
         let state = shared
@@ -1287,7 +1635,7 @@ impl Lease {
     /// a concurrent close fences admission in the adapter. Holding this lease
     /// keeps the display alive until the driver publishes pending demand.
     pub fn launch_application(&self, target: launch::Target) -> Result<launch::Started, String> {
-        let (display, driver, launched) = {
+        let (display, driver, launched, desktops) = {
             let shared = self.shared.upgrade().ok_or(ENDED)?;
             let state = shared
                 .state
@@ -1299,10 +1647,23 @@ impl Lease {
                 prepared.identity.clone(),
                 prepared.attached.driver.clone(),
                 entry.launched.clone(),
+                entry.desktops.clone(),
             )
+        };
+        let desktop = match &target {
+            launch::Target::Desktop(desktop) => Some(desktop.id.clone()),
+            launch::Target::Command(_) => None,
         };
         let submitted = driver.launch_application(target)?;
         launched.fetch_max(submitted.request.get(), Ordering::AcqRel);
+        if let Some(desktop) = desktop {
+            let mut desktops = desktops.lock().unwrap();
+            desktops.insert(submitted.request, desktop);
+            // The latest requests, as for endings.
+            while desktops.len() as u64 > ENDINGS_LIMIT {
+                desktops.pop_first();
+            }
+        }
         Ok(launch::Started {
             application: launch::Application {
                 display,

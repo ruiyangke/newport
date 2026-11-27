@@ -250,7 +250,30 @@ fn write_charsets(out: &mut String, grid: &Grid<Cell>, active: CharsetIndex) {
     }
 }
 
-fn write_modes(out: &mut String, term: &Term<Listener>, ext: &Extensions) {
+/// The kitty keyboard flags `mode` holds, as the number a push sets.
+pub(crate) fn kitty_flags(mode: TermMode) -> u8 {
+    [
+        TermMode::DISAMBIGUATE_ESC_CODES,
+        TermMode::REPORT_EVENT_TYPES,
+        TermMode::REPORT_ALTERNATE_KEYS,
+        TermMode::REPORT_ALL_KEYS_AS_ESC,
+        TermMode::REPORT_ASSOCIATED_TEXT,
+    ]
+    .iter()
+    .enumerate()
+    .filter(|(_, flag)| mode.contains(**flag))
+    .fold(0u8, |bits, (i, _)| bits | 1 << i)
+}
+
+fn push_kitty_flags(out: &mut String, flags: u8) {
+    if flags != 0 {
+        let _ = write!(out, "\x1b[>{flags}u");
+    }
+}
+
+/// The modes, with `kitty` the active screen's keyboard flags: each screen
+/// keeps its own.
+fn write_modes(out: &mut String, term: &Term<Listener>, ext: &Extensions, kitty: u8) {
     let mode = *term.mode();
     for (flag, n) in [
         (TermMode::APP_CURSOR, 1),
@@ -296,20 +319,7 @@ fn write_modes(out: &mut String, term: &Term<Listener>, ext: &Extensions) {
     if mode.contains(TermMode::LINE_FEED_NEW_LINE) {
         out.push_str("\x1b[20h");
     }
-    let kitty = [
-        TermMode::DISAMBIGUATE_ESC_CODES,
-        TermMode::REPORT_EVENT_TYPES,
-        TermMode::REPORT_ALTERNATE_KEYS,
-        TermMode::REPORT_ALL_KEYS_AS_ESC,
-        TermMode::REPORT_ASSOCIATED_TEXT,
-    ]
-    .iter()
-    .enumerate()
-    .filter(|(_, flag)| mode.contains(**flag))
-    .fold(0u8, |bits, (i, _)| bits | 1 << i);
-    if kitty != 0 {
-        let _ = write!(out, "\x1b[>{kitty}u");
-    }
+    push_kitty_flags(out, kitty);
     let style = term.cursor_style();
     let shape = match style.shape {
         CursorShape::Block => Some(1),
@@ -348,21 +358,25 @@ fn write_colors(out: &mut String, term: &Term<Listener>) {
     }
 }
 
-/// What follows the rows: the alternate screen's rows when it is active (the
-/// primary screen is then the grid the rows came from), the primary saved
-/// cursor, scrolling region, modes, colours and title. The active cursor
-/// comes after, from [`write_active_cursor`].
+/// What follows the rows: the alternate screen's rows and keyboard flags when
+/// it is active (the primary screen is then the grid the rows came from), the
+/// primary saved cursor, scrolling region, modes, colours and title. The
+/// active cursor comes after, from [`write_active_cursor`].
 pub(crate) fn write_state(
     out: &mut String,
     term: &Term<Listener>,
     ext: &Extensions,
-    alternate: Option<&str>,
+    alternate: Option<(&str, u8)>,
     title: Option<&str>,
     programs: &crate::ProgramStatuses,
 ) {
     out.push_str("\x1b[m");
     let primary = term.grid();
-    if let Some(alternate) = alternate {
+    let kitty = match alternate {
+        Some((_, kitty)) => kitty,
+        None => kitty_flags(*term.mode()),
+    };
+    if let Some((alternate, _)) = alternate {
         // Modes 47 and 1047 keep the primary saved cursor aside and give it
         // back on leaving, so re-enter the same way with it saved first.
         // alacritty's 1049 swaps screens and keeps each one's own cursor;
@@ -381,6 +395,9 @@ pub(crate) fn write_state(
             primary.cursor.point.line.0,
             primary.cursor.point.column.0,
         );
+        // The primary screen's keyboard flags go on its own stack, before the
+        // alternate screen gets its own.
+        push_kitty_flags(out, kitty_flags(*term.mode()));
         out.push_str(enter);
         out.push_str(alternate);
         out.push_str("\x1b[m");
@@ -400,7 +417,7 @@ pub(crate) fn write_state(
             }
         }
     }
-    write_modes(out, term, ext);
+    write_modes(out, term, ext, kitty);
     write_colors(out, term);
     if let Some(title) = title {
         let _ = write!(out, "\x1b]2;{title}\x07");

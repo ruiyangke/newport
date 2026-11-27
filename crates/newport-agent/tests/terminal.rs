@@ -191,6 +191,10 @@ impl Client {
             }
         }
     }
+    /// Reads until the holder says this client is, or isn't, the active one.
+    fn active_until(&mut self, expected: bool) {
+        while self.active().expect("the holder says which is active") != expected {}
+    }
     fn active(&mut self) -> Option<bool> {
         loop {
             if let ServerMessage::Active(active) = self.next()? {
@@ -212,8 +216,12 @@ impl Client {
     }
 }
 
-fn until(mut check: impl FnMut() -> bool, what: &str) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+fn until(check: impl FnMut() -> bool, what: &str) {
+    within(Duration::from_secs(20), check, what);
+}
+
+fn within(limit: Duration, mut check: impl FnMut() -> bool, what: &str) {
+    let deadline = Instant::now() + limit;
     while !check() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(20));
@@ -511,6 +519,875 @@ fn a_status_lasts_only_as_long_as_the_program_that_reported_it() {
 }
 
 #[test]
+fn a_program_killed_with_mouse_and_keyboard_reporting_on_leaves_the_shell_usable() {
+    let server = Server::new();
+    // Turns on what a crossterm TUI such as Codex does and runs a while, as
+    // such a program does, then is stopped as by Ctrl-Z, and killed once the
+    // shell has the terminal back.
+    let program = server.home.join("program.sh");
+    std::fs::write(
+        &program,
+        "printf '\\033[>11u\\033[?1003h\\033[?1006h'\nsleep 0.3\nkill -STOP $$\n",
+    )
+    .unwrap();
+    // Job control runs each command in its own foreground process group,
+    // as an interactive shell does.
+    let holder =
+        server.start(r#"exec sh -c 'set -m; while IFS= read -r line; do eval "$line"; done'"#);
+    let mut client = holder.attach();
+    client.greeting();
+    const RELEASE: &str = "\x1b[>4m\x1b[<99u";
+    // Last in a pipeline, as with `git log | less`: its group's leader has
+    // exited by the time it stops.
+    client.input(format!("true | sh {}; echo stopped=$((1+1))\n", program.display()).as_bytes());
+    let output = client.output_until("stopped=2");
+    assert!(output.contains("\x1b[?1003h"), "{output:?}");
+    // A stopped program keeps its modes, past a tick, for `fg`.
+    std::thread::sleep(Duration::from_millis(1500));
+    client.input(b"echo kept=$((1+1))\n");
+    let output = client.output_until("kept=2");
+    assert!(!output.contains(RELEASE), "{output:?}");
+    // Killed, it leaves them to the shell, which turns them off.
+    client.input(b"kill -9 %1\n");
+    client.output_until(RELEASE);
+    client.send(ClientMessage::End);
+}
+
+/// Installs a copy of this Needle as another build and points the entry
+/// point at it, as an update does; returns the build's program.
+fn install_build(server: &Server, name: &str, program: Option<&str>) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let build = server
+        .home
+        .join(".local/share/newport/needle/builds")
+        .join(name);
+    std::fs::create_dir_all(&build).unwrap();
+    let path = build.join("newport-agent");
+    match program {
+        Some(script) => std::fs::write(&path, script).unwrap(),
+        None => {
+            std::fs::copy(env!("CARGO_BIN_EXE_newport-agent"), &path).unwrap();
+        }
+    }
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let bin = server.home.join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let entry = bin.join("newport-agent");
+    let _ = std::fs::remove_file(&entry);
+    std::os::unix::fs::symlink(&path, &entry).unwrap();
+    path
+}
+
+fn program_of(pid: u64) -> PathBuf {
+    std::fs::read_link(format!("/proc/{pid}/exe")).unwrap()
+}
+
+#[test]
+fn a_shell_keeps_running_while_its_holder_moves_to_a_new_build() {
+    let server = Server::new();
+    let stop = server.home.join("stop");
+    let holder = server.start(&format!(
+        "i=0; while [ ! -e {} ]; do i=$((i+1)); echo n=$i; sleep 0.1; done; exit 3",
+        stop.display()
+    ));
+    let mut client = holder.attach();
+    client.greeting();
+    client.output_until("n=5");
+    let pid = holder.record()["pid"].as_u64().unwrap();
+    let clipboard = format!("{}.wl", holder.id);
+    assert!(holder.files().contains(&clipboard));
+    let build = install_build(&server, "b".repeat(64).as_str(), None);
+    until(
+        || program_of(pid) == build,
+        "the holder to move to the new build",
+    );
+    // The same process, so the shell stays its child; computers attach again.
+    moved(client);
+    assert_eq!(holder.record()["pid"].as_u64(), Some(pid));
+    let mut again = holder.attach();
+    let screen = String::from_utf8_lossy(&again.greeting()).into_owned();
+    let shown: u32 = screen
+        .rsplit("n=")
+        .next()
+        .and_then(|last| {
+            let digits: String = last.chars().take_while(char::is_ascii_digit).collect();
+            digits.parse().ok()
+        })
+        .unwrap();
+    // The loop goes on counting, uninterrupted: no number lost or repeated.
+    let output = again.output_until(&format!("n={}\r\n", shown + 3));
+    assert!(
+        output.starts_with(&format!("n={}\r\n", shown + 1)),
+        "{shown} then {output:?}"
+    );
+    // The clipboard display still serves, and the holder still holds the lock.
+    std::os::unix::net::UnixStream::connect(holder.directory.join(&clipboard))
+        .expect("the clipboard display stays");
+    let lock = std::fs::File::open(holder.directory.join(format!("{}.lock", holder.id))).unwrap();
+    // SAFETY: flock takes a live descriptor and a scalar operation.
+    let taken = unsafe {
+        libc::flock(
+            std::os::fd::AsRawFd::as_raw_fd(&lock),
+            libc::LOCK_EX | libc::LOCK_NB,
+        )
+    } == 0;
+    assert!(!taken, "the lock stays held");
+    // How the shell ends still reaches the computers.
+    std::fs::write(&stop, "").unwrap();
+    assert_eq!(again.exit(), Some(Exit::Code(3)));
+}
+
+/// The processes whose parent is `pid`, with their command lines.
+fn children_of(pid: u64) -> Vec<(u64, String)> {
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| {
+            let child: u64 = entry.file_name().to_str()?.parse().ok()?;
+            let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
+            let parent: u64 = stat
+                .rsplit_once(')')?
+                .1
+                .split_whitespace()
+                .nth(1)?
+                .parse()
+                .ok()?;
+            let command = std::fs::read(entry.path().join("cmdline")).ok()?;
+            (parent == pid).then(|| (child, String::from_utf8_lossy(&command).replace('\0', " ")))
+        })
+        .collect()
+}
+
+#[test]
+fn every_part_of_a_tab_moves_to_a_new_build_and_its_clipboard_keeps_working() {
+    let server = Server::new();
+    let holder = server.start(SHELL);
+    let mut client = holder.attach();
+    client.greeting();
+    let tools = ["xclip", "wl-copy"].iter().all(|tool| {
+        Command::new("sh")
+            .args(["-c", &format!("command -v {tool}")])
+            .status()
+            .is_ok_and(|status| status.success())
+    });
+    assert!(tools, "Install xclip and wl-clipboard to run this test");
+    // A copy reaches the tab as OSC 52, through X11 and through Wayland.
+    let copy = |client: &mut Client, text: &str, encoded: &str| {
+        client.input(format!("printf {text} | xclip -selection clipboard\n").as_bytes());
+        client.output_until(&format!("\x1b]52;c;{encoded}"));
+        client.input(format!("printf {text}{text} | timeout 8 wl-copy\n").as_bytes());
+        client.output_until("\x1b]52;c;");
+    };
+    copy(&mut client, "one", "b25l");
+    let pid = holder.record()["pid"].as_u64().unwrap();
+    let children = children_of(pid);
+    let reaper = children
+        .iter()
+        .find(|(_, command)| command.contains("terminal reaper"))
+        .expect("the reaper")
+        .0;
+    let display = children
+        .iter()
+        .find(|(_, command)| command.contains("terminal holder"))
+        .expect("the clipboard display")
+        .0;
+    let build = install_build(&server, "d".repeat(64).as_str(), None);
+    until(
+        || {
+            [pid, reaper, display]
+                .iter()
+                .all(|&process| program_of(process) == build)
+        },
+        "the holder, reaper and clipboard display to move to the new build",
+    );
+    moved(client);
+    let mut again = holder.attach();
+    again.greeting();
+    copy(&mut again, "three", "dGhyZWU=");
+    again.input(b"echo after=$((1+1))\n");
+    again.output_until("after=2");
+    // The display keeps neither the shell's terminal nor the holder's lock.
+    let held: Vec<PathBuf> = std::fs::read_dir(format!("/proc/{display}/fd"))
+        .unwrap()
+        .flatten()
+        .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+        .collect();
+    assert!(
+        !held.iter().any(|path| {
+            path.starts_with("/dev/pts") || path.ends_with(format!("{}.lock", holder.id))
+        }),
+        "{held:?}"
+    );
+    // A holder that is gone takes its display and reaper with it.
+    // SAFETY: kill takes scalar arguments; the pid is this test's holder.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    let gone = |process: u64| {
+        std::fs::read_to_string(format!("/proc/{process}/stat")).map_or(true, |stat| {
+            stat.rsplit_once(')')
+                .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+        })
+    };
+    until(
+        || gone(display) && gone(reaper),
+        "the display and reaper to end",
+    );
+}
+
+/// The tab's processes beside the holder `pid`: its reaper and clipboard
+/// display, not a dry run in progress.
+fn tab_children(pid: u64) -> Vec<u64> {
+    children_of(pid)
+        .into_iter()
+        .filter(|(_, command)| !command.contains("-check"))
+        .map(|(child, _)| child)
+        .collect()
+}
+
+/// Installs `name` as a new build and waits until the holder `pid` and every
+/// process of its tab run it; returns the build's program.
+fn upgrade(server: &Server, pid: u64, name: char) -> PathBuf {
+    let children = tab_children(pid);
+    let build = install_build(server, &name.to_string().repeat(64), None);
+    until(
+        || {
+            std::iter::once(pid)
+                .chain(children.iter().copied())
+                .all(|process| program_of(process) == build)
+        },
+        "the tab's processes to move to the new build",
+    );
+    build
+}
+
+/// Reads until the holder says it moves to a new build, hangs up as a
+/// desktop does, and checks the holder sends nothing after.
+fn moved(mut client: Client) {
+    loop {
+        match client.next() {
+            Some(ServerMessage::Moving) => break,
+            Some(_) => {}
+            None => panic!("the holder closed without saying it moves"),
+        }
+    }
+    client.stream.shutdown(std::net::Shutdown::Write).unwrap();
+    client.ended();
+}
+
+/// The dry run the holder `pid` is running, once it has started one.
+fn dry_run(pid: u64) -> u64 {
+    let mut check = None;
+    until(
+        || {
+            check = children_of(pid)
+                .into_iter()
+                .find(|(_, command)| command.contains("holder-check"))
+                .map(|(child, _)| child);
+            check.is_some()
+        },
+        "the dry run to start",
+    );
+    check.unwrap()
+}
+
+/// A build whose dry run takes `seconds`, then is this Needle's, logging each
+/// command it runs to `log`.
+fn slow_build(server: &Server, name: char, seconds: u32, log: &std::path::Path) -> PathBuf {
+    install_build(
+        server,
+        &name.to_string().repeat(64),
+        Some(&format!(
+            "#!/bin/sh\necho \"$2\" >> {}\n[ \"$2\" = holder-check ] && sleep {seconds}\nexec {} \"$@\"\n",
+            log.display(),
+            env!("CARGO_BIN_EXE_newport-agent"),
+        )),
+    )
+}
+
+#[test]
+fn two_macs_attached_during_an_upgrade_both_come_back() {
+    let server = Server::new();
+    let holder = server.start(SHELL);
+    let mut studio = holder.attach_as("Studio");
+    studio.greeting();
+    let mut air = holder.attach_as("Air");
+    air.greeting();
+    studio.input(b"echo before=$((1+1))\n");
+    studio.output_until("before=2");
+    air.output_until("before=2");
+    let pid = holder.record()["pid"].as_u64().unwrap();
+    upgrade(&server, pid, 'e');
+    moved(studio);
+    moved(air);
+    let mut studio = holder.attach_as("Studio");
+    let screen = String::from_utf8_lossy(&studio.greeting()).into_owned();
+    assert!(screen.contains("before=2"), "{screen:?}");
+    let mut air = holder.attach_as("Air");
+    air.greeting();
+    studio.input(b"echo after=$((1+1))\n");
+    studio.output_until("after=2");
+    air.output_until("after=2");
+    studio.send(ClientMessage::End);
+}
+
+#[test]
+fn a_full_screen_program_keeps_its_modes_across_an_upgrade_and_is_cleaned_up_after() {
+    let server = Server::new();
+    let pidfile = server.home.join("tui.pid");
+    let tui = server.home.join("tui.sh");
+    std::fs::write(
+        &tui,
+        format!(
+            "printf '\\033[?1049h\\033[>11u\\033[?1003h\\033[?1006hTUI-READY'\necho $$ > {}\nexec sleep 600\n",
+            pidfile.display()
+        ),
+    )
+    .unwrap();
+    let holder =
+        server.start(r#"exec sh -c 'set -m; while IFS= read -r line; do eval "$line"; done'"#);
+    let mut client = holder.attach();
+    client.greeting();
+    client.input(format!("sh {}\n", tui.display()).as_bytes());
+    client.output_until("TUI-READY");
+    until(|| pidfile.exists(), "the program's pid");
+    let before = holder.attach_as("Air").greeting();
+    let pid = holder.record()["pid"].as_u64().unwrap();
+    upgrade(&server, pid, 'e');
+    moved(client);
+    let mut again = holder.attach();
+    // The restored tab has the program's screen and modes, as before.
+    let after = again.greeting();
+    let screen = String::from_utf8_lossy(&after).into_owned();
+    for mode in ["\x1b[?1049h", "\x1b[?1003h", "\x1b[?1006h", "\x1b[>11u"] {
+        assert!(screen.contains(mode), "{mode:?} missing from {screen:?}");
+    }
+    assert_eq!(String::from_utf8_lossy(&before), screen);
+    // Killed later, it leaves them to the new build, which turns them off.
+    let program: i32 = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // SAFETY: kill takes scalar arguments; the pid is this test's program.
+    unsafe { libc::kill(program, libc::SIGKILL) };
+    again.output_until("\x1b[>4m\x1b[<99u");
+    again.send(ClientMessage::End);
+}
+
+#[test]
+fn a_stopped_job_keeps_its_modes_across_an_upgrade_and_comes_back_with_fg() {
+    let server = Server::new();
+    let job = server.home.join("job.sh");
+    std::fs::write(
+        &job,
+        "printf '\\033[>11u\\033[?1003h'\nsleep 0.3\nkill -STOP $$\nprintf '\\033[<u\\033[?1003l'\necho resumed-$((1+1))\n",
+    )
+    .unwrap();
+    let holder =
+        server.start(r#"exec sh -c 'set -m; while IFS= read -r line; do eval "$line"; done'"#);
+    let mut client = holder.attach();
+    client.greeting();
+    client.input(format!("sh {}; echo stopped=$((1+1))\n", job.display()).as_bytes());
+    client.output_until("stopped=2");
+    let pid = holder.record()["pid"].as_u64().unwrap();
+    upgrade(&server, pid, 'e');
+    moved(client);
+    let mut again = holder.attach();
+    again.greeting();
+    // Stopped, it keeps its modes, past a tick of the new build.
+    std::thread::sleep(Duration::from_millis(1500));
+    again.input(b"echo kept=$((1+1))\n");
+    let output = again.output_until("kept=2");
+    assert!(!output.contains("\x1b[>4m\x1b[<99u"), "{output:?}");
+    again.input(b"fg\n");
+    again.output_until("resumed-2");
+    again.send(ClientMessage::End);
+}
+
+#[test]
+fn a_tab_moves_through_several_builds_and_back() {
+    let server = Server::new();
+    let holder = server.start(SHELL);
+    let mut client = holder.attach();
+    client.greeting();
+    let pid = holder.record()["pid"].as_u64().unwrap();
+    let first = upgrade(&server, pid, 'e');
+    moved(client);
+    upgrade(&server, pid, 'f');
+    // Back to the build before, as when an update is rolled back.
+    let children = tab_children(pid);
+    let entry = server.home.join(".local/bin/newport-agent");
+    std::fs::remove_file(&entry).unwrap();
+    std::os::unix::fs::symlink(&first, &entry).unwrap();
+    until(
+        || {
+            std::iter::once(pid)
+                .chain(children.iter().copied())
+                .all(|process| program_of(process) == first)
+        },
+        "the tab to move back",
+    );
+    let mut again = holder.attach();
+    again.greeting();
+    again.input(b"echo back=$((1+1))\n");
+    again.output_until("back=2");
+    again.send(ClientMessage::End);
+}
+
+#[test]
+fn a_tab_on_the_stable_display_moves_without_a_clipboard_display() {
+    let server = Server::new();
+    let holder = server.start_with(SHELL, true);
+    let mut client = holder.attach();
+    client.greeting();
+    client.input(DISPLAY_VARIABLES);
+    let before = client.output_until("m=unset");
+    let pid = holder.record()["pid"].as_u64().unwrap();
+    assert_eq!(tab_children(pid).len(), 1, "only the reaper");
+    upgrade(&server, pid, 'e');
+    moved(client);
+    let mut again = holder.attach();
+    again.greeting();
+    again.input(DISPLAY_VARIABLES);
+    let after = again.output_until("m=unset");
+    let variables = |output: &str| {
+        output
+            .lines()
+            .find(|line| line.starts_with("w="))
+            .map(str::to_owned)
+    };
+    assert_eq!(variables(&after), variables(&before));
+    again.send(ClientMessage::End);
+}
+
+#[test]
+fn an_orphan_left_before_an_upgrade_finishes_and_is_collected_by_the_moved_reaper() {
+    let server = Server::new();
+    let holder = server.start(SHELL);
+    let mut client = holder.attach();
+    client.greeting();
+    let (marker, stop) = (server.home.join("orphan"), server.home.join("stop"));
+    // Its parent exits at once, so the reaper adopts it.
+    client.input(
+        format!(
+            "sh -c '(while [ ! -e {} ]; do sleep 0.1; done; echo orphan=$((1+1))) & echo $! > {1}.new; mv {1}.new {1}'\n",
+            stop.display(),
+            marker.display()
+        )
+        .as_bytes(),
+    );
+    until(|| marker.exists(), "the orphan's pid");
+    let orphan: libc::pid_t = std::fs::read_to_string(&marker)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let pid = holder.record()["pid"].as_u64().unwrap();
+    let reaper = reapers(&holder.id)[0];
+    until(|| parent_of(orphan) == reaper, "the reaper to adopt it");
+    let build = upgrade(&server, pid, 'e');
+    moved(client);
+    assert_eq!(program_of(reaper as u64), build);
+    assert_eq!(parent_of(orphan), reaper);
+    let mut again = holder.attach();
+    again.greeting();
+    std::fs::write(&stop, "").unwrap();
+    again.output_until("orphan=2");
+    // Collected, not left a zombie.
+    until(
+        || !std::path::Path::new(&format!("/proc/{orphan}")).exists(),
+        "the moved reaper to collect it",
+    );
+    again.send(ClientMessage::End);
+}
+
+#[test]
+fn a_tabs_name_title_and_agent_status_carry_over() {
+    let server = Server::new();
+    let agent = server.home.join("agent.sh");
+    std::fs::write(
+        &agent,
+        "printf '\\033]2;my-title\\007\\033]7501;state=working:app=claude-code\\033\\\\'\nexec sleep 600\n",
+    )
+    .unwrap();
+    let holder =
+        server.start(r#"exec sh -c 'set -m; while IFS= read -r line; do eval "$line"; done'"#);
+    let mut control = holder.connect(Attach {
+        version: protocol::VERSION,
+        columns: 80,
+        rows: 24,
+        control: true,
+        ..Default::default()
+    });
+    assert!(matches!(
+        control.next().unwrap(),
+        ServerMessage::Attached { .. }
+    ));
+    control.send(ClientMessage::Rename("build box".into()));
+    control.next().unwrap();
+    let mut client = holder.attach();
+    client.greeting();
+    client.input(format!("sh {}\n", agent.display()).as_bytes());
+    until(
+        || holder.record()["agent"] == "state=working:app=claude-code",
+        "the agent's status",
+    );
+    let pid = holder.record()["pid"].as_u64().unwrap();
+    upgrade(&server, pid, 'e');
+    moved(client);
+    // The new build writes the record itself once a computer attaches.
+    std::fs::remove_file(holder.directory.join(format!("{}.json", holder.id))).unwrap();
+    let mut again = holder.attach();
+    let screen = again.greeting();
+    until(
+        || {
+            let record = holder.record();
+            record["pid"].as_u64() == Some(pid)
+                && record["name"] == "build box"
+                && record["title"] == "my-title"
+                && record["agent"] == "state=working:app=claude-code"
+        },
+        "the record to carry over",
+    );
+    assert!(contains(&screen, "my-title"), "{screen:?}");
+    again.send(ClientMessage::End);
+}
+
+#[test]
+fn closing_a_tab_while_a_new_build_checks_ends_the_shell_and_keeps_the_build() {
+    use std::os::unix::fs::PermissionsExt;
+    let server = Server::new();
+    let holder = server.start(SHELL);
+    let mut client = holder.attach();
+    client.greeting();
+    let pid = holder.record()["pid"].as_u64().unwrap();
+    let before = program_of(pid);
+    // A build whose dry run takes a while, then would take over.
+    let slow = install_build(
+        &server,
+        "s".repeat(64).as_str(),
+        Some("#!/bin/sh\nsleep 600\nexit 0\n"),
+    );
+    std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let check = dry_run(pid);
+    // SAFETY: kill takes scalar arguments; the pid is this test's holder.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    assert!(client.exit().is_some(), "the shell ends");
+    // The holder ended on its own build, never the one checking, whose dry
+    // run it stopped; the build stays for Needle to keep or remove.
+    let now = std::fs::read_link(format!("/proc/{pid}/exe"));
+    assert!(now.map_or(true, |now| now == before), "{slow:?}");
+    within(
+        Duration::from_secs(3),
+        || !alive(check as libc::pid_t),
+        "the dry run to stop",
+    );
+    until(
+        || holder.files().is_empty(),
+        "the holder's files, its handoff too, to go",
+    );
+    assert!(slow.exists());
+}
+
+#[test]
+fn a_shell_that_exits_while_a_new_build_checks_reports_its_exit() {
+    let server = Server::new();
+    let holder = server.start(SHELL);
+    let mut client = holder.attach();
+    client.greeting();
+    let pid = holder.record()["pid"].as_u64().unwrap();
+    let before = program_of(pid);
+    let log = server.home.join("log");
+    slow_build(&server, 's', 600, &log);
+    let check = dry_run(pid);
+    client.input(b"exit 4\n");
+    assert_eq!(client.exit(), Some(Exit::Code(4)));
+    let now = std::fs::read_link(format!("/proc/{pid}/exe"));
+    assert!(now.map_or(true, |now| now == before));
+    within(
+        Duration::from_secs(3),
+        || !alive(check as libc::pid_t),
+        "the dry run to stop",
+    );
+    until(|| holder.files().is_empty(), "the holder's files to go");
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "holder-check\n");
+}
+
+#[test]
+fn a_holder_serves_while_a_new_build_checks_and_moves_to_it_once() {
+    let server = Server::new();
+    let holder = server.start(SHELL);
+    let mut client = holder.attach();
+    client.greeting();
+    let pid = holder.record()["pid"].as_u64().unwrap();
+    let log = server.home.join("log");
+    slow_build(&server, 's', 2, &log);
+    dry_run(pid);
+    // The dry run runs beside the holder, which answers and takes attaches.
+    let asked = Instant::now();
+    let mut air = holder.attach_as("Air");
+    air.greeting();
+    air.input(b"echo during=$((1+1))\n");
+    air.output_until("during=2");
+    client.output_until("during=2");
+    assert!(
+        asked.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        asked.elapsed()
+    );
+    // Every computer attached, including the one that attached meanwhile,
+    // is told; the build the holder moved to isn't moved to again, though
+    // it runs another program than the one the entry point names.
+    moved(client);
+    moved(air);
+    until(
+        || std::fs::read_to_string(&log).is_ok_and(|log| log.contains("holder-resume")),
+        "the move",
+    );
+    std::thread::sleep(Duration::from_millis(2500));
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        "holder-check\nholder-resume\n"
+    );
+    let mut again = holder.attach();
+    again.greeting();
+    again.input(b"echo after=$((1+1))\n");
+    again.output_until("after=2");
+    again.send(ClientMessage::End);
+}
+
+#[test]
+fn input_sent_before_a_mac_hears_its_holder_moves_reaches_the_shell() {
+    let server = Server::new();
+    let holder = server.start(SHELL);
+    let mut client = holder.attach();
+    client.greeting();
+    let pid = holder.record()["pid"].as_u64().unwrap();
+    let build = install_build(&server, &"e".repeat(64), None);
+    loop {
+        match client.next() {
+            Some(ServerMessage::Moving) => break,
+            Some(_) => {}
+            None => panic!("the holder closed without saying it moves"),
+        }
+    }
+    // Sent as if before the Mac read that: the holder still serves it.
+    client.input(b"echo inflight=$((1+1))\n");
+    client.stream.shutdown(std::net::Shutdown::Write).unwrap();
+    client.ended();
+    until(|| program_of(pid) == build, "the move");
+    let mut again = holder.attach();
+    let screen = again.greeting();
+    if !contains(&screen, "inflight=2") {
+        again.output_until("inflight=2");
+    }
+    again.send(ClientMessage::End);
+}
+
+#[test]
+fn the_computer_last_used_stays_active_when_its_holder_moves() {
+    let server = Server::new();
+    let holder = server.start(SHELL);
+    let mut studio = holder.attach_as("Studio");
+    studio.greeting();
+    let mut air = holder.attach_as("Air");
+    air.greeting();
+    // Both used, Air last.
+    studio.send(ClientMessage::Activate);
+    studio.active_until(true);
+    air.send(ClientMessage::Activate);
+    studio.active_until(false);
+    let pid = holder.record()["pid"].as_u64().unwrap();
+    upgrade(&server, pid, 'e');
+    moved(studio);
+    moved(air);
+    // Studio attaches last, which would make it lead had the holder
+    // forgotten Air was the one last used.
+    let mut air = holder.attach_as("Air");
+    air.greeting();
+    let mut studio = holder.attach_as("Studio");
+    studio.greeting();
+    assert_eq!(studio.active(), Some(false));
+    until(
+        || {
+            holder.record()["attached"]
+                .as_array()
+                .is_some_and(|attached| {
+                    attached.len() == 2
+                        && attached[0]["name"] == "Air"
+                        && attached[0]["active"] == true
+                })
+        },
+        "the record to list Air first, active",
+    );
+    studio.send(ClientMessage::End);
+}
+
+#[test]
+fn a_moved_holder_ignores_stray_signals_and_ends_its_shell_on_sigterm() {
+    let server = Server::new();
+    let holder = server.start(SHELL);
+    let mut client = holder.attach();
+    client.greeting();
+    let pid = holder.record()["pid"].as_u64().unwrap();
+    let build = upgrade(&server, pid, 'e');
+    moved(client);
+    let reaper = reapers(&holder.id);
+    assert_eq!(reaper.len(), 1);
+    assert_eq!(program_of(reaper[0] as u64), build);
+    let mut again = holder.attach();
+    again.greeting();
+    for signal in [
+        libc::SIGHUP,
+        libc::SIGQUIT,
+        libc::SIGTSTP,
+        libc::SIGUSR1,
+        libc::SIGUSR2,
+        libc::SIGPIPE,
+    ] {
+        send_signal(holder.pid(), signal);
+        send_signal(reaper[0], signal);
+    }
+    again.input(b"echo still-$((40 + 2))\n");
+    again.output_until("still-42");
+    send_signal(holder.pid(), libc::SIGTERM);
+    assert_eq!(again.exit(), Some(Exit::Signal(libc::SIGHUP as u32)));
+    until(|| holder.files().is_empty(), "the holder's files to go");
+    until(|| reapers(&holder.id).is_empty(), "the reaper to leave");
+}
+
+#[test]
+fn a_reaper_killed_after_an_upgrade_leaves_the_shell_and_its_exit_status() {
+    let server = Server::new();
+    let holder = server.start(SHELL);
+    let mut client = holder.attach();
+    client.greeting();
+    let pid = holder.record()["pid"].as_u64().unwrap();
+    upgrade(&server, pid, 'e');
+    moved(client);
+    let reaper = *tab_children(pid)
+        .iter()
+        .find(|&&child| {
+            std::fs::read(format!("/proc/{child}/cmdline"))
+                .is_ok_and(|command| String::from_utf8_lossy(&command).contains("reaper"))
+        })
+        .unwrap();
+    // SAFETY: kill takes scalar arguments; the pid is this test's reaper.
+    unsafe { libc::kill(reaper as libc::pid_t, libc::SIGKILL) };
+    let mut again = holder.attach();
+    again.greeting();
+    again.input(b"echo still=$((1+1))\n");
+    again.output_until("still=2");
+    again.input(b"exit 5\n");
+    assert_eq!(again.exit(), Some(Exit::Code(5)));
+}
+
+#[test]
+fn a_shell_flooding_output_moves_once_it_pauses_with_its_output_in_order() {
+    let server = Server::new();
+    let holder = server.start(SHELL);
+    let mut client = holder.attach();
+    client.greeting();
+    let stop = server.home.join("stop");
+    client.input(
+        format!(
+            "n=0; while [ ! -e {} ]; do n=$((n+1)); echo $n; done; echo flood-$((1+1))\n",
+            stop.display()
+        )
+        .as_bytes(),
+    );
+    client.output_until("1000\r\n");
+    let pid = holder.record()["pid"].as_u64().unwrap();
+    let build = install_build(&server, &"e".repeat(64), None);
+    // The holder waits for a pause, reading output meanwhile as a tab does.
+    let flooding = Instant::now();
+    while flooding.elapsed() < Duration::from_secs(2) {
+        assert!(!matches!(client.next(), Some(ServerMessage::Moving) | None));
+    }
+    assert_ne!(program_of(pid), build, "moved in the middle of the flood");
+    std::fs::write(&stop, "").unwrap();
+    moved(client);
+    until(|| program_of(pid) == build, "the move");
+    let mut again = holder.attach();
+    let screen = String::from_utf8_lossy(&again.greeting()).into_owned();
+    let screen = if screen.contains("flood-2") {
+        screen
+    } else {
+        screen + &again.output_until("flood-2")
+    };
+    // Every line on the screen follows the one before it.
+    let numbers: Vec<u64> = screen
+        .split(['\r', '\n'])
+        .filter_map(|line| line.trim().parse().ok())
+        .collect();
+    assert!(numbers.len() > 10, "{screen:?}");
+    assert!(
+        numbers.windows(2).all(|pair| pair[1] == pair[0] + 1),
+        "out of order: {numbers:?}"
+    );
+    again.input(b"echo answers=$((1+1))\n");
+    again.output_until("answers=2");
+    again.send(ClientMessage::End);
+}
+
+#[test]
+fn a_build_that_fails_its_dry_run_leaves_the_holder_as_it_is() {
+    let server = Server::new();
+    let holder = server.start(SHELL);
+    let mut client = holder.attach();
+    client.greeting();
+    let pid = holder.record()["pid"].as_u64().unwrap();
+    let before = program_of(pid);
+    let tries = server.home.join("tries");
+    install_build(
+        &server,
+        "c".repeat(64).as_str(),
+        Some(&format!(
+            "#!/bin/sh\necho \"$2\" >> {}\nexit 1\n",
+            tries.display()
+        )),
+    );
+    // Past the tick that tried it, and the next, which waits to try again.
+    std::thread::sleep(Duration::from_millis(2500));
+    assert_eq!(program_of(pid), before);
+    assert_eq!(std::fs::read_to_string(&tries).unwrap(), "holder-check\n");
+    client.input(b"echo still=$((1+1))\n");
+    client.output_until("still=2");
+    client.send(ClientMessage::End);
+}
+
+#[test]
+fn a_build_that_refuses_is_not_tried_again_and_a_later_one_is() {
+    let server = Server::new();
+    let holder = server.start(SHELL);
+    let mut client = holder.attach();
+    client.greeting();
+    let pid = holder.record()["pid"].as_u64().unwrap();
+    let before = program_of(pid);
+    let tries = server.home.join("tries");
+    // A build that can't read this one's handoff, as a newer one may not.
+    install_build(
+        &server,
+        "r".repeat(64).as_str(),
+        Some(&format!(
+            "#!/bin/sh\necho \"$2\" >> {}\nexit 78\n",
+            tries.display()
+        )),
+    );
+    std::thread::sleep(Duration::from_millis(2500));
+    assert_eq!(program_of(pid), before);
+    assert_eq!(std::fs::read_to_string(&tries).unwrap(), "holder-check\n");
+    client.input(b"echo still=$((1+1))\n");
+    client.output_until("still=2");
+    upgrade(&server, pid, 'g');
+    moved(client);
+    let mut again = holder.attach();
+    again.greeting();
+    again.input(b"echo after=$((1+1))\n");
+    again.output_until("after=2");
+    again.send(ClientMessage::End);
+}
+
+#[test]
 fn the_status_producer_finds_its_reports_supported() {
     let server = Server::new();
     let producer = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -683,17 +1560,22 @@ fn send_signal(pid: libc::pid_t, signal: libc::c_int) {
     );
 }
 
-/// The running reapers of the terminal `id`.
+/// The running reapers of the terminal `id`, as started or moved.
 fn reapers(id: &str) -> Vec<libc::pid_t> {
-    let needle = format!("terminal\0reaper\0{id}\0");
+    let names = [
+        format!("terminal\0reaper\0{id}\0"),
+        format!("terminal\0reaper-resume\0{id}\0"),
+    ];
     std::fs::read_dir("/proc")
         .unwrap()
         .flatten()
         .filter_map(|entry| entry.file_name().to_str()?.parse::<libc::pid_t>().ok())
         .filter(|&pid| {
             alive(pid)
-                && std::fs::read(format!("/proc/{pid}/cmdline"))
-                    .is_ok_and(|line| String::from_utf8_lossy(&line).contains(&needle))
+                && std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|line| {
+                    let line = String::from_utf8_lossy(&line);
+                    names.iter().any(|name| line.contains(name))
+                })
         })
         .collect()
 }

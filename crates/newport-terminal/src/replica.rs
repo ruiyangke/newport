@@ -70,6 +70,18 @@ impl Replica {
         Ok(effects)
     }
 
+    /// Picks up where a replica saved as `snapshot` (its full [`Snapshot`])
+    /// left off, as a holder that replaced its own program does: the screen,
+    /// what history fits, modes, title and programs' reports, and whether the
+    /// shell had prompted.
+    pub fn resume(columns: u16, rows: u16, snapshot: &[u8], prompted: bool) -> Result<Self> {
+        let mut replica = Self::new(columns, rows)?;
+        replica.title = replica.engine.restore(snapshot)?.title.flatten();
+        replica.prompted = prompted;
+        replica.spill();
+        Ok(replica)
+    }
+
     /// Whether the shell has turned bracketed paste on at a prompt, so its
     /// being off means a command is running. A tab tells running commands
     /// apart this way, and a restored tab never saw the prompt itself.
@@ -89,6 +101,42 @@ impl Replica {
             .program_statuses()
             .most_urgent()
             .map(crate::ProgramStatus::report)
+    }
+
+    /// Turns off what a program turned on to read input its own way: mouse
+    /// and focus reporting, xterm's modified keys and the kitty keyboard
+    /// flags. A program that is killed can't turn them off itself, and the
+    /// shell after it would read every report as typed text. Returns the
+    /// bytes that turned them off, for the terminal's other copies, when any
+    /// was on.
+    pub fn release_input(&mut self) -> Option<&'static [u8]> {
+        const RELEASE: &[u8] = concat!(
+            "\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l",
+            "\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l",
+            // xterm's modified keys back to its default, then the kitty
+            // flags: popping past the end of the stack empties it.
+            "\x1b[>4m\x1b[<99u",
+        )
+        .as_bytes();
+        let mode = *self.engine.terminal.mode();
+        let modes = &self.engine.extensions.modes;
+        let reporting = mode.intersects(
+            TermMode::MOUSE_REPORT_CLICK
+                | TermMode::MOUSE_DRAG
+                | TermMode::MOUSE_MOTION
+                | TermMode::FOCUS_IN_OUT
+                | TermMode::UTF8_MOUSE
+                | TermMode::SGR_MOUSE,
+        ) || modes.x10_mouse
+            || modes.urxvt_mouse
+            || modes.pixel_mouse
+            || modes.modify_other_keys != 0
+            || crate::snapshot::kitty_flags(mode) != 0;
+        if !reporting {
+            return None;
+        }
+        self.engine.advance(RELEASE).ok()?;
+        Some(RELEASE)
     }
 
     /// The colours the program's colour queries are answered with: those of
@@ -153,8 +201,10 @@ impl Replica {
                 snapshot::write_grid(&mut rows, engine.terminal.grid());
                 let mut cursor = String::new();
                 snapshot::write_active_cursor(&mut cursor, &engine.terminal, &engine.extensions);
+                // Swapping screens swaps keyboard flags too.
+                let kitty = snapshot::kitty_flags(*engine.terminal.mode());
                 engine.terminal.swap_alt();
-                (rows, cursor)
+                (rows, cursor, kitty)
             });
         // The grid's history, written aside rather than moved: a client
         // restored from this snapshot keeps it in its grid, and growing the
@@ -166,12 +216,14 @@ impl Replica {
             &mut screen,
             &engine.terminal,
             &engine.extensions,
-            alternate.as_ref().map(|(rows, _)| rows.as_str()),
+            alternate
+                .as_ref()
+                .map(|(rows, _, kitty)| (rows.as_str(), *kitty)),
             self.title.as_deref(),
             &engine.program_statuses,
         );
         match &alternate {
-            Some((rows, cursor)) => {
+            Some((rows, cursor, _)) => {
                 screen.push_str(cursor);
                 // Swapping back would clear the alternate screen; replaying
                 // it restores the replica, entered as the program entered it.
@@ -490,6 +542,88 @@ mod tests {
             24,
             b"\x1b[5;10H\x1b7\x1b[1;1Htop\x1b[1;31m",
             b"red\x1b8saved",
+        );
+    }
+
+    #[test]
+    fn resumes_from_its_own_snapshot() {
+        let mut run = run(
+            80,
+            24,
+            b"\x1b]2;dev@host\x07$ ls\r\nCargo.toml\r\n\x1b[?2004h$ ",
+        );
+        let program = b"\x1b[?2004l\x1b[?1049h\x1b[>3u\x1b[?1003hfull screen";
+        run.truth.advance(program).unwrap();
+        run.replica.advance(program).unwrap();
+        let snapshot = run.replica.snapshot().full;
+        let mut resumed = Replica::resume(80, 24, &snapshot, run.replica.prompted()).unwrap();
+        assert_same(&resumed.engine, &run.truth, "resumed");
+        assert_eq!(resumed.title(), Some("dev@host"));
+        assert!(resumed.prompted());
+        // It goes on as the replica it replaces would.
+        let after = b"\x1b[<u\x1b[?1003l\x1b[?1049l$ ";
+        run.truth.advance(after).unwrap();
+        resumed.advance(after).unwrap();
+        assert_same(&resumed.engine, &run.truth, "after more output");
+    }
+
+    #[test]
+    fn restores_each_screens_keyboard_flags() {
+        let flags = |engine: &Engine| engine.kitty_keyboard_flags().unwrap();
+        // The shell pushed flags, then a full-screen program pushed its own.
+        let mut run = run(80, 24, b"$ \x1b[>1u\x1b[?1049h\x1b[>3u\x1b[?1003h");
+        let (mut full, mut screen, _) = restored(&mut run);
+        for restored in [&full, &screen] {
+            assert_eq!(flags(restored), flags(&run.truth), "the program's flags");
+        }
+        // Leaving the alternate screen brings back the shell's.
+        let exit = b"\x1b[<u\x1b[?1003l\x1b[?1049l";
+        for engine in [&mut run.truth, &mut full, &mut screen] {
+            engine.advance(exit).unwrap();
+        }
+        assert_eq!(flags(&run.truth), crate::KittyKeyFlags::DISAMBIGUATE);
+        for restored in [&full, &screen] {
+            assert_eq!(flags(restored), flags(&run.truth), "the shell's flags");
+        }
+    }
+
+    #[test]
+    fn a_program_that_was_killed_leaves_no_input_reporting_behind() {
+        let mut replica = Replica::new(80, 24).unwrap();
+        assert_eq!(replica.release_input(), None, "nothing to turn off");
+        // What crossterm turns on for a TUI, as Codex has it.
+        let left = concat!(
+            "\x1b[>11u\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h",
+            "\x1b[?1004h\x1b[>4;2m\x1b[?9h\x1b[?1016h",
+        );
+        replica.advance(left.as_bytes()).unwrap();
+        // A tab following the same output turns them off with the bytes.
+        let mut tab = Engine::new(80, 24).unwrap();
+        tab.advance(left.as_bytes()).unwrap();
+        let release = replica.release_input().expect("modes were on");
+        tab.advance(release).unwrap();
+        for engine in [&replica.engine, &tab] {
+            let mode = *engine.terminal.mode();
+            assert!(
+                !mode.intersects(
+                    TermMode::MOUSE_MODE | TermMode::FOCUS_IN_OUT | TermMode::SGR_MOUSE
+                )
+            );
+            assert_eq!(crate::snapshot::kitty_flags(mode), 0);
+            let modes = &engine.extensions.modes;
+            assert!(!modes.x10_mouse && !modes.urxvt_mouse && !modes.pixel_mouse);
+            assert_eq!(modes.modify_other_keys, 0);
+        }
+        assert_eq!(replica.release_input(), None, "already off");
+        // Bracketed paste is the shell's own, and stays.
+        replica.advance(b"\x1b[?2004h\x1b[?1000h").unwrap();
+        replica.release_input().unwrap();
+        assert!(
+            replica
+                .engine
+                .terminal
+                .mode()
+                .contains(TermMode::BRACKETED_PASTE)
         );
     }
 

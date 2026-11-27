@@ -30,7 +30,7 @@ fn ready(session: &Session) -> Result<(), String> {
 #[ignore = "child process helper for the explicitly opted-in lifecycle test"]
 fn terminal_lease_child() -> Result<(), String> {
     let server = std::env::var("NEWPORT_TEST_LEASE_SERVER").map_err(|e| e.to_string())?;
-    let session = Session::open(&server, 80, 24, None)?;
+    let session = Session::open(&server, uuid::Uuid::new_v4(), 80, 24, None)?;
     ready(&session)?;
     println!("LEASE_READY {}", session.id());
     std::io::stdout().flush().unwrap();
@@ -69,7 +69,7 @@ fn crashed_native_clients_release_ptys_without_closing_other_sessions() -> Resul
     }
     let server = matching[0].id.to_string();
     let server = server.as_str();
-    let survivor = Session::open(server, 80, 24, None)?;
+    let survivor = Session::open(server, uuid::Uuid::new_v4(), 80, 24, None)?;
     ready(&survivor)?;
     // Exceeds the backend's eight-session cap without touching existing PTYs.
     for round in 0..12 {
@@ -118,13 +118,14 @@ fn crashed_native_clients_release_ptys_without_closing_other_sessions() -> Resul
                         attach: false,
                         colors: None,
                         directory: None,
+                        attachment: uuid::Uuid::new_v4(),
                     })),
                     Duration::from_secs(10),
                 )
                 .map_err(|error| error.to_string())
             {
                 Ok(_lease) => break,
-                Err(error) if error == "Terminal session already exists." => {}
+                Err(error) if error == "Another tab has this terminal open." => {}
                 Err(error) => return Err(error),
             }
             if Instant::now() >= deadline {

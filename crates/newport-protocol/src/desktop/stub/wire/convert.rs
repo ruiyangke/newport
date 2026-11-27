@@ -144,6 +144,7 @@ fn window_state_to(value: &WindowState) -> pb::WindowState {
         }),
         title: Some(value.title.clone()),
         activate: Some(activate_to(value.activate)),
+        minimized: Some(value.minimized),
     }
 }
 fn window_state_from(value: pb::WindowState) -> Result<WindowState, Error> {
@@ -162,6 +163,7 @@ fn window_state_from(value: pb::WindowState) -> Result<WindowState, Error> {
     let max = value.max;
     let title = required(value.title)?;
     let activate = required(value.activate)?;
+    let minimized = required(value.minimized)?;
     Ok(WindowState {
         window,
         generation,
@@ -186,6 +188,7 @@ fn window_state_from(value: pb::WindowState) -> Result<WindowState, Error> {
             .transpose()?,
         title,
         activate: activate_from(activate)?,
+        minimized,
     })
 }
 pub(super) fn to_host_to(value: &ToHost) -> pb::HostFrame {

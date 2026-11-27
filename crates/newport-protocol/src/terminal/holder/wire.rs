@@ -199,6 +199,7 @@ pub fn encode_server(message: &ServerMessage) -> Result<Vec<u8>, Error> {
             columns: u32::from(*columns),
             rows: u32::from(*rows),
         }),
+        ServerMessage::Moving => M::Moving(protobuf::Present {}),
     };
     encode(
         &pb::ServerFrame {
@@ -234,6 +235,7 @@ pub fn decode_server(body: Bytes) -> Result<ServerMessage, Error> {
             let (columns, rows) = size(value)?;
             ServerMessage::Size { columns, rows }
         }
+        M::Moving(_) => ServerMessage::Moving,
     };
     message.validate()?;
     Ok(message)

@@ -122,6 +122,10 @@ fn product_identity_fences_activation_and_requires_explicit_downgrade() {
         .success()
     );
     assert_eq!(std::fs::read_link(&active).unwrap(), full_path);
+    // The build the install replaced goes at once: a desktop that still
+    // wants it stages it again first.
+    assert!(!core_path.exists());
+    let core_path = stage(core, &core_id);
     let helpers = install(
         &core_path,
         &core_id,

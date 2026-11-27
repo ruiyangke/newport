@@ -17,6 +17,9 @@ message TerminalOpenArgs {
   // The absolute folder a new shell starts in. Attaching keeps the held
   // shell's own.
   optional string directory = 8;
+  // The tab asking: its own new open replaces its earlier one, while
+  // another tab's open of the same session is refused.
+  optional string attachment = 9;
 }
 
 message CommandOpenArgs {

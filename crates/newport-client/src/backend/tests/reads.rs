@@ -61,6 +61,7 @@ fn terminal_open() -> stream::Operation {
         attach: false,
         colors: None,
         directory: None,
+        attachment: uuid::Uuid::from_u128(9),
     }))
 }
 fn opened(peer: &mut Peer) {

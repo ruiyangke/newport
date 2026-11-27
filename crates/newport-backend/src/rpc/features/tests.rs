@@ -335,6 +335,7 @@ async fn native_feature_routes_preserve_validation_before_any_remote_action() {
                         attach: false,
                         colors: None,
                         directory: None,
+                        attachment: uuid::Uuid::from_u128(9),
                     },
                 )),
                 Duration::from_secs(3),

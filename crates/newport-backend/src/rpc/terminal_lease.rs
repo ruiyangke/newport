@@ -510,6 +510,7 @@ mod tests {
                     attach: false,
                     colors: None,
                     directory: None,
+                    attachment: uuid::Uuid::from_u128(9),
                 },
             )))),
         };

@@ -84,6 +84,9 @@ pub enum Event {
         columns: u16,
         rows: u16,
     },
+    /// Nothing was opened: this computer already has the tab open, in
+    /// another tab, or in this one's earlier attachment still letting go.
+    AlreadyOpen,
 }
 impl From<TerminalEvent> for Event {
     fn from(event: TerminalEvent) -> Self {
@@ -108,16 +111,56 @@ impl From<TerminalEvent> for Event {
     }
 }
 
+/// Why an open opened nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Refusal {
+    /// Another tab has the terminal open.
+    AlreadyOpen,
+    /// A passing failure: the server may still hold the shell.
+    Passing(String),
+    Failed(String),
+}
+impl Refusal {
+    fn of(code: &str, retry: newport_protocol::common::Retry, message: String) -> Self {
+        if code == newport_protocol::terminal::ALREADY_OPEN {
+            Self::AlreadyOpen
+        } else if retry == newport_protocol::common::Retry::Yes {
+            Self::Passing(message)
+        } else {
+            Self::Failed(message)
+        }
+    }
+    /// What the tab hears. An attach that failed in passing tries again, as
+    /// after a lost stream; a new shell that failed is gone.
+    fn event(self, attach: bool) -> Event {
+        match self {
+            Self::AlreadyOpen => Event::AlreadyOpen,
+            Self::Passing(error) if attach => Event::Lost(error),
+            Self::Passing(error) | Self::Failed(error) => Event::Error(error),
+        }
+    }
+}
+impl From<String> for Refusal {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+impl From<&str> for Refusal {
+    fn from(error: &str) -> Self {
+        Self::Failed(error.into())
+    }
+}
+
 trait Lease: Send + Sync + 'static {
-    fn open(&self, args: stream::TerminalOpenArgs) -> Result<Opened, String>;
+    fn open(&self, args: stream::TerminalOpenArgs) -> Result<Opened, Refusal>;
 }
 impl Lease for Backend {
-    fn open(&self, args: stream::TerminalOpenArgs) -> Result<Opened, String> {
+    fn open(&self, args: stream::TerminalOpenArgs) -> Result<Opened, Refusal> {
         self.open(
             stream::Operation::TerminalOpen(Box::new(args)),
             Duration::from_secs(10),
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| Refusal::of(error.code(), error.retry(), error.to_string()))
     }
 }
 
@@ -292,20 +335,24 @@ pub struct Session {
 impl Session {
     /// A shell that starts in `directory`, or where the server's shells
     /// start without one.
+    /// `attachment` names the tab asking: its next open replaces this one.
     pub fn open(
         server: &str,
+        attachment: uuid::Uuid,
         columns: u16,
         rows: u16,
         directory: Option<String>,
     ) -> Result<Self, String> {
         let backend = Arc::new(Backend::discover());
-        Self::start(backend, server, Hold::No, columns, rows, directory)
+        let size = (columns, rows);
+        Self::start(backend, server, attachment, Hold::No, size, directory)
     }
 
     /// A shell the server holds apart from this session where it can, so
     /// dropping the session detaches from it; [`Event::Persistent`] says so.
     pub fn open_held(
         server: &str,
+        attachment: uuid::Uuid,
         columns: u16,
         rows: u16,
         colors: Colors,
@@ -313,27 +360,29 @@ impl Session {
     ) -> Result<Self, String> {
         let backend = Arc::new(Backend::discover());
         let hold = Hold::WhenAvailable(colors);
-        Self::start(backend, server, hold, columns, rows, directory)
+        Self::start(
+            backend,
+            server,
+            attachment,
+            hold,
+            (columns, rows),
+            directory,
+        )
     }
 
     /// Attaches to the held shell of terminal `id`, never starting a new one;
     /// [`Event::Ended`] says it is gone.
     pub fn attach(
         server: &str,
+        attachment: uuid::Uuid,
         id: uuid::Uuid,
         columns: u16,
         rows: u16,
         colors: Colors,
     ) -> Result<Self, String> {
         let backend = Arc::new(Backend::discover());
-        Self::start(
-            backend,
-            server,
-            Hold::Attach(id, colors),
-            columns,
-            rows,
-            None,
-        )
+        let hold = Hold::Attach(id, colors);
+        Self::start(backend, server, attachment, hold, (columns, rows), None)
     }
 
     /// Open against an explicitly owned backend without changing process-wide
@@ -344,15 +393,17 @@ impl Session {
         columns: u16,
         rows: u16,
     ) -> Result<Self, String> {
-        Self::start(Arc::new(backend), server, Hold::No, columns, rows, None)
+        let attachment = uuid::Uuid::new_v4();
+        let size = (columns, rows);
+        Self::start(Arc::new(backend), server, attachment, Hold::No, size, None)
     }
 
     fn start(
         lease: Arc<dyn Lease>,
         server: &str,
+        attachment: uuid::Uuid,
         hold: Hold,
-        columns: u16,
-        rows: u16,
+        (columns, rows): (u16, u16),
         directory: Option<String>,
     ) -> Result<Self, String> {
         dimensions(columns, rows)?;
@@ -368,6 +419,7 @@ impl Session {
         let lifecycle = Arc::new(Lifecycle::default());
         let state = lifecycle.clone();
         let closer = outgoing.clone();
+        let attach = matches!(hold, Hold::Attach(..));
         thread::spawn(move || {
             // The backend joins the server's shared display when it can; the
             // shell never waits for it and never fails because of it.
@@ -377,9 +429,10 @@ impl Session {
                 columns,
                 rows,
                 persist: matches!(hold, Hold::WhenAvailable(_)),
-                attach: matches!(hold, Hold::Attach(..)),
+                attach,
                 colors,
                 directory,
+                attachment,
             };
             let opened = lease.open(request).and_then(|opened| {
                 let cancellation = opened
@@ -398,8 +451,8 @@ impl Session {
             });
             let Opened { reader, writer, .. } = match opened {
                 Ok(opened) => opened,
-                Err(error) => {
-                    events.push(Event::Error(error));
+                Err(refusal) => {
+                    events.push(refusal.event(attach));
                     state.stopped.store(true, Ordering::Release);
                     events.finish();
                     return;
@@ -492,7 +545,13 @@ impl Session {
                     Some(Event::Data(bytes)) => {
                         self.acknowledge(bytes.len() as u64);
                     }
-                    Some(Event::Exit(_) | Event::Error(_) | Event::Lost(_) | Event::Ended)
+                    Some(
+                        Event::Exit(_)
+                        | Event::Error(_)
+                        | Event::Lost(_)
+                        | Event::Ended
+                        | Event::AlreadyOpen,
+                    )
                     | None => break,
                     Some(_) => {}
                 }

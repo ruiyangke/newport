@@ -71,6 +71,9 @@ pub enum ServerMessage {
         columns: u16,
         rows: u16,
     },
+    /// The holder is moving to a new build and closes the connection; the
+    /// same shell takes an attach again at once, with its screen.
+    Moving,
 }
 impl fmt::Debug for ClientMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -117,6 +120,7 @@ impl fmt::Debug for ServerMessage {
                 .field("columns", columns)
                 .field("rows", rows)
                 .finish(),
+            Self::Moving => f.write_str("Moving"),
         }
     }
 }

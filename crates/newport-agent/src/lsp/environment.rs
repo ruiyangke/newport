@@ -287,7 +287,7 @@ impl Shell {
 /// Falls back to this process's own environment.
 pub(super) fn login_environment(root: &Path) -> Vars {
     let fallback = || std::env::vars().collect::<Vars>();
-    let Ok(needle) = std::env::current_exe() else {
+    let Ok(needle) = crate::paths::own_program() else {
         return fallback();
     };
     let shell = std::env::var("SHELL")

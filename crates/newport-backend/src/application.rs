@@ -302,11 +302,12 @@ impl<H: DesktopCommands> rpc::Host for Host<H> {
             self.state.desktop.clone(),
         )
         .await;
-        let io = self
+        let (io, lease) = self
             .state
             .terminals
             .open_bound_shell(
                 request.session,
+                request.attachment,
                 server,
                 (u32::from(request.columns), u32::from(request.rows)),
                 owner,
@@ -322,12 +323,18 @@ impl<H: DesktopCommands> rpc::Host for Host<H> {
                     terminal::Hold::No
                 },
             )
-            .map_err(rpc::failure::operation)?;
+            .map_err(|error| match error {
+                terminal::OpenError::AlreadyOpen => {
+                    rpc::failure::terminal_already_open(error.to_string())
+                }
+                terminal::OpenError::Refused(reason) => rpc::failure::operation(reason),
+            })?;
         Ok(rpc::TerminalChannel {
             io,
             guard: Box::new(TerminalLease {
                 state: self.state.clone(),
                 session: request.session,
+                lease,
             }),
         })
     }
@@ -410,10 +417,11 @@ impl<H: DesktopCommands> rpc::Host for Host<H> {
 struct TerminalLease {
     state: Arc<State>,
     session: uuid::Uuid,
+    lease: terminal::Lease,
 }
 impl Drop for TerminalLease {
     fn drop(&mut self) {
-        self.state.terminals.cancel(self.session);
+        self.state.terminals.cancel(self.session, self.lease);
     }
 }
 

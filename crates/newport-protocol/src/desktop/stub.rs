@@ -89,6 +89,9 @@ pub struct WindowState {
     pub max: Option<[u32; 2]>,
     pub title: String,
     pub activate: Activate,
+    /// The remote window is minimized: the Mac window goes to the Dock with
+    /// its first frame instead of opening.
+    pub minimized: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

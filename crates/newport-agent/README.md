@@ -209,13 +209,12 @@ workers keep their negotiated build. With `--unless-running`, the entry point
 stays on its build while a process runs that build, checked under the
 installation lock. `--keep-default` preserves the default regardless of running
 processes; both modes refresh owned helper links. The result's `active` field
-says whether the entry point is the new build. A runtime start marks its build
-folder as used. Afterwards, and
-when a runtime starts, builds are removed unless they are the active build, a
-process still runs them, an owned browser link references them, they were staged
-or started within the last hour, or
-they are one of the two most recently used of the rest and were used within
-30 days. On systems without `/proc`, no build is removed. Journals that older Needle versions kept are deleted.
+says whether the entry point is the new build. Afterwards, and when a runtime
+starts, every other build is removed at once, unless an owned browser link
+references it or it was staged within the last 10 minutes and never installed.
+Processes still running a removed build keep running it, since none starts its
+own program again by path once the build is gone, and held terminals move to
+the active build. Journals that older Needle versions kept are deleted.
 `~/.local/bin/newport-agent` is Newport's entry point: a plain file or a link
 anywhere else there, such as a Needle copied by hand, is replaced. Only a
 directory there stops the install.

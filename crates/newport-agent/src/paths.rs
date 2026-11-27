@@ -120,6 +120,55 @@ pub(crate) fn integration_display_path(value: &str) -> bool {
     }
 }
 
+/// This process's own program, to start it again: its path while its build is
+/// installed, so the child's command line names it, and once pruning removed
+/// the build, `/proc/<pid>/exe`, which still reaches the running file for as
+/// long as this process lives, as it does while a child it waits for starts.
+pub(crate) fn own_program() -> io::Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = fs::read_link("/proc/self/exe")?;
+        let installed = fs::metadata(&path).ok();
+        Ok(program_of(
+            path,
+            installed.as_ref(),
+            &fs::metadata("/proc/self/exe")?,
+            std::process::id(),
+        ))
+    }
+    #[cfg(not(target_os = "linux"))]
+    env::current_exe()
+}
+
+/// `path` while the file there is the `running` one, else the running file
+/// through process `pid`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn program_of(
+    path: PathBuf,
+    installed: Option<&fs::Metadata>,
+    running: &fs::Metadata,
+    pid: u32,
+) -> PathBuf {
+    match installed {
+        Some(file) if file.dev() == running.dev() && file.ino() == running.ino() => path,
+        _ => PathBuf::from(format!("/proc/{pid}/exe")),
+    }
+}
+
+/// Whether `path` is the program this process runs, also once its build was
+/// removed.
+pub(crate) fn is_own_program(path: &Path) -> bool {
+    let running = if cfg!(target_os = "linux") {
+        fs::metadata("/proc/self/exe")
+    } else {
+        env::current_exe().and_then(fs::metadata)
+    };
+    match (fs::metadata(path), running) {
+        (Ok(file), Ok(running)) => file.dev() == running.dev() && file.ino() == running.ino(),
+        _ => false,
+    }
+}
+
 pub fn root() -> io::Result<PathBuf> {
     let home =
         PathBuf::from(env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is required"))?);
@@ -147,6 +196,28 @@ pub fn private_write(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_program_is_started_by_its_path_until_its_build_is_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let (one, other) = (directory.path().join("one"), directory.path().join("other"));
+        std::fs::write(&one, "a").unwrap();
+        std::fs::write(&other, "b").unwrap();
+        let running = std::fs::metadata(&one).unwrap();
+        let installed = std::fs::metadata(&one).ok();
+        assert_eq!(
+            super::program_of(one.clone(), installed.as_ref(), &running, 7),
+            one
+        );
+        // Replaced by another build at the same path, or removed.
+        let replaced = std::fs::metadata(&other).ok();
+        let through_process = std::path::PathBuf::from("/proc/7/exe");
+        assert_eq!(
+            super::program_of(one.clone(), replaced.as_ref(), &running, 7),
+            through_process
+        );
+        assert_eq!(super::program_of(one, None, &running, 7), through_process);
+    }
+
     use super::*;
     #[test]
     fn private_directories_preserve_parents_and_refuse_links_or_public_state() {

@@ -5,6 +5,7 @@
 //! records the computer a plain terminal runs on, and `terminal display` names the
 //! account's display to its shell.
 mod display;
+pub(crate) mod handoff;
 mod holder;
 mod reaper;
 
@@ -116,8 +117,21 @@ impl Files {
     fn clipboard(&self) -> PathBuf {
         self.file("wl")
     }
+    /// What a holder hands the build it replaces its own program with.
+    fn handoff(&self) -> PathBuf {
+        self.file("handoff")
+    }
     fn remove(&self) {
-        for extension in ["sock", "json", "start", "lock", "wl", "wl.lock"] {
+        for extension in [
+            "sock",
+            "json",
+            "start",
+            "lock",
+            "wl",
+            "wl.lock",
+            "wl.handoff",
+            "handoff",
+        ] {
             let _ = fs::remove_file(self.file(extension));
         }
     }
@@ -941,11 +955,28 @@ fn watch(
     }
 }
 
+/// A dry run's outcome: a refusal exits with `handoff::REFUSED`, so the old
+/// build tells it from a failure it tries again.
+fn dry_run(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+            std::process::exit(handoff::REFUSED)
+        }
+        result => result,
+    }
+}
+
 /// `terminal <holder|reaper|attach|display|route> …`; `route <terminal> <mac-id>
 /// <name>` takes the name as `name_from_hex` reads it.
 pub fn run(args: &[String]) -> io::Result<()> {
     match args.first().map(String::as_str) {
         Some("holder") => holder::run(&args[1..]),
+        Some("holder-check") => dry_run(holder::check(&args[1..])),
+        Some("holder-resume") => holder::resume(&args[1..]),
+        Some("reaper-check") => dry_run(reaper::check(&args[1..])),
+        Some("reaper-resume") => reaper::resume(&args[1..]),
+        Some("display-check") => dry_run(crate::display::check(&args[1..])),
+        Some("display-resume") => crate::display::resume(&args[1..]),
         Some("reaper") => reaper::run(&args[1..]),
         Some("attach") if args.len() == 2 => attach(&valid_id(&args[1])?),
         Some("display") if args.len() == 1 => display::print(),

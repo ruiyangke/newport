@@ -355,6 +355,7 @@ fn a_terminal_opens_in_an_absolute_folder_checked_in_both_wire_directions() {
                 attach: false,
                 colors: None,
                 directory: directory.map(str::to_owned),
+                attachment: uuid::Uuid::from_u128(3),
             }),
         ))))
     };

@@ -106,6 +106,7 @@ fn server_shape(number: u32) -> Option<Shape> {
         8 => Error,
         9 => Rename,
         10 => Size,
+        11 => Empty,
         _ => return None,
     })
 }

@@ -25,6 +25,33 @@ use std::{
 
 pub struct OpenLink(pub String);
 impl EventEmitter<OpenLink> for TerminalView {}
+
+/// The tab each held shell belongs to, across this app's windows: a shell
+/// shows in one tab, as the backend lets one tab attach to it.
+#[derive(Default)]
+pub(crate) struct OpenShells(std::collections::HashMap<uuid::Uuid, WeakEntity<TerminalView>>);
+impl Global for OpenShells {}
+
+/// Whom `shell` belongs to: `Some(true)` the tab `me`, `Some(false)` another
+/// live tab, `None` no tab. `me` itself is never read, as it may be updating.
+fn belongs(shell: uuid::Uuid, me: Option<EntityId>, cx: &App) -> Option<bool> {
+    let view = cx.try_global::<OpenShells>()?.0.get(&shell)?.upgrade()?;
+    if Some(view.entity_id()) == me {
+        return Some(true);
+    }
+    view.read(cx).owns(shell).then_some(false)
+}
+
+/// As when Newport starts: no shell belongs to a tab yet.
+#[cfg(test)]
+pub(crate) fn forget_open_shells(cx: &mut App) {
+    cx.set_global(OpenShells::default());
+}
+
+/// Whether `shell` belongs to a live tab other than `me`.
+pub(crate) fn open_elsewhere(shell: uuid::Uuid, me: Option<EntityId>, cx: &App) -> bool {
+    belongs(shell, me, cx) == Some(false)
+}
 struct LinkPress {
     link: String,
     button: MouseButton,
@@ -77,6 +104,15 @@ const DRAFT_FALLBACK: Duration = Duration::from_secs(1);
 /// The longest pause before a held tab attaches again after losing its
 /// stream to the backend.
 const REATTACH_LIMIT: Duration = Duration::from_secs(30);
+
+/// Why a tab goes without ending a shell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Leaving {
+    /// Its shell belongs to another tab.
+    Duplicate,
+    /// The server no longer has its shell.
+    Gone,
+}
 /// How long one tick may spend on output before it lets the window draw and
 /// comes back for the rest.
 const TICK_TIME: Duration = Duration::from_millis(3);
@@ -137,8 +173,11 @@ pub struct TerminalView {
     /// Nudges this tab's tick when its shell's output arrives.
     wake: async_channel::Sender<()>,
     reattempts: u32,
-    /// Explicit End acknowledgement keeps the last tab as a visible outcome.
-    end_acknowledged: bool,
+    /// Names this tab to the backend: its next open of a terminal replaces
+    /// its last, which may still be letting go.
+    attachment: uuid::Uuid,
+    /// Set when the tab must go; its workspace removes it.
+    pub(crate) leaving: Option<Leaving>,
     /// Whether the holder last said this tab is its shell's active one: the
     /// one whose Mac someone last used it on, which alone takes a program's
     /// clipboard copy. Unknown until it says, for this tab's shell.
@@ -254,8 +293,9 @@ impl TerminalView {
             reattach: None,
             wake,
             reattempts: 0,
+            attachment: uuid::Uuid::new_v4(),
+            leaving: None,
             directory: None,
-            end_acknowledged: false,
             holder_active: None,
             activate_pending: false,
             shows_display: false,
@@ -429,12 +469,6 @@ impl TerminalView {
         }
         self.close();
     }
-    pub(crate) fn ended_remotely(&mut self) {
-        self.end_acknowledged = true;
-        self.held = None;
-        self.close();
-        self.status.ended();
-    }
     /// Only tabs Newport saves may outlive it; others' shells end with them.
     pub(crate) fn set_holdable(&mut self, holdable: bool) {
         self.holdable = holdable;
@@ -447,6 +481,32 @@ impl TerminalView {
     pub(crate) fn held(&self) -> Option<uuid::Uuid> {
         self.held
     }
+    /// The shell this tab shows, held or being started, attached or not.
+    fn terminal(&self) -> Option<uuid::Uuid> {
+        self.held.or(self.session_id())
+    }
+    /// `shell` belongs to this tab: from when the tab is given it, through
+    /// detaches and reconnects, until the tab leaves or the shell ends.
+    fn owns(&self, shell: uuid::Uuid) -> bool {
+        self.terminal() == Some(shell) && self.leaving.is_none()
+    }
+    /// Records that this tab's shell belongs to it, unless it belongs to
+    /// another tab already.
+    fn claim(&self, cx: &mut Context<Self>) {
+        let Some(shell) = self.terminal().filter(|_| self.leaving.is_none()) else {
+            return;
+        };
+        if belongs(shell, Some(cx.entity_id()), cx).is_some() {
+            return;
+        }
+        let me = cx.weak_entity();
+        cx.default_global::<OpenShells>().0.insert(shell, me);
+    }
+    fn leave(&mut self, why: Leaving, cx: &mut Context<Self>) {
+        self.leaving = Some(why);
+        self.close();
+        cx.notify();
+    }
     /// Attached to its held shell now, so the shell's exit or end reaches it.
     pub(crate) fn attached(&self) -> bool {
         self.held.is_some() && self.session.is_some()
@@ -454,7 +514,7 @@ impl TerminalView {
     /// Its shell had ended before this tab reached it, as when another Mac
     /// closed it while Newport was closed here: the tab has nothing to show.
     pub(crate) fn ended_unseen(&self) -> bool {
-        matches!(self.status.phase, Phase::Ended) && !self.status.started && !self.end_acknowledged
+        matches!(self.status.phase, Phase::Ended) && !self.status.started
     }
     #[cfg(test)]
     pub(crate) fn holdable(&self) -> bool {
@@ -468,11 +528,11 @@ impl TerminalView {
     pub(crate) fn receive_for_test(&mut self, event: Event) {
         self.receive(event);
     }
-    /// A tab for a held shell, listed or restored: it attaches to `held`
-    /// when it first opens.
-    pub(crate) fn attach_to(&mut self, held: uuid::Uuid) {
-        self.end_acknowledged = false;
+    /// A tab for a held shell, listed or restored: the shell is the tab's
+    /// from now, and the tab attaches to it when it first opens.
+    pub(crate) fn attach_to(&mut self, held: uuid::Uuid, cx: &mut Context<Self>) {
         self.held = Some(held);
+        self.claim(cx);
     }
     /// What the shell's agent reported, from the server's list, for a tab
     /// that hasn't attached yet. Returns whether the tab's mark changed.
@@ -543,7 +603,6 @@ impl TerminalView {
             .expect("valid terminal theme");
         self.title = "Terminal".into();
         self.status.reset_scope();
-        self.end_acknowledged = false;
         self.input_error = None;
         self.selecting = false;
         self.scroll_remainder = 0.;
@@ -571,12 +630,19 @@ impl TerminalView {
         self.holder_active = None;
         self.shows_display = false;
         let directory = self.directory.clone();
+        if let Some(held) = self.held
+            && open_elsewhere(held, Some(cx.entity_id()), cx)
+        {
+            self.leave(Leaving::Duplicate, cx);
+            return;
+        }
+        let (server, attachment) = (&self.server, self.attachment);
         let session = match self.held {
-            Some(held) => Session::attach(&self.server, held, columns, rows, colors),
+            Some(held) => Session::attach(server, attachment, held, columns, rows, colors),
             None if self.holdable => {
-                Session::open_held(&self.server, columns, rows, colors, directory)
+                Session::open_held(server, attachment, columns, rows, colors, directory)
             }
-            None => Session::open(&self.server, columns, rows, directory),
+            None => Session::open(server, attachment, columns, rows, directory),
         };
         match session {
             Ok(session) => {
@@ -588,6 +654,7 @@ impl TerminalView {
                     let _ = wake.try_send(());
                 });
                 self.session = Some(session);
+                self.claim(cx);
             }
             Err(error) => {
                 self.clear_input();
@@ -773,6 +840,16 @@ impl TerminalView {
             changed = true;
             self.receive(event);
         }
+        if self.leaving.is_some() {
+            // Its workspace removes it, shown or not.
+            cx.notify();
+        } else if self
+            .held
+            .is_some_and(|held| belongs(held, Some(cx.entity_id()), cx).is_none())
+        {
+            // Held since it started its shell.
+            self.claim(cx);
+        }
         self.report_focus();
         let result = self.engine.flush_expired();
         changed |= self.accept_effects(result);
@@ -936,11 +1013,20 @@ impl TerminalView {
             Event::Ended => {
                 self.observed_epoch = self.observed_epoch.wrapping_add(1);
                 self.observed_ready = false;
+                // Closed on the server, so closed here too.
+                self.leaving = Some(Leaving::Gone);
                 self.held = None;
                 self.not_held = None;
                 self.session = None;
                 self.status.ended();
                 self.clear_input();
+            }
+            Event::AlreadyOpen => {
+                self.observed_epoch = self.observed_epoch.wrapping_add(1);
+                self.observed_ready = false;
+                self.session = None;
+                self.clear_input();
+                self.leaving = Some(Leaving::Duplicate);
             }
             Event::Error(error) => {
                 self.observed_epoch = self.observed_epoch.wrapping_add(1);
@@ -2083,8 +2169,8 @@ mod tests {
         let lost = "Lost the terminal’s connection to Newport’s backend: closed";
         let view = fixture(cx);
         let held = uuid::Uuid::new_v4();
-        view.update(cx, |view, _| {
-            view.attach_to(held);
+        view.update(cx, |view, cx| {
+            view.attach_to(held, cx);
             let mut pauses = Vec::new();
             for _ in 0..7 {
                 let before = Instant::now();
@@ -2111,8 +2197,8 @@ mod tests {
     fn incompatible_attachment_failure_retains_the_held_identity(cx: &mut TestAppContext) {
         let view = fixture(cx);
         let held = uuid::Uuid::new_v4();
-        view.update(cx, |view, _| {
-            view.attach_to(held);
+        view.update(cx, |view, cx| {
+            view.attach_to(held, cx);
             view.receive(Event::Error(
                 "Close this terminal in its already-attached window, then reopen it.".into(),
             ));
@@ -2150,6 +2236,46 @@ mod tests {
             // Never render/open: these tests inspect delivery bytes without a PTY.
             cx.new(|cx| TerminalView::new("unconnected-fixture".into(), cx))
         })
+    }
+
+    #[gpui::test]
+    fn a_shell_belongs_to_the_tab_given_it_and_no_other_tab_opens_it(cx: &mut TestAppContext) {
+        let shell = uuid::Uuid::new_v4();
+        let first = fixture(cx);
+        // Given the shell, not yet attached, as a restored tab is.
+        first.update(cx, |first, cx| first.attach_to(shell, cx));
+        let second =
+            cx.update(|cx| cx.new(|cx| TerminalView::new("unconnected-fixture".into(), cx)));
+        second.update(cx, |second, cx| {
+            second.attach_to(shell, cx);
+            second.reconnect(cx);
+            assert_eq!(second.leaving, Some(super::Leaving::Duplicate));
+            assert!(second.session.is_none(), "it never opened the shell");
+        });
+        cx.update(|cx| {
+            assert!(super::open_elsewhere(shell, None, cx));
+            assert!(!super::open_elsewhere(shell, Some(first.entity_id()), cx));
+        });
+        // Once the first tab is gone, the shell is free for another.
+        drop(first);
+        cx.update(|cx| assert!(!super::open_elsewhere(shell, None, cx)));
+    }
+
+    #[gpui::test]
+    fn a_tab_leaves_when_another_has_its_terminal_or_the_server_ended_it(cx: &mut TestAppContext) {
+        let view = fixture(cx);
+        view.update(cx, |view, cx| {
+            view.attach_to(uuid::Uuid::new_v4(), cx);
+            view.receive(Event::AlreadyOpen);
+            assert_eq!(view.leaving, Some(super::Leaving::Duplicate));
+        });
+        let view = fixture(cx);
+        view.update(cx, |view, cx| {
+            view.attach_to(uuid::Uuid::new_v4(), cx);
+            view.receive(Event::Ended);
+            assert_eq!(view.leaving, Some(super::Leaving::Gone));
+            assert_eq!(view.held(), None);
+        });
     }
 
     #[gpui::test]

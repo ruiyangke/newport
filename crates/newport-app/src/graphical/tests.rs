@@ -214,3 +214,129 @@ fn invalid_license_is_rejected_before_a_factory_can_admit_remote_work() {
     );
     assert!(registry.0.clients.lock().unwrap().is_empty());
 }
+
+/// The failure a session records when its display's stream just ended.
+fn stream_ended() -> String {
+    let Err(error) = newport_protocol::remote_apps::wire::read_server(&mut [].as_slice()) else {
+        panic!("an empty stream read a message");
+    };
+    error.to_string()
+}
+
+#[test]
+fn a_display_that_restarts_or_lost_its_stream_attaches_again_and_others_end_as_before() {
+    let publication = || Publication {
+        state: watch::channel(backend::DriverState::Closed).0,
+        stopped: AtomicBool::new(false),
+        ending: AtomicBool::new(false),
+        presentation: watch::channel(()).0,
+        clipboard: Default::default(),
+    };
+    let activity = newport_remote_client::session_activity::Activity {
+        windows: 1,
+        applications: 1,
+        pending_launches: 0,
+    };
+    let restarting = backend::DriverState::Restarting;
+    // Moved to a new compositor: nothing it reports later changes that.
+    let display = publication();
+    display.publish(Ok(Some(activity)));
+    assert!(display.publish(Ok(None)));
+    display.finish(Some(SessionOutcome::Restarting));
+    assert_eq!(*display.state.borrow(), restarting);
+    for late in [
+        Ok(None),
+        Ok(Some(activity)),
+        Err("Remote output ended".to_owned()),
+    ] {
+        display.publish(late);
+        assert_eq!(*display.state.borrow(), restarting);
+    }
+    display.finish(Some(SessionOutcome::Failed("Remote output ended".into())));
+    assert_eq!(*display.state.borrow(), restarting);
+    display.stop();
+    assert_eq!(*display.state.borrow(), backend::DriverState::Closed);
+    // A stream that ended waits for the outcome, and attaches again when
+    // nothing else ended it.
+    let display = publication();
+    display.publish(Ok(Some(activity)));
+    assert!(display.publish(Err(stream_ended())));
+    assert!(matches!(
+        *display.state.borrow(),
+        backend::DriverState::Ready { .. }
+    ));
+    assert!(!display.publish(Ok(Some(activity))));
+    display.finish(Some(SessionOutcome::Failed(stream_ended())));
+    assert_eq!(*display.state.borrow(), restarting);
+    // The transport's own reason replaces the read error: that fails.
+    let display = publication();
+    display.publish(Ok(Some(activity)));
+    assert!(display.publish(Err(stream_ended())));
+    display.finish(Some(SessionOutcome::Failed(
+        "The agent exited with status 1".into(),
+    )));
+    assert_eq!(
+        *display.state.borrow(),
+        backend::DriverState::Failed("The agent exited with status 1".into())
+    );
+    // Other failures fail at once and stay failed.
+    let display = publication();
+    display.publish(Ok(Some(activity)));
+    assert!(!display.publish(Err("Remote output ended".into())));
+    display.finish(Some(SessionOutcome::Restarting));
+    assert_eq!(
+        *display.state.borrow(),
+        backend::DriverState::Failed("Remote output ended".into())
+    );
+    // A display that was never shown doesn't attach again.
+    let display = publication();
+    assert!(!display.publish(Err(stream_ended())));
+    assert_eq!(
+        *display.state.borrow(),
+        backend::DriverState::Failed(stream_ended())
+    );
+    let display = publication();
+    display.finish(Some(SessionOutcome::Restarting));
+    assert_eq!(*display.state.borrow(), backend::DriverState::Closed);
+    // Its stream ending fails it with that reason, as before.
+    let display = publication();
+    display.finish(Some(SessionOutcome::Failed(stream_ended())));
+    assert_eq!(
+        *display.state.borrow(),
+        backend::DriverState::Failed(stream_ended())
+    );
+    // A stop wins.
+    let display = publication();
+    display.publish(Ok(Some(activity)));
+    assert!(display.publish(Ok(None)));
+    display.stop();
+    display.finish(Some(SessionOutcome::Restarting));
+    assert_eq!(*display.state.borrow(), backend::DriverState::Closed);
+}
+
+#[test]
+fn a_display_attaching_again_registers_its_new_client_under_the_same_presentation() {
+    let old = identity();
+    let mut new = identity();
+    new.worker = "12345678-1234-1234-1234-123456789aaa".parse().unwrap();
+    assert_ne!(client_key(&old), client_key(&new));
+    assert_eq!(presentation_key(&old), presentation_key(&new));
+    let mut other = identity();
+    other.display_generation += 1;
+    assert_ne!(presentation_key(&old), presentation_key(&other));
+}
+
+#[test]
+fn a_display_that_could_not_attach_again_is_reported_to_presentation_once() {
+    let registry = Registry::default();
+    let mut changes = registry.observe_presentation();
+    changes.borrow_and_update();
+    let identity = identity();
+    registry.reattach_failed(display_key(identity.session, identity.display_generation));
+    assert!(changes.has_changed().unwrap());
+    assert_eq!(
+        registry.take_reattach_failures(),
+        vec![presentation_key(&identity)]
+    );
+    assert!(registry.take_reattach_failures().is_empty());
+}

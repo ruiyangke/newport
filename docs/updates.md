@@ -32,7 +32,7 @@ Restarting disconnects your sessions and cancels transfers. Terminal shells keep
 
 ## Keep every computer on the same version
 
-Newport keeps Needle, its helper on the server, up to date. It checks Needle when it connects and every hour while connected, and installs a new version when one is available.
+Newport keeps Needle, its helper on the server, up to date. It checks Needle when it connects and every hour while connected, and installs a new version when one is available. Terminal shells keep running through the update: each moves to the new version with its programs and screen, and its tabs carry on.
 
 In **Integrations**, the **Needle** row shows the version this connection uses:
 

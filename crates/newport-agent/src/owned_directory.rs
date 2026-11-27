@@ -91,6 +91,23 @@ impl Directory {
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
+    /// The marker's descriptor, whose shared lock is this owner's lease.
+    pub(crate) fn lease(&self) -> &File {
+        &self.lock
+    }
+    /// Takes over a directory another program of this process owned, with
+    /// its lease still held on `lease`, as across `exec`.
+    pub(crate) fn adopt(path: &Path, lease: File) -> io::Result<Self> {
+        let directory = Self {
+            path: path.into(),
+            identity: identity(&fs::symlink_metadata(path)?),
+            lock: lease,
+        };
+        if !directory.matches() {
+            return Err(io::Error::other("Needle directory changed during handoff"));
+        }
+        Ok(directory)
+    }
 }
 impl Drop for Directory {
     fn drop(&mut self) {

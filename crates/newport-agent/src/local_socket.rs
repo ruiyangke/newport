@@ -178,6 +178,25 @@ impl Endpoint {
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
+    /// The lock file's descriptor, whose exclusive lock is this owner's,
+    /// for a fixed path.
+    pub(crate) fn lock(&self) -> Option<&File> {
+        self._lock.as_ref().map(|lock| &lock.file)
+    }
+    /// Takes over a fixed-path socket another program of this process owned,
+    /// with its lock still held on `lock`, as across `exec`.
+    pub(crate) fn adopt(path: &Path, lock: File) -> io::Result<Self> {
+        let m = fs::symlink_metadata(path)?;
+        if !m.file_type().is_socket() || m.uid() != crate::paths::effective_uid() {
+            return Err(io::Error::other("invalid Wayland socket handoff"));
+        }
+        Ok(Self {
+            path: path.to_owned(),
+            identity: (m.dev(), m.ino()),
+            _lock: Some(Lock { file: lock }),
+            _temporary: None,
+        })
+    }
 }
 impl Drop for Endpoint {
     fn drop(&mut self) {

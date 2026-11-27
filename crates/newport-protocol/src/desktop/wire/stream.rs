@@ -20,6 +20,7 @@ impl Convert for crate::desktop::stream::TerminalOpenArgs {
                     })
                     .transpose()?,
                 directory: self.directory.clone(),
+                attachment: Some(self.attachment.to_string()),
             },
         )
     }
@@ -33,6 +34,7 @@ impl Convert for crate::desktop::stream::TerminalOpenArgs {
             attach: value.attach.unwrap_or(false),
             colors: value.colors.map(rgb3).transpose()?,
             directory: value.directory,
+            attachment: uuid(required(value.attachment)?)?,
         })
     }
 }

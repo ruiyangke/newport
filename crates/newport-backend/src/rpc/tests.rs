@@ -173,6 +173,7 @@ fn terminal() -> Operation {
             attach: false,
             colors: None,
             directory: None,
+            attachment: Uuid::new_v4(),
         },
     ))))
 }

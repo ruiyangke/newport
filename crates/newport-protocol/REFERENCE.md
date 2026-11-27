@@ -9023,6 +9023,7 @@ The normalized name was persisted by this control connection.
 | 8 | `error` | `newport.wire.Error` | oneof `message` |  |
 | 9 | `renamed` | `newport.terminal.holder.Renamed` | oneof `message` |  |
 | 10 | `size` | `newport.terminal.holder.Size` | oneof `message` | The shell's size, before the screen at attach and whenever it changes: every attached tab draws the shell at this size. |
+| 11 | `moving` | `newport.wire.Present` | oneof `message` | The holder is moving to a new build of Needle and closes this connection: the same shell takes an attach again at once. |
 
 ## Schema `newport/wire.proto`
 

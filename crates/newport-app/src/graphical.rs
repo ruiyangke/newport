@@ -26,7 +26,12 @@ mod license;
 #[derive(Clone)]
 pub struct Registry(Arc<RegistryState>);
 struct RegistryState {
+    /// By [`client_key`]: a display attaching again registers its new client
+    /// beside the old one, which may not be gone yet.
     clients: Mutex<BTreeMap<String, Weak<Driver>>>,
+    /// The displays, by presentation key, that restarted and couldn't
+    /// attach again, until presentation closes what waited for them.
+    reattach_failed: Mutex<std::collections::BTreeSet<String>>,
     closed: watch::Sender<bool>,
     presentation: watch::Sender<()>,
     clients_changed: watch::Sender<()>,
@@ -39,6 +44,7 @@ struct RegistryState {
 /// A short-lived UI attachment candidate. Backend demand owns its lifetime;
 /// callers must not retain this client while no presenter is attached.
 pub struct Presentation {
+    /// The display's, kept when it attaches again through a new client.
     pub key: String,
     pub connection: Arc<RemoteSession>,
     pub hud: bool,
@@ -74,6 +80,7 @@ impl Registry {
     pub fn new(clipboard: Option<Router>) -> Self {
         Self(Arc::new(RegistryState {
             clients: Mutex::new(BTreeMap::new()),
+            reattach_failed: Default::default(),
             closed: watch::channel(false).0,
             presentation: watch::channel(()).0,
             clients_changed: watch::channel(()).0,
@@ -180,6 +187,27 @@ impl Registry {
         let mut closed = self.0.closed.subscribe();
         let _ = closed.wait_for(|closed| *closed).await;
     }
+    /// The displays that restarted and couldn't attach again since asked
+    /// last, by presentation key.
+    pub fn take_reattach_failures(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .0
+                .reattach_failed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+        .into_iter()
+        .collect()
+    }
+    fn reattach_failed(&self, key: String) {
+        self.0
+            .reattach_failed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key);
+        self.recheck_presentation();
+    }
     pub fn presentation_candidates(&self) -> Vec<Presentation> {
         let clients = {
             let clients = self
@@ -199,13 +227,13 @@ impl Registry {
         // releasing a driver: its final drop stops the client and publishes.
         clients
             .into_iter()
-            .filter_map(|(key, client)| {
+            .filter_map(|(_, client)| {
                 let ready = matches!(
                     *client.publication.state.borrow(),
                     backend::DriverState::Ready { .. }
                 );
                 (ready && client.connection.presentation_pending()).then(|| Presentation {
-                    key,
+                    key: presentation_key(&client.identity),
                     connection: client.connection.clone(),
                     hud: client.hud,
                     server: client.server.clone(),
@@ -244,10 +272,7 @@ impl Registry {
             return Err("Application is closing".into());
         }
         clients.retain(|_, client| client.strong_count() != 0);
-        let key = format!(
-            "{}:{}",
-            driver.identity.session, driver.identity.display_generation
-        );
+        let key = client_key(&driver.identity);
         if clients.contains_key(&key) {
             return Err("Graphical display is already attached".into());
         }
@@ -260,6 +285,18 @@ impl Registry {
     }
 }
 
+/// A display as presenters know it: the same while it attaches again.
+fn presentation_key(identity: &backend::Identity) -> String {
+    display_key(identity.session, identity.display_generation)
+}
+fn display_key(session: uuid::Uuid, display_generation: u64) -> String {
+    format!("{session}:{display_generation}")
+}
+/// One client of a display: each attachment has its own worker.
+fn client_key(identity: &backend::Identity) -> String {
+    format!("{}:{}", presentation_key(identity), identity.worker)
+}
+
 struct Factory {
     registry: Registry,
     options: SessionOptions,
@@ -267,6 +304,10 @@ struct Factory {
     account: Option<license::Guard>,
 }
 impl backend::Factory for Factory {
+    fn reattach_failed(&self, session: uuid::Uuid, display_generation: u64) {
+        self.registry
+            .reattach_failed(display_key(session, display_generation));
+    }
     fn validate(&self) -> Result<(), String> {
         license::validate(self.account.as_ref())?;
         if self.registry.is_closed() {
@@ -528,17 +569,15 @@ impl Publication {
         let changed = self.state.send_if_modified(|state| {
             let next = if self.stopped.load(Ordering::Acquire) {
                 backend::DriverState::Closed
-            } else if matches!(
-                state,
-                backend::DriverState::Failed(_) | backend::DriverState::ShownElsewhere(_)
-            ) {
+            } else if ended(state) {
                 // A later shutdown notification must not erase the cause, and
                 // an obsolete activity update cannot revive a failed display.
                 return false;
             } else {
                 match activity {
-                    // Nothing revives a session that is ending.
-                    Ok(_) if self.ending.load(Ordering::Acquire) => return false,
+                    // Nothing revives a session that is ending, and only its
+                    // outcome says how it ended.
+                    _ if self.ending.load(Ordering::Acquire) => return false,
                     Ok(Some(activity)) => {
                         match activity.applications.checked_add(activity.pending_launches) {
                             Some(applications) => backend::DriverState::Ready {
@@ -559,6 +598,19 @@ impl Publication {
                         return false;
                     }
                     Ok(None) => backend::DriverState::Closed,
+                    // The display may only have lost its stream, and recover
+                    // its windows: the outcome says.
+                    Err(error)
+                        if matches!(state, backend::DriverState::Ready { .. })
+                            && SessionOutcome::Failed(error.clone()).ended_by_disconnect() =>
+                    {
+                        self.ending.store(true, Ordering::Release);
+                        ending = true;
+                        if let Some(clipboard) = self.clipboard.get() {
+                            clipboard.revoke();
+                        }
+                        return false;
+                    }
                     Err(error) => backend::DriverState::Failed(error),
                 }
             };
@@ -571,9 +623,14 @@ impl Publication {
         }
         ending
     }
-    /// How an ending session ended: shown on another computer, failed, or
-    /// closed, which is also what a session that never says becomes.
+    /// How an ending session ended: shown on another computer, moved to a
+    /// new compositor or lost its stream, which attaching again recovers,
+    /// failed, or closed, which is also what a session that never says
+    /// becomes.
     fn finish(&self, outcome: Option<SessionOutcome>) {
+        let outcome_restarts = outcome.as_ref().is_some_and(|outcome| {
+            *outcome == SessionOutcome::Restarting || outcome.ended_by_disconnect()
+        });
         let next = match outcome {
             Some(SessionOutcome::TakenOver(takeover)) => {
                 backend::DriverState::ShownElsewhere(backend::launch::ShownOn {
@@ -585,14 +642,15 @@ impl Publication {
             _ => backend::DriverState::Closed,
         };
         let changed = self.state.send_if_modified(|state| {
-            if self.stopped.load(Ordering::Acquire)
-                || matches!(
-                    state,
-                    backend::DriverState::Failed(_) | backend::DriverState::ShownElsewhere(_)
-                )
-            {
+            if self.stopped.load(Ordering::Acquire) || ended(state) {
                 return false;
             }
+            // Only a display that was shown attaches again; another ends as
+            // it would have.
+            let next = match (outcome_restarts, &*state) {
+                (true, backend::DriverState::Ready { .. }) => backend::DriverState::Restarting,
+                _ => next,
+            };
             self.replace(state, next)
         });
         if changed {
@@ -621,6 +679,16 @@ impl Publication {
         });
         self.presentation.send_replace(());
     }
+}
+/// The display ended here for good, or attaches again through another client:
+/// nothing this client reports later changes that.
+fn ended(state: &backend::DriverState) -> bool {
+    matches!(
+        state,
+        backend::DriverState::Failed(_)
+            | backend::DriverState::ShownElsewhere(_)
+            | backend::DriverState::Restarting
+    )
 }
 struct Driver {
     identity: backend::Identity,

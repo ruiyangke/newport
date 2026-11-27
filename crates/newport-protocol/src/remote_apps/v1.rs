@@ -37,6 +37,10 @@ pub const HELD_POINTER_REACH: i64 = 1 << 15;
 /// `Ended` reason: another computer took the stable display over, and
 /// `computer` names it when it gave a name.
 pub const ENDED_TAKEN_OVER: &str = "taken-over";
+/// `Ended` reason: the display is moving to a new compositor, with its
+/// windows and applications; its viewer attaches again at once, and finds
+/// its windows under the same identities.
+pub const ENDED_RESTARTING: &str = "restarting";
 /// The client sends `Heartbeat` this often; the agent ends a session it
 /// hasn't heard from for [`HEARTBEAT_TIMEOUT`], such as after the network
 /// dropped without closing the connection.
